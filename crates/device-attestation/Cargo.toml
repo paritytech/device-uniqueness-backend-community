@@ -103,7 +103,7 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 subxt-rpcs = { workspace = true, features = ["mock-rpc-client"] }
 # Synthetic Apple-style attestation cert chains for App Attest verify tests.
-rcgen = "0.13"
+rcgen = "0.14"
 
 [lints]
 workspace = true
