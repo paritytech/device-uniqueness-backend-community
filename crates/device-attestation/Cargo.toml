@@ -73,7 +73,7 @@ secrecy = "0.10"
 # CBOR envelope, X.509/ASN.1 parsing, ECDSA P-256/P-384, and RSA (the classic
 # Google key-attestation root is RSA).
 ciborium = "0.2"
-x509-parser = "0.17"
+x509-parser = "0.18"
 p256 = { version = "0.13", default-features = false, features = [
     "ecdsa",
     "std",
