@@ -39,7 +39,7 @@ anyhow.workspace = true
 serde_json.workspace = true
 # `/docs`: with no edge in front, the process file-serves the committed API
 # reference itself.
-tower-http = { version = "0.6", features = ["fs"] }
+tower-http = { version = "0.7", features = ["fs"] }
 
 # Types that appear in the moved bodies' signatures: the indexer's spent-puzzle
 # pruner takes a `PgPool`, its bootstrap stamps an `OffsetDateTime`, and
