@@ -1,0 +1,55 @@
+# gitleaks configuration for the public repo.
+#
+# Every entry below is a FALSE POSITIVE that was audited by hand before this
+# repository was published — synthetic key material, captured wire fixtures and
+# documentation placeholders that exist so the tests and the sample config can
+# stand alone. Nothing here is, or ever was, a live credential. The same list is
+# recorded, with reasons, in .publish-ack.yml.
+#
+# Add to this file only after confirming the same: that the match is test-only
+# material, not a secret that needs rotating.
+#
+# The singular `[allowlist]` table is used deliberately — the `[[allowlists]]`
+# array form is silently ignored by gitleaks < 8.19, which would make this file
+# look effective while suppressing nothing.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Audited test-only material and documentation placeholders."
+
+# `paths` and `regexes` are OR-ed: a finding is allowed if either matches.
+paths = [
+  # Captured HTTP wire fixtures. The JWTs in these are unsigned or signed with a
+  # throwaway HS256 key and asserted byte-for-byte; they authenticate nothing.
+  '''crates/.*/tests/fixtures/.*\.json''',
+  # Synthetic keypairs inside `#[cfg(test)] mod tests` blocks: a P-256 .p8 for
+  # APNs token signing, and a throwaway RSA key used to sign and then verify a
+  # fixture JWT.
+  '''crates/notifications/src/provider/apns\.rs''',
+  '''crates/notifications/src/provider/fcm\.rs''',
+  '''crates/device-attestation/src/auth/play_integrity/google\.rs''',
+  # Build output, if a scan is ever pointed at a dirty tree.
+  '''^target/''',
+]
+
+regexTarget = "match"
+regexes = [
+  # JWT_ED25519_PUBLIC_KEY — a PUBLIC verification key, matched by the generic
+  # high-entropy rule. It is the public half of the dev-only JWT_ED25519_SECRET
+  # documented alongside it, and is meant to be readable.
+  '''0x8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c''',
+  # The environment-variable NAME, appearing as a struct field in the config
+  # parser's error paths. A key's name is not the key.
+  '''key: "JWT_ED25519_SECRET"''',
+  # The commented-out FCM service-account template in .env.example, whose
+  # private_key field is the literal three dots.
+  '''PRIVATE KEY-----\\n\.\.\.\\n-----END PRIVATE KEY''',
+  # The dev TURN_SECRET in .env.example: base64 of the literal string
+  # "dev-only-turn-secret-change-me". turn-api refuses to boot on invalid
+  # base64, so the template ships a working value rather than a placeholder
+  # that crash-loops a fresh `docker compose up`. It is published on purpose,
+  # says so in the file, and authenticates against no real relay.
+  '''ZGV2LW9ubHktdHVybi1zZWNyZXQtY2hhbmdlLW1l''',
+]

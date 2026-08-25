@@ -1,0 +1,2704 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Device Uniqueness Backend API Reference</title>
+<style>
+:root{
+  --bg:#0b0e14;
+  --bg-2:#0f131a;
+  --bg-3:#13171f;
+  --panel:#11151d;
+  --panel-2:#0e1219;
+  --border:#1e2430;
+  --border-2:#262d3b;
+  --border-3:#323a4a;
+  --text:#e6e9ef;
+  --text-dim:#a4adc0;
+  --text-mute:#6b7589;
+  --text-faint:#4a5365;
+  --accent:#7dd3fc;
+  --accent-dim:#5b9bbf;
+  --green:#56d364;
+  --green-bg:rgba(86,211,100,0.10);
+  --yellow:#e3b341;
+  --yellow-bg:rgba(227,179,65,0.10);
+  --red:#f85149;
+  --red-bg:rgba(248,81,73,0.10);
+  --blue:#58a6ff;
+  --blue-bg:rgba(88,166,255,0.10);
+  --purple:#bc8cff;
+  --mono:'SF Mono','Menlo','Monaco','Consolas','Roboto Mono',ui-monospace,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;scroll-padding-top:24px}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:var(--sans);
+  font-size:14px;
+  line-height:1.55;
+  -webkit-font-smoothing:antialiased;
+  -moz-osx-font-smoothing:grayscale;
+  display:flex;
+  min-height:100vh;
+}
+::selection{background:rgba(125,211,252,0.25);color:#fff}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:var(--border-2);border-radius:5px;border:2px solid var(--bg)}
+::-webkit-scrollbar-thumb:hover{background:var(--border-3)}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* ---------- LAYOUT ---------- */
+.sidebar{
+  width:286px;
+  flex-shrink:0;
+  position:sticky;
+  top:0;
+  height:100vh;
+  overflow-y:auto;
+  background:var(--bg-2);
+  border-right:1px solid var(--border);
+  padding:0 0 24px;
+}
+.sidebar-inner{padding:20px 0 0}
+.brand{
+  padding:0 20px 16px;
+  border-bottom:1px solid var(--border);
+  margin-bottom:8px;
+}
+.brand-tag{
+  display:inline-block;
+  font-family:var(--mono);
+  font-size:10px;
+  color:var(--accent);
+  letter-spacing:0.08em;
+  text-transform:uppercase;
+  padding:2px 6px;
+  border:1px solid rgba(125,211,252,0.3);
+  border-radius:3px;
+  margin-bottom:8px;
+}
+.brand-title{
+  font-family:var(--mono);
+  font-size:13px;
+  font-weight:600;
+  color:var(--text);
+  letter-spacing:-0.01em;
+}
+.brand-sub{
+  font-family:var(--mono);
+  font-size:11px;
+  color:var(--text-mute);
+  margin-top:3px;
+}
+.nav-section{padding:8px 0 4px}
+.nav-section-title{
+  font-family:var(--mono);
+  font-size:10px;
+  font-weight:600;
+  letter-spacing:0.1em;
+  text-transform:uppercase;
+  color:var(--text-faint);
+  padding:8px 20px;
+}
+.nav-item{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:5px 20px;
+  font-family:var(--mono);
+  font-size:12px;
+  color:var(--text-dim);
+  text-decoration:none;
+  border-left:2px solid transparent;
+  transition:all 0.12s;
+}
+.nav-item:hover{
+  background:var(--bg-3);
+  color:var(--text);
+  text-decoration:none;
+}
+.nav-item.active{
+  color:var(--accent);
+  border-left-color:var(--accent);
+  background:rgba(125,211,252,0.06);
+}
+.nav-item .method-mini{
+  font-size:9px;
+  font-weight:700;
+  width:30px;
+  flex-shrink:0;
+  letter-spacing:0.05em;
+  color:var(--text-mute);
+}
+.nav-item.m-get .method-mini{color:var(--green)}
+.nav-item.m-post .method-mini{color:var(--yellow)}
+.nav-item.m-put .method-mini{color:var(--blue)}
+.nav-item.m-del .method-mini{color:var(--red)}
+.nav-item .path{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.main{
+  flex:1;
+  min-width:0;
+  padding:0 48px 80px;
+  max-width:100%;
+}
+.main-inner{
+  max-width:1080px;
+  margin:0 auto;
+}
+
+/* ---------- HERO ---------- */
+.hero{
+  padding:36px 0 24px;
+  border-bottom:1px solid var(--border);
+  margin-bottom:36px;
+}
+.hero-eyebrow{
+  font-family:var(--mono);
+  font-size:11px;
+  color:var(--accent);
+  letter-spacing:0.08em;
+  text-transform:uppercase;
+  margin-bottom:10px;
+}
+.hero h1{
+  font-family:var(--sans);
+  font-size:28px;
+  font-weight:700;
+  letter-spacing:-0.02em;
+  margin-bottom:6px;
+}
+.hero h1 .v{
+  font-family:var(--mono);
+  color:var(--accent);
+  font-weight:500;
+  font-size:24px;
+  margin-left:6px;
+}
+.hero p.sub{
+  font-size:15px;
+  color:var(--text-dim);
+  margin-bottom:20px;
+}
+.meta-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+  gap:1px;
+  background:var(--border);
+  border:1px solid var(--border);
+  border-radius:6px;
+  overflow:hidden;
+  margin-bottom:20px;
+}
+.meta-cell{
+  background:var(--bg-2);
+  padding:12px 14px;
+}
+.meta-label{
+  font-family:var(--mono);
+  font-size:10px;
+  color:var(--text-faint);
+  letter-spacing:0.08em;
+  text-transform:uppercase;
+  margin-bottom:4px;
+}
+.meta-value{
+  font-family:var(--mono);
+  font-size:12px;
+  color:var(--text);
+  word-break:break-all;
+}
+.meta-value.mono-small{font-size:11px}
+.meta-value .status-chip{
+  display:inline-block;
+  padding:1px 6px;
+  border-radius:3px;
+  font-size:10px;
+  font-weight:600;
+  background:var(--yellow-bg);
+  color:var(--yellow);
+  border:1px solid rgba(227,179,65,0.3);
+}
+
+.base-url-box{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:10px 14px;
+  background:var(--bg-2);
+  border:1px solid var(--border);
+  border-radius:6px;
+  font-family:var(--mono);
+  font-size:12px;
+}
+.base-url-box .label{
+  color:var(--text-faint);
+  font-size:10px;
+  letter-spacing:0.08em;
+  text-transform:uppercase;
+}
+.base-url-box .url{color:var(--accent);flex:1;word-break:break-all}
+.copy-btn{
+  font-family:var(--mono);
+  font-size:10px;
+  color:var(--text-dim);
+  background:var(--bg-3);
+  border:1px solid var(--border-2);
+  padding:3px 8px;
+  border-radius:3px;
+  cursor:pointer;
+  transition:all 0.12s;
+  user-select:none;
+}
+.copy-btn:hover{
+  color:var(--text);
+  border-color:var(--border-3);
+}
+.copy-btn.copied{
+  color:var(--green);
+  border-color:rgba(86,211,100,0.4);
+}
+
+/* ---------- WARNING ---------- */
+.warn-box{
+  display:flex;
+  gap:12px;
+  padding:14px 16px;
+  background:var(--yellow-bg);
+  border:1px solid rgba(227,179,65,0.25);
+  border-left:3px solid var(--yellow);
+  border-radius:4px;
+  margin-bottom:28px;
+  font-size:13px;
+}
+.warn-icon{
+  flex-shrink:0;
+  width:18px;
+  height:18px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-weight:700;
+  color:var(--yellow);
+  font-family:var(--mono);
+  font-size:14px;
+}
+.warn-text{color:var(--text-dim)}
+.warn-text strong{color:var(--yellow);font-weight:600}
+
+/* ---------- SECTIONS ---------- */
+.section{
+  margin-bottom:48px;
+  scroll-margin-top:20px;
+}
+.section-header{
+  display:flex;
+  align-items:baseline;
+  gap:12px;
+  margin-bottom:16px;
+  padding-bottom:10px;
+  border-bottom:1px solid var(--border);
+}
+.section-num{
+  font-family:var(--mono);
+  font-size:11px;
+  color:var(--text-faint);
+}
+.section h2{
+  font-family:var(--sans);
+  font-size:18px;
+  font-weight:600;
+  letter-spacing:-0.01em;
+}
+.section-anchor{
+  margin-left:auto;
+  font-family:var(--mono);
+  font-size:11px;
+  color:var(--text-faint);
+}
+.section-anchor:hover{color:var(--accent);text-decoration:none}
+
+.section p.lead{
+  color:var(--text-dim);
+  font-size:13px;
+  margin-bottom:14px;
+}
+
+/* ---------- FLOW ---------- */
+.flow-list{
+  list-style:none;
+  counter-reset:flow;
+  margin:8px 0 14px;
+  padding:14px 16px;
+  background:var(--bg-2);
+  border:1px solid var(--border);
+  border-radius:6px;
+}
+.flow-list li{
+  counter-increment:flow;
+  display:flex;
+  align-items:center;
+  gap:12px;
+  padding:5px 0;
+  font-family:var(--mono);
+  font-size:12px;
+  color:var(--text-dim);
+}
+.flow-list li::before{
+  content:counter(flow);
+  flex-shrink:0;
+  width:20px;
+  height:20px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  background:var(--bg-3);
+  border:1px solid var(--border-2);
+  border-radius:50%;
+  color:var(--accent);
+  font-size:11px;
+  font-weight:600;
+}
+.flow-note{
+  padding:12px 14px;
+  background:rgba(88,166,255,0.06);
+  border:1px solid rgba(88,166,255,0.2);
+  border-left:3px solid var(--blue);
+  border-radius:4px;
+  font-size:12px;
+  color:var(--text-dim);
+}
+.flow-note code{
+  font-family:var(--mono);
+  background:var(--bg-3);
+  padding:1px 5px;
+  border-radius:3px;
+  font-size:11px;
+  color:var(--accent);
+}
+
+/* ---------- ENDPOINT ---------- */
+.endpoint{
+  margin-bottom:32px;
+  scroll-margin-top:20px;
+  background:var(--panel);
+  border:1px solid var(--border);
+  border-radius:6px;
+  overflow:hidden;
+}
+.endpoint-head{
+  padding:14px 18px;
+  border-bottom:1px solid var(--border);
+  background:var(--bg-2);
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:10px;
+}
+.endpoint-title{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  flex-wrap:wrap;
+  flex:1;
+  min-width:0;
+}
+.method-badge{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  font-family:var(--mono);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:0.06em;
+  padding:3px 8px;
+  border-radius:3px;
+  min-width:54px;
+  text-align:center;
+}
+.m-get{background:var(--green-bg);color:var(--green);border:1px solid rgba(86,211,100,0.3)}
+.m-post{background:var(--yellow-bg);color:var(--yellow);border:1px solid rgba(227,179,65,0.3)}
+.m-put{background:var(--blue-bg);color:var(--blue);border:1px solid rgba(88,166,255,0.3)}
+.m-del{background:var(--red-bg);color:var(--red);border:1px solid rgba(248,81,73,0.3)}
+
+.endpoint-path{
+  font-family:var(--mono);
+  font-size:14px;
+  color:var(--text);
+  font-weight:500;
+  word-break:break-all;
+}
+.endpoint-path .param{color:var(--purple)}
+.endpoint-path .query{color:var(--text-mute)}
+.endpoint-path .query .pname{color:var(--accent-dim)}
+
+.endpoint-meta{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  flex-wrap:wrap;
+}
+.chip{
+  font-family:var(--mono);
+  font-size:10px;
+  padding:2px 7px;
+  border-radius:3px;
+  letter-spacing:0.04em;
+  border:1px solid var(--border-2);
+  color:var(--text-mute);
+  background:var(--bg-3);
+}
+.chip.green{color:var(--green);border-color:rgba(86,211,100,0.3);background:var(--green-bg)}
+.chip.yellow{color:var(--yellow);border-color:rgba(227,179,65,0.3);background:var(--yellow-bg)}
+.chip.blue{color:var(--blue);border-color:rgba(88,166,255,0.3);background:var(--blue-bg)}
+.chip.red{color:var(--red);border-color:rgba(248,81,73,0.3);background:var(--red-bg)}
+.chip.purple{color:var(--purple);border-color:rgba(188,140,255,0.3);background:rgba(188,140,255,0.08)}
+
+.endpoint-body{
+  padding:16px 18px;
+}
+.endpoint-desc{
+  color:var(--text-dim);
+  font-size:13px;
+  margin-bottom:14px;
+}
+.endpoint-desc strong{color:var(--text);font-weight:600}
+.endpoint-desc code{
+  font-family:var(--mono);
+  background:var(--bg-3);
+  padding:1px 5px;
+  border-radius:3px;
+  font-size:12px;
+  color:var(--accent);
+}
+
+/* ---------- TABLES ---------- */
+.tbl-wrap{
+  overflow-x:auto;
+  margin:10px 0 14px;
+  border:1px solid var(--border);
+  border-radius:4px;
+}
+table.params{
+  width:100%;
+  border-collapse:collapse;
+  font-size:12px;
+}
+table.params th{
+  text-align:left;
+  font-family:var(--mono);
+  font-size:10px;
+  font-weight:600;
+  letter-spacing:0.08em;
+  text-transform:uppercase;
+  color:var(--text-faint);
+  padding:8px 12px;
+  background:var(--bg-2);
+  border-bottom:1px solid var(--border);
+}
+table.params td{
+  padding:8px 12px;
+  border-bottom:1px solid var(--border);
+  vertical-align:top;
+}
+table.params tr:last-child td{border-bottom:none}
+table.params td.name{
+  font-family:var(--mono);
+  color:var(--accent);
+  white-space:nowrap;
+}
+table.params td.type{
+  font-family:var(--mono);
+  color:var(--purple);
+  font-size:11px;
+  white-space:nowrap;
+}
+table.params td.req{
+  font-family:var(--mono);
+  font-size:10px;
+  color:var(--text-mute);
+  white-space:nowrap;
+}
+table.params td.req.yes{color:var(--red)}
+table.params td.desc{
+  color:var(--text-dim);
+  font-size:12px;
+}
+table.params td.desc code{
+  font-family:var(--mono);
+  background:var(--bg-3);
+  padding:1px 4px;
+  border-radius:3px;
+  font-size:11px;
+  color:var(--text);
+}
+
+/* ---------- CODE PANELS ---------- */
+.code-block{
+  margin:10px 0 14px;
+  background:var(--panel-2);
+  border:1px solid var(--border);
+  border-radius:4px;
+  overflow:hidden;
+}
+.code-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:6px 12px;
+  background:var(--bg-2);
+  border-bottom:1px solid var(--border);
+}
+.code-head-label{
+  font-family:var(--mono);
+  font-size:10px;
+  color:var(--text-faint);
+  letter-spacing:0.08em;
+  text-transform:uppercase;
+}
+.code-head-right{
+  display:flex;
+  gap:6px;
+  align-items:center;
+}
+.code-lang-tag{
+  font-family:var(--mono);
+  font-size:9px;
+  color:var(--text-faint);
+  padding:1px 5px;
+  border:1px solid var(--border-2);
+  border-radius:2px;
+}
+.code-block pre{
+  margin:0;
+  padding:12px 14px;
+  font-family:var(--mono);
+  font-size:12px;
+  line-height:1.55;
+  color:var(--text);
+  overflow-x:auto;
+  white-space:pre;
+}
+.code-block pre .k{color:var(--purple)}
+.code-block pre .s{color:var(--green)}
+.code-block pre .n{color:var(--accent)}
+.code-block pre .b{color:var(--blue)}
+.code-block pre .c{color:var(--text-faint);font-style:italic}
+.code-block pre .p{color:var(--text-mute)}
+
+/* ---------- AUTH NOTES ---------- */
+.auth-note{
+  display:flex;
+  gap:10px;
+  padding:10px 14px;
+  background:rgba(88,166,255,0.05);
+  border:1px solid rgba(88,166,255,0.2);
+  border-radius:4px;
+  margin-bottom:14px;
+  font-size:12px;
+}
+.auth-note .auth-label{
+  font-family:var(--mono);
+  font-size:10px;
+  font-weight:600;
+  color:var(--blue);
+  letter-spacing:0.08em;
+  text-transform:uppercase;
+  flex-shrink:0;
+}
+.auth-note .auth-text{color:var(--text-dim)}
+.auth-note .auth-text code{
+  font-family:var(--mono);
+  background:var(--bg-3);
+  padding:1px 5px;
+  border-radius:3px;
+  font-size:11px;
+  color:var(--accent);
+}
+
+/* ---------- STATUS GRID ---------- */
+.status-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(280px,1fr));
+  gap:10px;
+  margin-top:10px;
+}
+.status-card{
+  background:var(--panel);
+  border:1px solid var(--border);
+  border-radius:5px;
+  padding:12px 14px;
+  position:relative;
+}
+.status-card .sc-head{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  margin-bottom:6px;
+}
+.status-card .sc-code{
+  font-family:var(--mono);
+  font-size:11px;
+  font-weight:700;
+  padding:1px 6px;
+  border-radius:3px;
+}
+.status-card .sc-code.c400{background:var(--yellow-bg);color:var(--yellow);border:1px solid rgba(227,179,65,0.3)}
+.status-card .sc-code.c401{background:var(--red-bg);color:var(--red);border:1px solid rgba(248,81,73,0.3)}
+.status-card .sc-code.c403{background:var(--red-bg);color:var(--red);border:1px solid rgba(248,81,73,0.3)}
+.status-card .sc-code.c409{background:var(--blue-bg);color:var(--blue);border:1px solid rgba(88,166,255,0.3)}
+.status-card .sc-code.c429{background:var(--yellow-bg);color:var(--yellow);border:1px solid rgba(227,179,65,0.3)}
+.status-card .sc-code.c500{background:var(--red-bg);color:var(--red);border:1px solid rgba(248,81,73,0.3)}
+.status-card .sc-code.c200,.status-card .sc-code.c201,.status-card .sc-code.c202{background:var(--green-bg);color:var(--green);border:1px solid rgba(86,211,100,0.3)}
+.status-card .sc-code.c503{background:var(--red-bg);color:var(--red);border:1px solid rgba(248,81,73,0.3)}
+.status-card .sc-label{
+  font-family:var(--mono);
+  font-size:11px;
+  color:var(--text);
+  font-weight:600;
+}
+.status-card .sc-desc{
+  font-size:12px;
+  color:var(--text-dim);
+  line-height:1.5;
+}
+.status-card .sc-desc code{
+  font-family:var(--mono);
+  background:var(--bg-3);
+  padding:1px 4px;
+  border-radius:3px;
+  font-size:11px;
+  color:var(--accent);
+}
+
+/* ---------- CURL ---------- */
+.curl-block{
+  margin:14px 0;
+  background:var(--panel-2);
+  border:1px solid var(--border);
+  border-radius:6px;
+  overflow:hidden;
+}
+.curl-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:8px 14px;
+  background:var(--bg-2);
+  border-bottom:1px solid var(--border);
+}
+.curl-title{
+  font-family:var(--mono);
+  font-size:11px;
+  color:var(--text);
+  letter-spacing:0.04em;
+}
+.curl-body{
+  padding:12px 14px;
+  font-family:var(--mono);
+  font-size:12px;
+  line-height:1.7;
+  color:var(--text);
+  overflow-x:auto;
+  white-space:pre;
+}
+.curl-body .var{color:var(--purple)}
+.curl-body .str{color:var(--green)}
+.curl-body .cmd{color:var(--accent)}
+.curl-body .flag{color:var(--yellow)}
+.curl-body .cmt{color:var(--text-faint);font-style:italic}
+.curl-body .url{color:var(--text)}
+.curl-body .out{color:var(--text-mute)}
+
+.curl-note{
+  margin-top:14px;
+  padding:12px 14px;
+  background:var(--bg-2);
+  border:1px solid var(--border);
+  border-left:3px solid var(--accent);
+  border-radius:4px;
+  font-size:12px;
+  color:var(--text-dim);
+}
+.curl-note code{
+  font-family:var(--mono);
+  background:var(--bg-3);
+  padding:1px 5px;
+  border-radius:3px;
+  font-size:11px;
+  color:var(--accent);
+}
+
+/* ---------- FOOTER ---------- */
+.footer{
+  margin-top:48px;
+  padding-top:20px;
+  border-top:1px solid var(--border);
+  font-size:12px;
+  color:var(--text-mute);
+}
+.footer code{
+  font-family:var(--mono);
+  color:var(--text-dim);
+  font-size:11px;
+}
+
+/* ---------- RESPONSIVE ---------- */
+@media (max-width: 920px){
+  body{flex-direction:column}
+  .sidebar{
+    position:relative;
+    width:100%;
+    height:auto;
+    border-right:none;
+    border-bottom:1px solid var(--border);
+  }
+  .main{padding:0 20px 60px}
+  .hero{padding:24px 0 20px}
+  .meta-grid{grid-template-columns:1fr}
+}
+@media (max-width: 600px){
+  .endpoint-head{flex-direction:column;align-items:flex-start}
+  .endpoint-meta{width:100%}
+  .main{padding:0 16px 40px}
+}
+</style>
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="sidebar-inner">
+    <div class="brand">
+      <div class="brand-tag">v2 · M0</div>
+      <div class="brand-title">device-uniqueness-backend</div>
+      <div class="brand-sub">API Reference</div>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Overview</div>
+      <a class="nav-item" href="javascript:void(0)" data-scroll-to="overview"><span style="flex:1">Context & Metadata</span></a>
+      <a class="nav-item" href="javascript:void(0)" data-scroll-to="flow"><span style="flex:1">Validation Flow</span></a>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Liveness &amp; Readiness</div>
+      <a class="nav-item m-get" href="javascript:void(0)" data-scroll-to="ep-healthcheck"><span class="method-mini">GET</span><span class="path">/healthcheck</span></a>
+      <a class="nav-item m-get" href="javascript:void(0)" data-scroll-to="ep-livez"><span class="method-mini">GET</span><span class="path">/livez</span></a>
+      <a class="nav-item m-get" href="javascript:void(0)" data-scroll-to="ep-readyz"><span class="method-mini">GET</span><span class="path">/readyz</span></a>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Discovery</div>
+      <a class="nav-item m-get" href="javascript:void(0)" data-scroll-to="ep-well-known-jwks-json"><span class="method-mini">GET</span><span class="path">/.well-known/jwks.json</span></a>
+      <a class="nav-item m-get" href="javascript:void(0)" data-scroll-to="ep-api-v1-attester"><span class="method-mini">GET</span><span class="path">/attester</span></a>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Authentication</div>
+      <a class="nav-item m-post" href="javascript:void(0)" data-scroll-to="ep-api-v1-auth-app-attest-attestations"><span class="method-mini">POST</span><span class="path">/auth/app-attest/attestations</span></a>
+      <a class="nav-item m-post" href="javascript:void(0)" data-scroll-to="ep-api-v1-auth-challenges"><span class="method-mini">POST</span><span class="path">/auth/challenges</span></a>
+      <a class="nav-item m-post" href="javascript:void(0)" data-scroll-to="ep-api-v1-auth-token"><span class="method-mini">POST</span><span class="path">/auth/token</span></a>
+      <a class="nav-item m-post" href="javascript:void(0)" data-scroll-to="ep-api-v1-auth-token-refresh"><span class="method-mini">POST</span><span class="path">/auth/token/refresh</span></a>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Usernames</div>
+      <a class="nav-item m-get" href="javascript:void(0)" data-scroll-to="ep-api-v1-registration-queue"><span class="method-mini">GET</span><span class="path">/registration/queue</span></a>
+      <a class="nav-item m-post" href="javascript:void(0)" data-scroll-to="ep-api-v1-usernames"><span class="method-mini">POST</span><span class="path">/usernames</span></a>
+      <a class="nav-item m-post" href="javascript:void(0)" data-scroll-to="ep-api-v1-usernames-available"><span class="method-mini">POST</span><span class="path">/usernames/available</span></a>
+      <a class="nav-item m-get" href="javascript:void(0)" data-scroll-to="ep-api-v1-usernames-payment-status"><span class="method-mini">GET</span><span class="path">/usernames/payment-status</span></a>
+      <a class="nav-item m-get" href="javascript:void(0)" data-scroll-to="ep-api-v1-usernames-search"><span class="method-mini">GET</span><span class="path">/usernames/search</span></a>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Proof of compute</div>
+      <a class="nav-item m-post" href="javascript:void(0)" data-scroll-to="ep-api-v1-poc-issue"><span class="method-mini">POST</span><span class="path">/poc/issue</span></a>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Invitation Tickets</div>
+      <a class="nav-item m-post" href="javascript:void(0)" data-scroll-to="ep-api-v1-invitation-ticket-claim"><span class="method-mini">POST</span><span class="path">/invitation-ticket/claim</span></a>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">TURN</div>
+      <a class="nav-item m-post" href="javascript:void(0)" data-scroll-to="ep-api-v1-turn-issue"><span class="method-mini">POST</span><span class="path">/turn/issue</span></a>
+      <a class="nav-item m-post" href="javascript:void(0)" data-scroll-to="ep-api-v1-turn-issue-with-proof"><span class="method-mini">POST</span><span class="path">/turn/issue-with-proof</span></a>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Notifications</div>
+      <a class="nav-item m-post" href="javascript:void(0)" data-scroll-to="ep-api-v1-notify"><span class="method-mini">POST</span><span class="path">/notify</span></a>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Errors</div>
+      <a class="nav-item" href="javascript:void(0)" data-scroll-to="errors"><span style="flex:1">Error Model</span></a>
+      <a class="nav-item" href="javascript:void(0)" data-scroll-to="curl"><span style="flex:1">Smoke Commands</span></a>
+    </div>
+  </div>
+</aside>
+
+<main class="main">
+  <div class="main-inner">
+
+    <!-- HERO -->
+    <section class="hero" id="overview">
+      <div class="hero-eyebrow">API Reference</div>
+      <h1>Device Uniqueness Backend <span class="v">v2</span></h1>
+      <p class="sub">API Reference for Leonardo's iOS smoke — client compatibility runs against the live server.</p>
+
+      <div class="meta-grid">
+        <div class="meta-cell">
+          <div class="meta-label">Base URL</div>
+          <div class="meta-value mono-small">https://identity.dotspark.app</div>
+        </div>
+        <div class="meta-cell">
+          <div class="meta-label">Auth Mode</div>
+          <div class="meta-value"><span class="status-chip">AUTH_ENABLED=false</span></div>
+        </div>
+        <div class="meta-cell">
+          <div class="meta-label">Chain</div>
+          <div class="meta-value">Paseo Next v2 People</div>
+        </div>
+        <div class="meta-cell">
+          <div class="meta-label">Writer Signer</div>
+          <div class="meta-value mono-small">5HEhiB3hMb8P36L6Edj716fR4wLPUSqoZZpcUrrYEod7f3qu</div>
+        </div>
+        <div class="meta-cell">
+          <div class="meta-label">Purpose</div>
+          <div class="meta-value">Client compatibility smoke</div>
+        </div>
+        <div class="meta-cell">
+          <div class="meta-label">Spec Version</div>
+          <div class="meta-value">2026-07-08</div>
+        </div>
+      </div>
+
+      <div class="base-url-box">
+        <span class="label">BASE</span>
+        <span class="url" id="base-url-text">https://identity.dotspark.app</span>
+        <button class="copy-btn" onclick="copyBaseUrl(this)">copy</button>
+        <a class="copy-btn" href="openapi.json" download style="text-decoration:none">openapi.json ↓</a>
+      </div>
+
+      <div class="warn-box">
+        <div class="warn-icon">!</div>
+        <div class="warn-text">
+          <strong>Attestation is disabled for M0.</strong> Apple/Google provider verification is intentionally a no-op. JWT account proof and People Chain reads still run end-to-end.
+        </div>
+      </div>
+    </section>
+
+    <!-- FLOW -->
+    <section class="section" id="flow">
+      <div class="section-header">
+        <span class="section-num">01</span>
+        <h2>Validation Flow</h2>
+        <a class="section-anchor" href="javascript:void(0)" data-scroll-to="flow">#</a>
+      </div>
+      <p class="lead">The iOS smoke drives this sequence end-to-end. Each step gates the next.</p>
+
+      <ol class="flow-list">
+        <li><span class="cmd" style="color:var(--yellow)">POST</span>&nbsp;<code style="font-family:var(--mono);color:var(--accent);background:var(--bg-3);padding:1px 6px;border-radius:3px;font-size:11px">/api/v1/auth/challenges</code>&nbsp;&nbsp;<span style="color:var(--text-faint)">— challenge</span></li>
+        <li><span class="cmd" style="color:var(--yellow)">POST</span>&nbsp;<code style="font-family:var(--mono);color:var(--accent);background:var(--bg-3);padding:1px 6px;border-radius:3px;font-size:11px">/api/v1/auth/app-attest/attestations</code>&nbsp;&nbsp;<span style="color:var(--text-faint)">— returns 202 {} no-op</span></li>
+        <li><span class="cmd" style="color:var(--yellow)">POST</span>&nbsp;<code style="font-family:var(--mono);color:var(--accent);background:var(--bg-3);padding:1px 6px;border-radius:3px;font-size:11px">/api/v1/auth/token</code>&nbsp;&nbsp;<span style="color:var(--text-faint)">— sr25519 proof → JWT</span></li>
+        <li><span class="cmd" style="color:var(--yellow)">POST</span>&nbsp;<code style="font-family:var(--mono);color:var(--accent);background:var(--bg-3);padding:1px 6px;border-radius:3px;font-size:11px">/api/v1/usernames/available?version=v1</code>&nbsp;&nbsp;<span style="color:var(--text-faint)">— JWT-gated chain read</span></li>
+        <li><span class="cmd" style="color:var(--yellow)">POST</span>&nbsp;<code style="font-family:var(--mono);color:var(--accent);background:var(--bg-3);padding:1px 6px;border-radius:3px;font-size:11px">/api/v1/usernames</code>&nbsp;&nbsp;<span style="color:var(--text-faint)">— 202 outbox reservation</span></li>
+      </ol>
+
+      <div class="flow-note">
+        The full write path is verified end-to-end on this deployment (2026-07-09): a real-signature registration returned <code>202</code>, was drained by the chain-writer (proxy-signed <code>PeopleLite.attest</code>), and finalized on People Chain — confirmed in <code>Resources.UsernameOwnerOf</code>. Invalid or dummy attestation payloads are still rejected by the runtime.
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-header">
+        <span class="section-num">02</span>
+        <h2>Liveness &amp; Readiness</h2>
+        <a class="section-anchor" href="javascript:void(0)" data-scroll-to="ep-healthcheck">#</a>
+      </div>
+
+      <div class="endpoint" id="ep-healthcheck">
+        <div class="endpoint-head">
+          <div class="endpoint-title">
+            <span class="method-badge m-get">GET</span>
+            <span class="endpoint-path">/healthcheck</span>
+          </div>
+          <div class="endpoint-meta">
+            <span class="chip green">200</span>
+            <span class="chip">public</span>
+          </div>
+        </div>
+        <div class="endpoint-body">
+          <p class="endpoint-desc">Process health probe. No dependencies checked.</p>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 200 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"status"</span><span class="p">:</span> <span class="s">"ok"</span><span class="p">,</span>
+  <span class="s">"service"</span><span class="p">:</span> <span class="s">"device-attestation"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c200">200</span>
+                <span class="sc-label">OK</span>
+              </div>
+              <div class="sc-desc">Process is up. No dependencies checked.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="endpoint" id="ep-livez">
+        <div class="endpoint-head">
+          <div class="endpoint-title">
+            <span class="method-badge m-get">GET</span>
+            <span class="endpoint-path">/livez</span>
+          </div>
+          <div class="endpoint-meta">
+            <span class="chip green">200</span>
+            <span class="chip">public</span>
+          </div>
+        </div>
+        <div class="endpoint-body">
+          <p class="endpoint-desc">Kubernetes liveness probe — &quot;should this pod be restarted&quot;.</p>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 200 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"status"</span><span class="p">:</span> <span class="s">"alive"</span><span class="p">,</span>
+  <span class="s">"service"</span><span class="p">:</span> <span class="s">"device-attestation"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c200">200</span>
+                <span class="sc-label">OK</span>
+              </div>
+              <div class="sc-desc">Process is alive.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="endpoint" id="ep-readyz">
+        <div class="endpoint-head">
+          <div class="endpoint-title">
+            <span class="method-badge m-get">GET</span>
+            <span class="endpoint-path">/readyz</span>
+          </div>
+          <div class="endpoint-meta">
+            <span class="chip green">200</span>
+            <span class="chip red">503</span>
+            <span class="chip">public</span>
+          </div>
+        </div>
+        <div class="endpoint-body">
+          <p class="endpoint-desc">Kubernetes readiness probe — checks <code>db</code> and <code>chain</code> subsystems.</p>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 200 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"status"</span><span class="p">:</span> <span class="s">"ready"</span><span class="p">,</span>
+  <span class="s">"service"</span><span class="p">:</span> <span class="s">"device-attestation"</span><span class="p">,</span>
+  <span class="s">"db"</span><span class="p">:</span> <span class="s">"up"</span><span class="p">,</span>
+  <span class="s">"chain"</span><span class="p">:</span> <span class="s">"up"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 503 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"status"</span><span class="p">:</span> <span class="s">"unavailable"</span><span class="p">,</span>
+  <span class="s">"service"</span><span class="p">:</span> <span class="s">"device-attestation"</span><span class="p">,</span>
+  <span class="s">"db"</span><span class="p">:</span> <span class="s">"down"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c200">200</span>
+                <span class="sc-label">OK</span>
+              </div>
+              <div class="sc-desc">Instance can take traffic; db and chain reachable.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c503">503</span>
+                <span class="sc-label">UNAVAILABLE</span>
+              </div>
+              <div class="sc-desc">A required subsystem is unavailable.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <section class="section">
+      <div class="section-header">
+        <span class="section-num">03</span>
+        <h2>Discovery</h2>
+        <a class="section-anchor" href="javascript:void(0)" data-scroll-to="ep-well-known-jwks-json">#</a>
+      </div>
+
+      <div class="endpoint" id="ep-well-known-jwks-json">
+        <div class="endpoint-head">
+          <div class="endpoint-title">
+            <span class="method-badge m-get">GET</span>
+            <span class="endpoint-path">/.well-known/jwks.json</span>
+          </div>
+          <div class="endpoint-meta">
+            <span class="chip green">200</span>
+            <span class="chip">public</span>
+          </div>
+        </div>
+        <div class="endpoint-body">
+          <p class="endpoint-desc">Publish the Ed25519 public key so siblings can verify tokens.</p>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 200 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"keys"</span><span class="p">:</span> <span class="p">[</span>
+    <span class="p">{</span>
+      <span class="s">"kty"</span><span class="p">:</span> <span class="s">"OKP"</span><span class="p">,</span>
+      <span class="s">"crv"</span><span class="p">:</span> <span class="s">"Ed25519"</span><span class="p">,</span>
+      <span class="s">"use"</span><span class="p">:</span> <span class="s">"sig"</span><span class="p">,</span>
+      <span class="s">"alg"</span><span class="p">:</span> <span class="s">"EdDSA"</span><span class="p">,</span>
+      <span class="s">"kid"</span><span class="p">:</span> <span class="s">"..."</span><span class="p">,</span>
+      <span class="s">"x"</span><span class="p">:</span> <span class="s">"..."</span>
+    <span class="p">}</span>
+  <span class="p">]</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c200">200</span>
+                <span class="sc-label">OK</span>
+              </div>
+              <div class="sc-desc">JWT verification keyset (Ed25519 / OKP).</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="endpoint" id="ep-api-v1-attester">
+        <div class="endpoint-head">
+          <div class="endpoint-title">
+            <span class="method-badge m-get">GET</span>
+            <span class="endpoint-path">/api/v1/attester</span>
+          </div>
+          <div class="endpoint-meta">
+            <span class="chip green">200</span>
+            <span class="chip">public</span>
+          </div>
+        </div>
+        <div class="endpoint-body">
+          <p class="endpoint-desc"><code>GET /api/v1/attester</code> — the attester authority public key (<code>0x</code>+hex, public).</p>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 200 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"attester"</span><span class="p">:</span> <span class="s">"0xe4cd20d6d1e0e119d63a943afd2d7496fbbb0ac8e7cd99c3c5f16b63a68e7432"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c200">200</span>
+                <span class="sc-label">OK</span>
+              </div>
+              <div class="sc-desc">The on-chain attester account the backend writes as.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <section class="section">
+      <div class="section-header">
+        <span class="section-num">04</span>
+        <h2>Authentication</h2>
+        <a class="section-anchor" href="javascript:void(0)" data-scroll-to="ep-api-v1-auth-app-attest-attestations">#</a>
+      </div>
+
+      <div class="endpoint" id="ep-api-v1-auth-app-attest-attestations">
+        <div class="endpoint-head">
+          <div class="endpoint-title">
+            <span class="method-badge m-post">POST</span>
+            <span class="endpoint-path">/api/v1/auth/app-attest/attestations</span>
+          </div>
+          <div class="endpoint-meta">
+            <span class="chip green">202</span>
+            <span class="chip red">401</span>
+            <span class="chip">public</span>
+          </div>
+        </div>
+        <div class="endpoint-body">
+          <p class="endpoint-desc">Register an App Attest key: verify the attestation object and persist the
+credential key (no-op <code>202 {}</code> while <code>AUTH_ENABLED=false</code>).</p>
+          <div class="tbl-wrap">
+            <table class="params">
+              <thead>
+                <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+              </thead>
+              <tbody>
+                <tr><td class="name">keyId</td><td class="type">string</td><td class="req yes">yes</td><td class="desc">Base64 key identifier (SHA-256 of the credential public key).</td></tr>
+                <tr><td class="name">challenge</td><td class="type">string</td><td class="req yes">yes</td><td class="desc">Base64 challenge previously returned from <code>/auth/challenges</code>.</td></tr>
+                <tr><td class="name">attestation</td><td class="type">string</td><td class="req yes">yes</td><td class="desc">Base64 CBOR attestation object from the platform.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Request Body</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"keyId"</span><span class="p">:</span> <span class="s">"s/134MbeEEZDZKCvOTf+jZgNhpoDwdXZ8cKfTym8FUg="</span><span class="p">,</span>
+  <span class="s">"challenge"</span><span class="p">:</span> <span class="s">"challenge-from-/auth/challenges"</span><span class="p">,</span>
+  <span class="s">"attestation"</span><span class="p">:</span> <span class="s">"base64-attestation-object"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 202 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 401 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"_tag"</span><span class="p">:</span> <span class="s">"VERIFY_ATTESTATION_FAILED"</span><span class="p">,</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"attestation nonce mismatch"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c202">202</span>
+                <span class="sc-label">ACCEPTED</span>
+              </div>
+              <div class="sc-desc">Accepted. With attestation enabled, the key is verified against Apple and stored; while disabled, the payload is not verified.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c401">401</span>
+                <span class="sc-label">attestation nonce mismatch</span>
+              </div>
+              <div class="sc-desc">Attestation rejected (hard mode), or the challenge was unknown, expired, or already used. Soft mode logs failed verdicts and returns 202.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="endpoint" id="ep-api-v1-auth-challenges">
+        <div class="endpoint-head">
+          <div class="endpoint-title">
+            <span class="method-badge m-post">POST</span>
+            <span class="endpoint-path">/api/v1/auth/challenges</span>
+          </div>
+          <div class="endpoint-meta">
+            <span class="chip green">201</span>
+            <span class="chip">public</span>
+          </div>
+        </div>
+        <div class="endpoint-body">
+          <p class="endpoint-desc">Issue a fresh single-use challenge (<code>201</code>).</p>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 201 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"challenge"</span><span class="p">:</span> <span class="s">"base64-32-byte-challenge"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c201">201</span>
+                <span class="sc-label">CREATED</span>
+              </div>
+              <div class="sc-desc">A fresh single-use challenge. No body required.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="endpoint" id="ep-api-v1-auth-token">
+        <div class="endpoint-head">
+          <div class="endpoint-title">
+            <span class="method-badge m-post">POST</span>
+            <span class="endpoint-path">/api/v1/auth/token</span>
+          </div>
+          <div class="endpoint-meta">
+            <span class="chip green">200</span>
+            <span class="chip red">401</span>
+            <span class="chip red">403</span>
+            <span class="chip red">503</span>
+            <span class="chip">public</span>
+          </div>
+        </div>
+        <div class="endpoint-body">
+          <p class="endpoint-desc">Verify challenge + client proof and issue an access + refresh token pair.</p>
+          <div class="tbl-wrap">
+            <table class="params">
+              <thead>
+                <tr><th>Header</th><th>Type</th><th>Required</th><th>Description</th></tr>
+              </thead>
+              <tbody>
+                <tr><td class="name">Auth-ClientId</td><td class="type">string</td><td class="req yes">yes</td><td class="desc">Base64 of the 32-byte sr25519 public key.</td></tr>
+                <tr><td class="name">Auth-ClientProof</td><td class="type">string</td><td class="req yes">yes</td><td class="desc">Base64 of the 64-byte sr25519 signature over the raw body.</td></tr>
+                <tr><td class="name">Auth-Challenge</td><td class="type">string</td><td class="req yes">yes</td><td class="desc">Challenge previously minted via /auth/challenges.</td></tr>
+                <tr><td class="name">Auth-iOS-Package</td><td class="type">string</td><td class="req">no</td><td class="desc">iOS bundle id, e.g. io.pcf.polkadotapp. Selects the App Attest verification path.</td></tr>
+                <tr><td class="name">Auth-Payload</td><td class="type">string</td><td class="req">no</td><td class="desc">Base64 App Attest assertion (iOS) or the raw classic Play Integrity token (Android play-integrity), verified when attestation is enabled.</td></tr>
+                <tr><td class="name">Auth-iOS-KeyId</td><td class="type">string</td><td class="req">no</td><td class="desc">Base64 App Attest key id registered via /auth/app-attest/attestations.</td></tr>
+                <tr><td class="name">Auth-Android-Package</td><td class="type">string</td><td class="req">no</td><td class="desc">Android package name; required for play-integrity and sets the JWT platform claim for Android clients.</td></tr>
+                <tr><td class="name">Auth-Attestation-Type</td><td class="type">string</td><td class="req">no</td><td class="desc">Android attestation dispatch: <code>key-attestation</code> verifies the <code>attestationChain</code> field in the JSON body (base64 DER, leaf first); <code>play-integrity</code> verifies the token in Auth-Payload with self-managed response keys.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Request Body</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 200 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"token"</span><span class="p">:</span> <span class="s">"jwt"</span><span class="p">,</span>
+  <span class="s">"refreshToken"</span><span class="p">:</span> <span class="s">"opaque-base64-token"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 401 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"UNAUTHORIZED"</span><span class="p">,</span>
+  <span class="s">"message"</span><span class="p">:</span> <span class="s">"unauthorized"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 403 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"INTEGRITY_FAILED"</span><span class="p">,</span>
+  <span class="s">"message"</span><span class="p">:</span> <span class="s">"attestation rejected"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 503 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"ATTESTATION_CRL_UNAVAILABLE"</span><span class="p">,</span>
+  <span class="s">"message"</span><span class="p">:</span> <span class="s">"attestation CRL unavailable"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c200">200</span>
+                <span class="sc-label">OK</span>
+              </div>
+              <div class="sc-desc">Verified. Access JWT + opaque refresh token.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c401">401</span>
+                <span class="sc-label">UNAUTHORIZED</span>
+              </div>
+              <div class="sc-desc">Bad or spent challenge, or invalid client proof.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c403">403</span>
+                <span class="sc-label">INTEGRITY_FAILED</span>
+              </div>
+              <div class="sc-desc">Platform attestation failed verification (hard enforcement).</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c503">503</span>
+                <span class="sc-label">ATTESTATION_CRL_UNAVAILABLE</span>
+              </div>
+              <div class="sc-desc">Android attestation revocation list unavailable; retry with a fresh challenge (hard enforcement).</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="endpoint" id="ep-api-v1-auth-token-refresh">
+        <div class="endpoint-head">
+          <div class="endpoint-title">
+            <span class="method-badge m-post">POST</span>
+            <span class="endpoint-path">/api/v1/auth/token/refresh</span>
+          </div>
+          <div class="endpoint-meta">
+            <span class="chip green">200</span>
+            <span class="chip red">401</span>
+            <span class="chip">public</span>
+          </div>
+        </div>
+        <div class="endpoint-body">
+          <p class="endpoint-desc">Rotate a refresh token, returning a fresh access + refresh pair.</p>
+          <div class="tbl-wrap">
+            <table class="params">
+              <thead>
+                <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+              </thead>
+              <tbody>
+                <tr><td class="name">refreshToken</td><td class="type">string</td><td class="req yes">yes</td><td class="desc">Opaque refresh token issued by <code>/auth/token</code> or a prior refresh.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Request Body</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"refreshToken"</span><span class="p">:</span> <span class="s">"opaque-base64-token"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 200 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"token"</span><span class="p">:</span> <span class="s">"jwt"</span><span class="p">,</span>
+  <span class="s">"refreshToken"</span><span class="p">:</span> <span class="s">"new-opaque-base64-token"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 401 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"UNAUTHORIZED"</span><span class="p">,</span>
+  <span class="s">"message"</span><span class="p">:</span> <span class="s">"unauthorized"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c200">200</span>
+                <span class="sc-label">OK</span>
+              </div>
+              <div class="sc-desc">Rotated. New access JWT + new opaque refresh token.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c401">401</span>
+                <span class="sc-label">UNAUTHORIZED</span>
+              </div>
+              <div class="sc-desc">Unknown, expired, or already-spent refresh token.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <section class="section">
+      <div class="section-header">
+        <span class="section-num">05</span>
+        <h2>Usernames</h2>
+        <a class="section-anchor" href="javascript:void(0)" data-scroll-to="ep-api-v1-registration-queue">#</a>
+      </div>
+
+      <div class="endpoint" id="ep-api-v1-registration-queue">
+        <div class="endpoint-head">
+          <div class="endpoint-title">
+            <span class="method-badge m-get">GET</span>
+            <span class="endpoint-path">/api/v1/registration/queue</span>
+          </div>
+          <div class="endpoint-meta">
+            <span class="chip green">200</span>
+            <span class="chip red">401</span>
+            <span class="chip red">404</span>
+            <span class="chip yellow">429</span>
+            <span class="chip blue">bearer JWT</span>
+          </div>
+        </div>
+        <div class="endpoint-body">
+          <p class="endpoint-desc">Queue standing for the caller's pending username claim. This route exists only on deployments with the registration queue enabled (<code>QUEUE_ENABLED</code>); with the queue disabled the path serves the standard plain-text 404. Clients should treat ANY 404 here as &quot;not (or no longer) queued&quot; and assume the registration is proceeding — queued claims keep draining even if the queue is later disabled. When an account has several queued claims, the response reports the earliest-enqueued one until it drains.</p>
+          <div class="auth-note">
+            <span class="auth-label">Auth</span>
+            <span class="auth-text">Bearer JWT required in the <code>Authorization</code> header.</span>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 200 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"queuePosition"</span><span class="p">:</span> <span class="n">17</span><span class="p">,</span>
+  <span class="s">"group"</span><span class="p">:</span> <span class="n">2</span><span class="p">,</span>
+  <span class="s">"estimatedIterationsRemaining"</span><span class="p">:</span> <span class="n">5</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 404 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"No queue entry found"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c200">200</span>
+                <span class="sc-label">OK</span>
+              </div>
+              <div class="sc-desc">The caller's queued claim: position, priority group, and the estimated advancer iterations until it is promoted for on-chain registration.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c401">401</span>
+                <span class="sc-label">UNAUTHORIZED</span>
+              </div>
+              <div class="sc-desc">Missing or invalid bearer token.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c404">404</span>
+                <span class="sc-label">No queue entry found</span>
+              </div>
+              <div class="sc-desc">The account has no queued registration (JSON body), or the deployment runs queue-disabled (plain-text body). Either way: stop polling, the claim is proceeding without the queue.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c429">429</span>
+                <span class="sc-label">RATE_LIMITED</span>
+              </div>
+              <div class="sc-desc">Subject rate limit exceeded (with <code>Retry-After</code>).</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="endpoint" id="ep-api-v1-usernames">
+        <div class="endpoint-head">
+          <div class="endpoint-title">
+            <span class="method-badge m-post">POST</span>
+            <span class="endpoint-path">/api/v1/usernames</span>
+          </div>
+          <div class="endpoint-meta">
+            <span class="chip green">200</span>
+            <span class="chip green">202</span>
+            <span class="chip red">400</span>
+            <span class="chip red">401</span>
+            <span class="chip blue">409</span>
+            <span class="chip yellow">429</span>
+            <span class="chip red">500</span>
+            <span class="chip red">502</span>
+            <span class="chip red">503</span>
+            <span class="chip blue">bearer JWT</span>
+          </div>
+        </div>
+        <div class="endpoint-body">
+          <p class="endpoint-desc">Reserve a lite username and enqueue it for on-chain registration.</p>
+          <div class="auth-note">
+            <span class="auth-label">Auth</span>
+            <span class="auth-text">Bearer JWT required in the <code>Authorization</code> header.</span>
+          </div>
+          <div class="tbl-wrap">
+            <table class="params">
+              <thead>
+                <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+              </thead>
+              <tbody>
+                <tr><td class="name">candidateAccountId</td><td class="type">string</td><td class="req yes">yes</td><td class="desc">SS58 beneficiary account that will own the username.</td></tr>
+                <tr><td class="name">username</td><td class="type">string</td><td class="req yes">yes</td><td class="desc">Base username (lowercase ASCII letters, 6..=29 chars).</td></tr>
+                <tr><td class="name">preferredDigits</td><td class="type">string</td><td class="req">no</td><td class="desc">Optional two-digit suffix, e.g. <code>&quot;07&quot;</code>; random-free if omitted.</td></tr>
+                <tr><td class="name">candidateSignature</td><td class="type">string</td><td class="req yes">yes</td><td class="desc"><code>0x</code>-hex 64-byte sr25519 signature proving control of the candidate.</td></tr>
+                <tr><td class="name">ringVrfKey</td><td class="type">string</td><td class="req yes">yes</td><td class="desc"><code>0x</code>-hex ring VRF key.</td></tr>
+                <tr><td class="name">proofOfOwnership</td><td class="type">string</td><td class="req yes">yes</td><td class="desc"><code>0x</code>-hex 64-byte ownership proof.</td></tr>
+                <tr><td class="name">consumerRegistrationSignature</td><td class="type">string</td><td class="req yes">yes</td><td class="desc"><code>0x</code>-hex 64-byte consumer registration signature.</td></tr>
+                <tr><td class="name">identifierKey</td><td class="type">string</td><td class="req yes">yes</td><td class="desc"><code>0x</code>-hex 65-byte identifier key.</td></tr>
+                <tr><td class="name">lifetimePoUDVoucher</td><td class="type">string</td><td class="req">no</td><td class="desc">Optional single-use registration voucher (the INSTANT lane): bypasses
+the PoUD gate and the registration queue. Ignored unless
+<code>REGISTRATION_VOUCHERS_ENABLED</code>.</td></tr>
+                <tr><td class="name">dotns</td><td class="type">object</td><td class="req">no</td><td class="desc"></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="tbl-wrap">
+            <table class="params">
+              <thead>
+                <tr><th>dotns.*</th><th>Type</th><th>Required</th><th>Description</th></tr>
+              </thead>
+              <tbody>
+                <tr><td class="name">signature</td><td class="type">string</td><td class="req yes">yes</td><td class="desc"><code>0x</code>-hex 64-byte signature.</td></tr>
+                <tr><td class="name">signedAt</td><td class="type">number</td><td class="req yes">yes</td><td class="desc">Unix timestamp the reservation was signed at.</td></tr>
+                <tr><td class="name">reservedUsername</td><td class="type">string</td><td class="req">no</td><td class="desc">Optional reserved-name override.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Request Body</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"candidateAccountId"</span><span class="p">:</span> <span class="s">"5FbRAkhDvNVecNzHLFxBNXFXNwvBaV69S1W3nfBbnxYypkkT"</span><span class="p">,</span>
+  <span class="s">"username"</span><span class="p">:</span> <span class="s">"tallesx"</span><span class="p">,</span>
+  <span class="s">"preferredDigits"</span><span class="p">:</span> <span class="s">"07"</span><span class="p">,</span>
+  <span class="s">"candidateSignature"</span><span class="p">:</span> <span class="s">"0x...64 bytes..."</span><span class="p">,</span>
+  <span class="s">"ringVrfKey"</span><span class="p">:</span> <span class="s">"0x..."</span><span class="p">,</span>
+  <span class="s">"proofOfOwnership"</span><span class="p">:</span> <span class="s">"0x...64 bytes..."</span><span class="p">,</span>
+  <span class="s">"consumerRegistrationSignature"</span><span class="p">:</span> <span class="s">"0x...64 bytes..."</span><span class="p">,</span>
+  <span class="s">"identifierKey"</span><span class="p">:</span> <span class="s">"0x...65 bytes..."</span><span class="p">,</span>
+  <span class="s">"lifetimePoUDVoucher"</span><span class="p">:</span> <span class="s">"base64url-voucher-key"</span><span class="p">,</span>
+  <span class="s">"dotns"</span><span class="p">:</span> <span class="p">{</span>
+    <span class="s">"signature"</span><span class="p">:</span> <span class="s">"0x...64 bytes..."</span><span class="p">,</span>
+    <span class="s">"signedAt"</span><span class="p">:</span> <span class="n">1780000000</span><span class="p">,</span>
+    <span class="s">"reservedUsername"</span><span class="p">:</span> <span class="s">"reservedname"</span>
+  <span class="p">}</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 200 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"registrationOutcome"</span><span class="p">:</span> <span class="s">"PAYMENT_REQUIRED"</span><span class="p">,</span>
+  <span class="s">"paymentAddress"</span><span class="p">:</span> <span class="s">"5F..."</span><span class="p">,</span>
+  <span class="s">"amountRequired"</span><span class="p">:</span> <span class="s">"10000000000"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 202 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"base_username"</span><span class="p">:</span> <span class="s">"tallesx"</span><span class="p">,</span>
+  <span class="s">"digits"</span><span class="p">:</span> <span class="s">"07"</span><span class="p">,</span>
+  <span class="s">"username"</span><span class="p">:</span> <span class="s">"tallesx.07"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 400 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"The request body contains invalid values."</span><span class="p">,</span>
+  <span class="s">"fields"</span><span class="p">:</span> <span class="p">[</span>
+    <span class="p">{</span>
+      <span class="s">"field"</span><span class="p">:</span> <span class="s">"candidateSignature"</span><span class="p">,</span>
+      <span class="s">"message"</span><span class="p">:</span> <span class="s">"Invalid signature."</span>
+    <span class="p">}</span>
+  <span class="p">]</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 409 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"Preferred digits 07 already taken for username tallesx"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 500 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"Failed to persist username registration"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 502 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"iOS DeviceCheck verification failed"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 503 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"Failed to mark iOS device as registered with Apple DeviceCheck"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c200">200</span>
+                <span class="sc-label">OK</span>
+              </div>
+              <div class="sc-desc">The device must pay to register (hard-mode DeviceCheck: free slot already used, or — with the payment lane on — a missing device token). Not an error — a 200 outcome. With <code>PAYMENT_LANE_ENABLED</code> the body carries the deposit instructions (<code>paymentAddress</code>, <code>amountRequired</code> in planck as a string) and the claim is stored; registration proceeds automatically on the confirmed deposit (poll <code>GET /api/v1/usernames/payment-status</code>). Lane off: the bare outcome, no payment path.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c202">202</span>
+                <span class="sc-label">ACCEPTED</span>
+              </div>
+              <div class="sc-desc">Reservation accepted into the outbox for on-chain registration. With the registration queue enabled (<code>QUEUE_ENABLED</code>) and the queue service live, the claim waits in the balance-priority queue and the body additionally carries <code>registrationOutcome: &quot;QUEUED&quot;</code> plus the claim's queue standing (poll <code>GET /api/v1/registration/queue</code> for updates). A down queue service falls back to the direct registration path (no queue fields). With <code>REGISTRATION_VOUCHERS_ENABLED</code>, a valid <code>lifetimePoUDVoucher</code> bypasses the device gate and the queue: the reservation goes straight to the writer and the body carries <code>registrationOutcome: &quot;INSTANT&quot;</code>.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c400">400</span>
+                <span class="sc-label">The request body contains invalid values.</span>
+              </div>
+              <div class="sc-desc">Validation failed (with per-field <code>fields</code>), malformed JSON, or a <code>lifetimePoUDVoucher</code> that is unknown, already used, or expired (<code>{&quot;error&quot;: &quot;Voucher already used&quot;}</code> — a voucher failure rejects the claim outright).</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c401">401</span>
+                <span class="sc-label">UNAUTHORIZED</span>
+              </div>
+              <div class="sc-desc">Missing or invalid bearer token, or hard-mode DeviceCheck required a usable Device-Token-iOS and none was present (payment lane off — with <code>PAYMENT_LANE_ENABLED</code> a missing token resolves to the 200 PAYMENT_REQUIRED outcome instead).</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c409">409</span>
+                <span class="sc-label">Preferred digits 07 already taken for username tallesx</span>
+              </div>
+              <div class="sc-desc">Preferred digits taken, no digits available, or username taken.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c429">429</span>
+                <span class="sc-label">RATE_LIMITED</span>
+              </div>
+              <div class="sc-desc">Subject rate limit exceeded (with <code>Retry-After</code>).</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c500">500</span>
+                <span class="sc-label">Failed to persist username registration</span>
+              </div>
+              <div class="sc-desc">Persistence failure or unexpected error.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c502">502</span>
+                <span class="sc-label">iOS DeviceCheck verification failed</span>
+              </div>
+              <div class="sc-desc">Hard-mode DeviceCheck could not reach Apple to resolve the device.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c503">503</span>
+                <span class="sc-label">Failed to mark iOS device as registered with Apple DeviceCheck</span>
+              </div>
+              <div class="sc-desc">The DeviceCheck free slot could not be marked used at Apple after a successful gate (upstream write failure; retryable).</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="endpoint" id="ep-api-v1-usernames-available">
+        <div class="endpoint-head">
+          <div class="endpoint-title">
+            <span class="method-badge m-post">POST</span>
+            <span class="endpoint-path">/api/v1/usernames/available</span>
+          </div>
+          <div class="endpoint-meta">
+            <span class="chip green">200</span>
+            <span class="chip red">400</span>
+            <span class="chip red">401</span>
+            <span class="chip yellow">429</span>
+            <span class="chip red">500</span>
+            <span class="chip blue">bearer JWT</span>
+          </div>
+        </div>
+        <div class="endpoint-body">
+          <p class="endpoint-desc">Availability for each requested base.</p>
+          <div class="auth-note">
+            <span class="auth-label">Auth</span>
+            <span class="auth-text">Bearer JWT required in the <code>Authorization</code> header.</span>
+          </div>
+          <div class="tbl-wrap">
+            <table class="params">
+              <thead>
+                <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+              </thead>
+              <tbody>
+                <tr><td class="name">usernames</td><td class="type">string[]</td><td class="req yes">yes</td><td class="desc">Candidate base usernames to validate and check (max 100).</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Request Body</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"usernames"</span><span class="p">:</span> <span class="p">[</span>
+    <span class="s">"tallesx"</span><span class="p">,</span>
+    <span class="s">"abc"</span>
+  <span class="p">]</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 200 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"_tag"</span><span class="p">:</span> <span class="s">"v1"</span><span class="p">,</span>
+  <span class="s">"value"</span><span class="p">:</span> <span class="p">{</span>
+    <span class="s">"tallesx"</span><span class="p">:</span> <span class="p">{</span>
+      <span class="s">"status"</span><span class="p">:</span> <span class="s">"AVAILABLE"</span><span class="p">,</span>
+      <span class="s">"availableDigits"</span><span class="p">:</span> <span class="p">[</span>
+        <span class="n">1</span><span class="p">,</span>
+        <span class="n">2</span><span class="p">,</span>
+        <span class="n">3</span>
+      <span class="p">]</span>
+    <span class="p">}</span><span class="p">,</span>
+    <span class="s">"abc"</span><span class="p">:</span> <span class="p">{</span>
+      <span class="s">"status"</span><span class="p">:</span> <span class="s">"INVALID"</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 400 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"The request body contains invalid values."</span><span class="p">,</span>
+  <span class="s">"fields"</span><span class="p">:</span> <span class="p">[</span>
+    <span class="p">{</span>
+      <span class="s">"field"</span><span class="p">:</span> <span class="s">"usernames"</span><span class="p">,</span>
+      <span class="s">"message"</span><span class="p">:</span> <span class="s">"must contain at most 100 items"</span>
+    <span class="p">}</span>
+  <span class="p">]</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 500 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"Internal server error. Please try again."</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c200">200</span>
+                <span class="sc-label">OK</span>
+              </div>
+              <div class="sc-desc">Per-base availability read from People Chain UsernameOwnerOf plus pending outbox reservations, tagged <code>{_tag: &quot;v1&quot;, value}</code> with availableDigits.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c400">400</span>
+                <span class="sc-label">The request body contains invalid values.</span>
+              </div>
+              <div class="sc-desc">Invalid <code>usernames</code>, or malformed JSON.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c401">401</span>
+                <span class="sc-label">UNAUTHORIZED</span>
+              </div>
+              <div class="sc-desc">Missing or invalid bearer token.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c429">429</span>
+                <span class="sc-label">RATE_LIMITED</span>
+              </div>
+              <div class="sc-desc">Subject rate limit exceeded (with <code>Retry-After</code>).</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c500">500</span>
+                <span class="sc-label">Internal server error. Please try again.</span>
+              </div>
+              <div class="sc-desc">People Chain failure or reservation-outbox failure.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="endpoint" id="ep-api-v1-usernames-payment-status">
+        <div class="endpoint-head">
+          <div class="endpoint-title">
+            <span class="method-badge m-get">GET</span>
+            <span class="endpoint-path">/api/v1/usernames/payment-status</span>
+          </div>
+          <div class="endpoint-meta">
+            <span class="chip green">200</span>
+            <span class="chip red">401</span>
+            <span class="chip red">404</span>
+            <span class="chip yellow">429</span>
+            <span class="chip blue">bearer JWT</span>
+          </div>
+        </div>
+        <div class="endpoint-body">
+          <p class="endpoint-desc">Whether the deposit for the caller's PAYMENT_REQUIRED claim has been detected on-chain. Poll after receiving <code>registrationOutcome: &quot;PAYMENT_REQUIRED&quot;</code>. This route exists only on deployments with the payment lane enabled (<code>PAYMENT_LANE_ENABLED</code>); disabled, the path serves the standard plain-text 404. An expired quote answers 404 — re-claim for fresh deposit instructions.</p>
+          <div class="auth-note">
+            <span class="auth-label">Auth</span>
+            <span class="auth-text">Bearer JWT required in the <code>Authorization</code> header.</span>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 200 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"status"</span><span class="p">:</span> <span class="s">"PENDING"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 404 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"No active payment request"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c200">200</span>
+                <span class="sc-label">OK</span>
+              </div>
+              <div class="sc-desc"><code>PENDING</code>: not yet detected, keep polling. <code>CONFIRMED</code>: deposit detected, username registration is in progress (~15s).</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c401">401</span>
+                <span class="sc-label">UNAUTHORIZED</span>
+              </div>
+              <div class="sc-desc">Missing or invalid bearer token.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c404">404</span>
+                <span class="sc-label">No active payment request</span>
+              </div>
+              <div class="sc-desc">No active payment request for this account (JSON body), or the deployment runs payment-disabled (plain-text body).</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c429">429</span>
+                <span class="sc-label">RATE_LIMITED</span>
+              </div>
+              <div class="sc-desc">Subject rate limit exceeded (with <code>Retry-After</code>).</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="endpoint" id="ep-api-v1-usernames-search">
+        <div class="endpoint-head">
+          <div class="endpoint-title">
+            <span class="method-badge m-get">GET</span>
+            <span class="endpoint-path">/api/v1/usernames/search<span class="query">?prefix=<span class="pname">&lt;prefix&gt;</span>&limit=<span class="pname">&lt;limit&gt;</span>&cursor=<span class="pname">&lt;cursor&gt;</span></span></span>
+          </div>
+          <div class="endpoint-meta">
+            <span class="chip green">200</span>
+            <span class="chip red">400</span>
+            <span class="chip red">402</span>
+            <span class="chip yellow">429</span>
+            <span class="chip">public</span>
+          </div>
+        </div>
+        <div class="endpoint-body">
+          <p class="endpoint-desc">Public prefix search over the finalized username projection.</p>
+          <div class="tbl-wrap">
+            <table class="params">
+              <thead>
+                <tr><th>Header</th><th>Type</th><th>Required</th><th>Description</th></tr>
+              </thead>
+              <tbody>
+                <tr><td class="name">Authorization</td><td class="type">string</td><td class="req">no</td><td class="desc">Optional <code>Bearer &lt;JWT&gt;</code> from device-attestation. When proof of compute is enabled, a valid token satisfies this route and no puzzle is needed. An unverifiable token is treated as anonymous — this route never answers 401.</td></tr>
+                <tr><td class="name">Proof-Of-Compute</td><td class="type">string</td><td class="req">no</td><td class="desc">Solved puzzle, required only when proof of compute is enabled and no valid bearer token is presented: <code>base64(sessionId:timestamp:difficulty:counter:checksum)</code> for a puzzle from <code>POST /api/v1/poc/issue</code>. Single-use.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="tbl-wrap">
+            <table class="params">
+              <thead>
+                <tr><th>Query</th><th>Type</th><th>Required</th><th>Description</th></tr>
+              </thead>
+              <tbody>
+                <tr><td class="name">prefix</td><td class="type">string</td><td class="req yes">yes</td><td class="desc">Prefix of letters/digits, optionally followed by a dot and digits.</td></tr>
+                <tr><td class="name">limit</td><td class="type">number</td><td class="req">no</td><td class="desc">Requested page size, defaulting to 100 and clamped to 1,000.</td></tr>
+                <tr><td class="name">cursor</td><td class="type">string</td><td class="req">no</td><td class="desc">Opaque continuation cursor from an earlier response.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 200 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"usernames"</span><span class="p">:</span> <span class="p">[]</span><span class="p">,</span>
+  <span class="s">"nextCursor"</span><span class="p">:</span> <span class="k">null</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 400 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"The request query contains invalid values."</span><span class="p">,</span>
+  <span class="s">"fields"</span><span class="p">:</span> <span class="p">[</span>
+    <span class="p">{</span>
+      <span class="s">"field"</span><span class="p">:</span> <span class="s">"prefix"</span><span class="p">,</span>
+      <span class="s">"message"</span><span class="p">:</span> <span class="s">"Prefix is required"</span>
+    <span class="p">}</span>
+  <span class="p">]</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 402 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"Proof of compute required. Request a puzzle from POST /api/v1/poc/issue and present the solved proof in the Proof-Of-Compute header."</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 429 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"Rate limit exceeded. Please retry after 60 seconds."</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c200">200</span>
+                <span class="sc-label">OK</span>
+              </div>
+              <div class="sc-desc">Matching assigned usernames in continuation order. Registrations whose on-chain identifier key predates chat-spec RFC-0004 (pre-X25519) are omitted — the app cannot message them.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c400">400</span>
+                <span class="sc-label">The request query contains invalid values.</span>
+              </div>
+              <div class="sc-desc">Invalid query parameter (with per-field <code>fields</code>), invalid cursor (<code>{&quot;error&quot;:&quot;Invalid cursor&quot;}</code>), or a malformed <code>Proof-Of-Compute</code> header.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c402">402</span>
+                <span class="sc-label">Proof of compute required. Request a puzzle from POST /api/v1/poc/issue and present the solved proof in the Proof-Of-Compute header.</span>
+              </div>
+              <div class="sc-desc">Proof of compute is enabled and the caller presented neither a valid bearer token nor an acceptable puzzle. The <code>error</code> names the reason: missing proof, checksum mismatch, expired puzzle, already-used puzzle, or insufficient difficulty.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c429">429</span>
+                <span class="sc-label">Rate limit exceeded. Please retry after 60 seconds.</span>
+              </div>
+              <div class="sc-desc">Public rate limit exceeded (with <code>Retry-After</code>).</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <section class="section">
+      <div class="section-header">
+        <span class="section-num">06</span>
+        <h2>Proof of compute</h2>
+        <a class="section-anchor" href="javascript:void(0)" data-scroll-to="ep-api-v1-poc-issue">#</a>
+      </div>
+
+      <div class="endpoint" id="ep-api-v1-poc-issue">
+        <div class="endpoint-head">
+          <div class="endpoint-title">
+            <span class="method-badge m-post">POST</span>
+            <span class="endpoint-path">/api/v1/poc/issue</span>
+          </div>
+          <div class="endpoint-meta">
+            <span class="chip green">201</span>
+            <span class="chip red">404</span>
+            <span class="chip">public</span>
+          </div>
+        </div>
+        <div class="endpoint-body">
+          <p class="endpoint-desc">Issue a proof-of-compute puzzle for an unauthenticated caller.</p>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 201 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"sessionId"</span><span class="p">:</span> <span class="s">"1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed"</span><span class="p">,</span>
+  <span class="s">"timestamp"</span><span class="p">:</span> <span class="n">1700000000000</span><span class="p">,</span>
+  <span class="s">"difficulty"</span><span class="p">:</span> <span class="n">16</span><span class="p">,</span>
+  <span class="s">"checksum"</span><span class="p">:</span> <span class="s">"c8828951fd6c123fdbf6501f111d27dd3f260839344a7370e0dd8f20e2c40482"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 404 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"Not found"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c201">201</span>
+                <span class="sc-label">CREATED</span>
+              </div>
+              <div class="sc-desc">A fresh puzzle to solve. Mine a <code>counter</code> whose <code>sha256(sessionId || timestamp || counter)</code> has at least <code>difficulty</code> leading zero bits, then send <code>Proof-Of-Compute: base64(sessionId:timestamp:difficulty:counter:checksum)</code> on the search request. Callers holding an device-attestation JWT do not need a puzzle.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c404">404</span>
+                <span class="sc-label">Not found</span>
+              </div>
+              <div class="sc-desc">Proof of compute is disabled on this deployment (<code>POC_ENABLED=false</code>): the route is not mounted and the service-wide 404 answers instead.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <section class="section">
+      <div class="section-header">
+        <span class="section-num">07</span>
+        <h2>Invitation Tickets</h2>
+        <a class="section-anchor" href="javascript:void(0)" data-scroll-to="ep-api-v1-invitation-ticket-claim">#</a>
+      </div>
+
+      <div class="endpoint" id="ep-api-v1-invitation-ticket-claim">
+        <div class="endpoint-head">
+          <div class="endpoint-title">
+            <span class="method-badge m-post">POST</span>
+            <span class="endpoint-path">/api/v1/invitation-ticket/claim</span>
+          </div>
+          <div class="endpoint-meta">
+            <span class="chip green">200</span>
+            <span class="chip red">400</span>
+            <span class="chip red">401</span>
+            <span class="chip blue">409</span>
+            <span class="chip red">422</span>
+            <span class="chip yellow">429</span>
+            <span class="chip red">500</span>
+            <span class="chip blue">bearer JWT</span>
+          </div>
+        </div>
+        <div class="endpoint-body">
+          <p class="endpoint-desc">Claim an invitation ticket for a DIM, returning a signature (JWT-gated).</p>
+          <div class="auth-note">
+            <span class="auth-label">Auth</span>
+            <span class="auth-text">Bearer JWT required in the <code>Authorization</code> header.</span>
+          </div>
+          <div class="tbl-wrap">
+            <table class="params">
+              <thead>
+                <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+              </thead>
+              <tbody>
+                <tr><td class="name">who</td><td class="type">string</td><td class="req yes">yes</td><td class="desc">SS58 address to claim a ticket for (any valid SS58 prefix).</td></tr>
+                <tr><td class="name">dim</td><td class="type">string</td><td class="req yes">yes</td><td class="desc">DIM to claim a ticket for: <code>Game</code> or <code>ProofOfInk</code>.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Request Body</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"who"</span><span class="p">:</span> <span class="s">"5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"</span><span class="p">,</span>
+  <span class="s">"dim"</span><span class="p">:</span> <span class="s">"Game"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 200 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"publicKey"</span><span class="p">:</span> <span class="s">"0xda8ab326da384dd49d5f12543b58acae730af7388b9348c51af6ee3a0962864d"</span><span class="p">,</span>
+  <span class="s">"inviter"</span><span class="p">:</span> <span class="s">"5C4hrfjw9DjXZTzV3MwzrrAr9P1MJhSrvWGWqi1eSuyUpnhM"</span><span class="p">,</span>
+  <span class="s">"dim"</span><span class="p">:</span> <span class="s">"Game"</span><span class="p">,</span>
+  <span class="s">"network"</span><span class="p">:</span> <span class="s">"paseo"</span><span class="p">,</span>
+  <span class="s">"claimedBy"</span><span class="p">:</span> <span class="s">"5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"</span><span class="p">,</span>
+  <span class="s">"createdAt"</span><span class="p">:</span> <span class="s">"2026-07-01T10:20:30.400Z"</span><span class="p">,</span>
+  <span class="s">"claimedAt"</span><span class="p">:</span> <span class="s">"2026-07-02T11:00:00.000Z"</span><span class="p">,</span>
+  <span class="s">"signature"</span><span class="p">:</span> <span class="s">"0xa4a506e96aff250724590ef9527d8117ea2e9d633e813d22d32ad17e0b5c253c406cb22baf62283c6987f81b9bb55ea75f3bdff0259d84e5c282728043f77c88"</span><span class="p">,</span>
+  <span class="s">"remaining"</span><span class="p">:</span> <span class="n">41</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c200">200</span>
+                <span class="sc-label">OK</span>
+              </div>
+              <div class="sc-desc">Ticket claimed: the oldest <code>available</code> ticket of the <code>(dim, network)</code> pool, atomically flipped to <code>claimed</code>, with an sr25519 signature by the ticket key over the claimant's decoded 32-byte account id.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c400">400</span>
+                <span class="sc-label">WRONG_DATA</span>
+              </div>
+              <div class="sc-desc">Body validation failed (with per-field <code>fields</code>), or <code>Malformed JSON in request body</code> when the body is not JSON.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c401">401</span>
+                <span class="sc-label">UNAUTHORIZED</span>
+              </div>
+              <div class="sc-desc">Missing/malformed <code>Authorization</code> header or failed token verification.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c409">409</span>
+                <span class="sc-label">CONFLICT</span>
+              </div>
+              <div class="sc-desc">Ticket race lost — a concurrent request claimed the contended ticket.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c422">422</span>
+                <span class="sc-label">422</span>
+              </div>
+              <div class="sc-desc">Pool exhausted — no <code>available</code> ticket in the <code>(dim, network)</code> pool.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c429">429</span>
+                <span class="sc-label">RATE_LIMITED</span>
+              </div>
+              <div class="sc-desc">Per-subject rate limit exceeded (with <code>Retry-After</code>).</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c500">500</span>
+                <span class="sc-label">INTERNAL</span>
+              </div>
+              <div class="sc-desc">Unexpected internal failure (opaque).</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <section class="section">
+      <div class="section-header">
+        <span class="section-num">08</span>
+        <h2>TURN</h2>
+        <a class="section-anchor" href="javascript:void(0)" data-scroll-to="ep-api-v1-turn-issue">#</a>
+      </div>
+
+      <div class="endpoint" id="ep-api-v1-turn-issue">
+        <div class="endpoint-head">
+          <div class="endpoint-title">
+            <span class="method-badge m-post">POST</span>
+            <span class="endpoint-path">/api/v1/turn/issue</span>
+          </div>
+          <div class="endpoint-meta">
+            <span class="chip green">201</span>
+            <span class="chip red">400</span>
+            <span class="chip red">401</span>
+            <span class="chip yellow">429</span>
+            <span class="chip blue">bearer JWT</span>
+          </div>
+        </div>
+        <div class="endpoint-body">
+          <p class="endpoint-desc">Issue short-lived TURN credentials for WebRTC ICE negotiation (JWT-gated).</p>
+          <div class="auth-note">
+            <span class="auth-label">Auth</span>
+            <span class="auth-text">Bearer JWT required in the <code>Authorization</code> header.</span>
+          </div>
+          <div class="tbl-wrap">
+            <table class="params">
+              <thead>
+                <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+              </thead>
+              <tbody>
+                <tr><td class="name">regionHint</td><td class="type">string</td><td class="req">no</td><td class="desc">Optional region hint (reserved for future use; accepted and ignored).</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Request Body</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"regionHint"</span><span class="p">:</span> <span class="s">"eu-west"</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 201 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"servers"</span><span class="p">:</span> <span class="p">[</span>
+    <span class="s">"stun:stun.example.com:3478"</span><span class="p">,</span>
+    <span class="s">"turn:turn.example.com:3478?transport=udp"</span>
+  <span class="p">]</span><span class="p">,</span>
+  <span class="s">"username"</span><span class="p">:</span> <span class="s">"1784757652:0a79e3412921701a"</span><span class="p">,</span>
+  <span class="s">"password"</span><span class="p">:</span> <span class="s">"qmg5g7d1bXzY0qZkRUqtIPEIKjA="</span><span class="p">,</span>
+  <span class="s">"ttl"</span><span class="p">:</span> <span class="n">1800</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c201">201</span>
+                <span class="sc-label">CREATED</span>
+              </div>
+              <div class="sc-desc">Credentials minted: <code>username</code> is <code>{unixExpiry}:{hexId}</code> (expiry = now + TTL), <code>password</code> is the base64 HMAC over <code>username</code> under the secret shared with the TURN relay (the coturn REST-API construction), <code>servers</code> echoes the configured ICE server list.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c400">400</span>
+                <span class="sc-label">WRONG_DATA</span>
+              </div>
+              <div class="sc-desc">Body validation failed (with per-field <code>fields</code>), or <code>Malformed JSON in request body</code> when a body is present but not JSON. An empty body is accepted — every field is optional.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c401">401</span>
+                <span class="sc-label">UNAUTHORIZED</span>
+              </div>
+              <div class="sc-desc">Missing/malformed <code>Authorization</code> header or failed token verification.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c429">429</span>
+                <span class="sc-label">RATE_LIMITED</span>
+              </div>
+              <div class="sc-desc">Per-subject rate limit exceeded (with <code>Retry-After</code>).</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="endpoint" id="ep-api-v1-turn-issue-with-proof">
+        <div class="endpoint-head">
+          <div class="endpoint-title">
+            <span class="method-badge m-post">POST</span>
+            <span class="endpoint-path">/api/v1/turn/issue-with-proof</span>
+          </div>
+          <div class="endpoint-meta">
+            <span class="chip green">201</span>
+            <span class="chip red">400</span>
+            <span class="chip red">403</span>
+            <span class="chip yellow">429</span>
+            <span class="chip red">503</span>
+            <span class="chip">public</span>
+          </div>
+        </div>
+        <div class="endpoint-body">
+          <p class="endpoint-desc">Redeem a personhood proof for the same credentials as <code>/turn/issue</code>.</p>
+          <div class="tbl-wrap">
+            <table class="params">
+              <thead>
+                <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+              </thead>
+              <tbody>
+                <tr><td class="name">productId</td><td class="type">string</td><td class="req yes">yes</td><td class="desc">The product the proof was made for. Its context is the one the proof
+is verified under, so a product proves under its own identifier. Must
+be one this deployment accepts.</td></tr>
+                <tr><td class="name">collection</td><td class="type">string</td><td class="req yes">yes</td><td class="desc">Hex-encoded 32-byte collection id from the proof's TrUAPI
+<code>ringLocation</code>. Only the canonical People Lite and People collections
+are accepted.</td></tr>
+                <tr><td class="name">proof</td><td class="type">string</td><td class="req yes">yes</td><td class="desc">Ring-VRF proof over the derived message (hex), exactly as the host
+returns it — raw signature bytes, with no SCALE length prefix.</td></tr>
+                <tr><td class="name">ringIndex</td><td class="type">number</td><td class="req yes">yes</td><td class="desc">Ring containing the proving member, used to locate the root.</td></tr>
+                <tr><td class="name">ringRevision</td><td class="type">number</td><td class="req yes">yes</td><td class="desc">Revision of that ring the proof was made against, as the host reports
+it. Only that revision's root is tried, so a revision this deployment
+no longer holds is refused without verifying anything.</td></tr>
+                <tr><td class="name">timestamp</td><td class="type">number</td><td class="req yes">yes</td><td class="desc">Client Unix seconds, bound into the proved message. Must be within the
+server's accepted skew.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Request Body</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"productId"</span><span class="p">:</span> <span class="s">"vox.dot"</span><span class="p">,</span>
+  <span class="s">"collection"</span><span class="p">:</span> <span class="s">"0x706f703a706f6c6b61646f742e6e6574776f726b2f70656f706c652d6c697465"</span><span class="p">,</span>
+  <span class="s">"proof"</span><span class="p">:</span> <span class="k">null</span><span class="p">,</span>
+  <span class="s">"ringIndex"</span><span class="p">:</span> <span class="n">0</span><span class="p">,</span>
+  <span class="s">"ringRevision"</span><span class="p">:</span> <span class="n">3</span><span class="p">,</span>
+  <span class="s">"timestamp"</span><span class="p">:</span> <span class="n">1784757652</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 201 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"servers"</span><span class="p">:</span> <span class="p">[</span>
+    <span class="s">"stun:stun.example.com:3478"</span><span class="p">,</span>
+    <span class="s">"turn:turn.example.com:3478?transport=udp"</span>
+  <span class="p">]</span><span class="p">,</span>
+  <span class="s">"username"</span><span class="p">:</span> <span class="s">"1784757652:0a79e3412921701a"</span><span class="p">,</span>
+  <span class="s">"password"</span><span class="p">:</span> <span class="s">"qmg5g7d1bXzY0qZkRUqtIPEIKjA="</span><span class="p">,</span>
+  <span class="s">"ttl"</span><span class="p">:</span> <span class="n">1800</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c201">201</span>
+                <span class="sc-label">CREATED</span>
+              </div>
+              <div class="sc-desc">Proof accepted; returns servers, username, password, and the configured TTL. Credentials expire <code>ttl</code> seconds after issuance; no alias appears in the response.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c400">400</span>
+                <span class="sc-label">WRONG_DATA</span>
+              </div>
+              <div class="sc-desc">Unparseable body, invalid hex, a collection outside the canonical People Lite/People allowlist, a proof that is not a single-context ring-VRF signature, a product this deployment does not accept, or a timestamp outside the accepted skew.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c403">403</span>
+                <span class="sc-label">FORBIDDEN</span>
+              </div>
+              <div class="sc-desc">The proof did not verify against the named ring root under that product's context — including when <code>(ringIndex, ringRevision)</code> is outside the roots this deployment still holds (deliberately unspecific).</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c429">429</span>
+                <span class="sc-label">RATE_LIMITED</span>
+              </div>
+              <div class="sc-desc">This person's redemption limit was exceeded (with <code>Retry-After</code>).</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c503">503</span>
+                <span class="sc-label">UNAVAILABLE</span>
+              </div>
+              <div class="sc-desc">Verification unavailable: no ring-root snapshot yet (chain unreachable since boot), the bounded waiter queue is full, or all verification slots remained busy for the bounded wait. Saturation responses include <code>Retry-After</code>.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <section class="section">
+      <div class="section-header">
+        <span class="section-num">09</span>
+        <h2>Notifications</h2>
+        <a class="section-anchor" href="javascript:void(0)" data-scroll-to="ep-api-v1-notify">#</a>
+      </div>
+
+      <div class="endpoint" id="ep-api-v1-notify">
+        <div class="endpoint-head">
+          <div class="endpoint-title">
+            <span class="method-badge m-post">POST</span>
+            <span class="endpoint-path">/api/v1/notify</span>
+          </div>
+          <div class="endpoint-meta">
+            <span class="chip green">200</span>
+            <span class="chip red">400</span>
+            <span class="chip red">401</span>
+            <span class="chip yellow">429</span>
+            <span class="chip blue">bearer JWT</span>
+          </div>
+        </div>
+        <div class="endpoint-body">
+          <p class="endpoint-desc">Order mirrors the sibling services: verified JWT (<code>401</code> problem details) →
+body parse (<code>400</code> plain text on malformed JSON) → body validation (<code>400</code>
+problem details with per-field <code>errors</code>) → per-subject rate limit (<code>429</code>
+with <code>Retry-After</code>). Beyond that the relay always answers <code>200</code>: on provider
+failure it preserves the legacy <code>success: false</code> body instead of an error
+status.</p>
+          <div class="auth-note">
+            <span class="auth-label">Auth</span>
+            <span class="auth-text">Bearer JWT required in the <code>Authorization</code> header.</span>
+          </div>
+          <div class="tbl-wrap">
+            <table class="params">
+              <thead>
+                <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+              </thead>
+              <tbody>
+                <tr><td class="name">deviceToken</td><td class="type">string</td><td class="req yes">yes</td><td class="desc">Recipient device token (APNs hex or FCM token); platform is auto-detected.</td></tr>
+                <tr><td class="name">pushId</td><td class="type">string</td><td class="req yes">yes</td><td class="desc">Opaque push id echoed to the client app (32 or 64 hex chars).</td></tr>
+                <tr><td class="name">message</td><td class="type">string</td><td class="req yes">yes</td><td class="desc">Hex-encoded, already-encrypted message body (optional <code>0x</code> prefix).</td></tr>
+                <tr><td class="name">platform</td><td class="type">string</td><td class="req">no</td><td class="desc">Explicit platform override; auto-detected from the token when omitted.</td></tr>
+                <tr><td class="name">bundlerId</td><td class="type">string</td><td class="req">no</td><td class="desc">APNs topic override (the app bundle id); VoIP derives <code>&lt;topic&gt;.voip</code>.</td></tr>
+                <tr><td class="name">voip</td><td class="type">boolean</td><td class="req">no</td><td class="desc">Enable the iOS VoIP push type for a call.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Request Body</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"deviceToken"</span><span class="p">:</span> <span class="s">"1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"</span><span class="p">,</span>
+  <span class="s">"pushId"</span><span class="p">:</span> <span class="s">"5d41402abc4b2a76b9719d911017c592"</span><span class="p">,</span>
+  <span class="s">"message"</span><span class="p">:</span> <span class="s">"0x1234567890abcdef"</span><span class="p">,</span>
+  <span class="s">"platform"</span><span class="p">:</span> <span class="s">"ios"</span><span class="p">,</span>
+  <span class="s">"bundlerId"</span><span class="p">:</span> <span class="s">"io.parity.brevity"</span><span class="p">,</span>
+  <span class="s">"voip"</span><span class="p">:</span> <span class="k">false</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 200 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"success"</span><span class="p">:</span> <span class="k">true</span><span class="p">,</span>
+  <span class="s">"platform"</span><span class="p">:</span> <span class="s">"ios"</span><span class="p">,</span>
+  <span class="s">"sent"</span><span class="p">:</span> <span class="n">1</span><span class="p">,</span>
+  <span class="s">"failed"</span><span class="p">:</span> <span class="n">0</span><span class="p">,</span>
+  <span class="s">"messageId"</span><span class="p">:</span> <span class="k">null</span><span class="p">,</span>
+  <span class="s">"errors"</span><span class="p">:</span> <span class="k">null</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c200">200</span>
+                <span class="sc-label">OK</span>
+              </div>
+              <div class="sc-desc">Relay accepted the request. The push result is echoed verbatim from the provider — including the legacy behavior of returning <code>200</code> with <code>success: false</code> on provider failure, so a non-200 status never signals a delivery failure.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c400">400</span>
+                <span class="sc-label">WRONG_DATA</span>
+              </div>
+              <div class="sc-desc">Body validation failed (RFC 9457 problem details with per-field <code>errors</code>); or plain-text <code>Malformed JSON in request body</code> when the body is not JSON.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c401">401</span>
+                <span class="sc-label">UNAUTHORIZED</span>
+              </div>
+              <div class="sc-desc">Missing/malformed <code>Authorization</code> header or failed token verification (RFC 9457 problem details).</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
+                <span class="sc-code c429">429</span>
+                <span class="sc-label">RATE_LIMITED</span>
+              </div>
+              <div class="sc-desc">Per-subject rate limit exceeded (RFC 9457 problem details, with <code>Retry-After</code>).</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ERRORS -->
+    <section class="section" id="errors">
+      <div class="section-header">
+        <span class="section-num">06</span>
+        <h2>Error Model</h2>
+        <a class="section-anchor" href="javascript:void(0)" data-scroll-to="errors">#</a>
+      </div>
+      <p class="lead">All non-2xx responses share a single envelope. <code>error</code> is a stable machine code; <code>message</code> is a human-readable detail that may vary.</p>
+
+      <div class="code-block">
+        <div class="code-head">
+          <span class="code-head-label">Error JSON Shape</span>
+          <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+        </div>
+<pre><span class="p">{</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"WRONG_DATA"</span><span class="p">,</span>
+  <span class="s">"message"</span><span class="p">:</span> <span class="s">"human-readable detail"</span>
+<span class="p">}</span></pre>
+      </div>
+
+      <div class="status-grid">
+        <div class="status-card">
+          <div class="sc-head">
+            <span class="sc-code c400">400</span>
+            <span class="sc-label">WRONG_DATA</span>
+          </div>
+          <div class="sc-desc">Malformed body/header, invalid username, empty search prefix.</div>
+        </div>
+        <div class="status-card">
+          <div class="sc-head">
+            <span class="sc-code c401">401</span>
+            <span class="sc-label">UNAUTHORIZED</span>
+          </div>
+          <div class="sc-desc">Missing/invalid bearer token, bad challenge, bad proof, spent refresh token.</div>
+        </div>
+        <div class="status-card">
+          <div class="sc-head">
+            <span class="sc-code c403">403</span>
+            <span class="sc-label">FORBIDDEN</span>
+          </div>
+          <div class="sc-desc"><code>candidateAccountId</code> does not match JWT subject.</div>
+        </div>
+        <div class="status-card">
+          <div class="sc-head">
+            <span class="sc-code c409">409</span>
+            <span class="sc-label">CONFLICT</span>
+          </div>
+          <div class="sc-desc">Preferred digits or username already taken/reserved.</div>
+        </div>
+        <div class="status-card">
+          <div class="sc-head">
+            <span class="sc-code c429">429</span>
+            <span class="sc-label">RATE_LIMITED</span>
+          </div>
+          <div class="sc-desc">Per-route rate limiter exceeded.</div>
+        </div>
+        <div class="status-card">
+          <div class="sc-head">
+            <span class="sc-code c500">500</span>
+            <span class="sc-label">INTERNAL</span>
+          </div>
+          <div class="sc-desc">Unexpected backend/database/chain failure.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CURL -->
+    <section class="section" id="curl">
+      <div class="section-header">
+        <span class="section-num">07</span>
+        <h2>Smoke Commands</h2>
+        <a class="section-anchor" href="javascript:void(0)" data-scroll-to="curl">#</a>
+      </div>
+      <p class="lead">Bare-bones curl sequence that exercises the public surface of the service. Safe to run from any shell.</p>
+
+      <div class="curl-block">
+        <div class="curl-head">
+          <span class="curl-title">smoke.sh</span>
+          <button class="copy-btn" onclick="copyCurl(this)">copy</button>
+        </div>
+<pre class="curl-body">BASE="https://identity.dotspark.app"
+
+curl -fsS "$BASE/healthcheck"
+curl -fsS "$BASE/readyz"
+curl -fsS -X POST "$BASE/api/v1/auth/challenges"
+curl -fsS "$BASE/api/v1/attester"
+curl -fsS "$BASE/.well-known/jwks.json"</pre>
+      </div>
+
+      <div class="curl-note">
+        Full token and username calls require the mobile app or a client that can produce the <code>sr25519</code> proof headers. The bundled repo example can drive the flow against a base URL.
+      </div>
+    </section>
+
+    <!-- FOOTER -->
+    <footer class="footer">
+      Generated from the current <code>dub</code> route code on <code>2026-07-08</code>. Served at <code>https://identity.dotspark.app</code> (test deployment).
+    </footer>
+
+  </div>
+</main>
+
+<script>
+function copyBaseUrl(btn){
+  const text = document.getElementById('base-url-text').textContent;
+  navigator.clipboard && navigator.clipboard.writeText(text);
+  btn.textContent='copied'; btn.classList.add('copied');
+  setTimeout(()=>{btn.textContent='copy'; btn.classList.remove('copied')},1400);
+}
+function copyCurl(btn){
+  const pre = btn.closest('.curl-block').querySelector('pre.curl-body');
+  navigator.clipboard && navigator.clipboard.writeText(pre.innerText);
+  btn.textContent='copied'; btn.classList.add('copied');
+  setTimeout(()=>{btn.textContent='copy'; btn.classList.remove('copied')},1400);
+}
+// sidebar active state on scroll
+const scrollLinks = document.querySelectorAll('[data-scroll-to]');
+scrollLinks.forEach(link => {
+  link.addEventListener('click', event => {
+    event.preventDefault();
+    const target = document.getElementById(link.dataset.scrollTo);
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+});
+const navLinks = document.querySelectorAll('.nav-item[data-scroll-to]');
+const targets = Array.from(navLinks).map(l=>document.getElementById(l.dataset.scrollTo)).filter(Boolean);
+function onScroll(){
+  let cur = targets[0];
+  const y = window.scrollY + 80;
+  for(const t of targets){
+    if(t.offsetTop <= y) cur = t;
+  }
+  navLinks.forEach(l=>{
+    l.classList.toggle('active', l.dataset.scrollTo === cur.id);
+  });
+}
+window.addEventListener('scroll', onScroll, {passive:true});
+onScroll();
+</script>
+</body>
+</html>

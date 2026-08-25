@@ -1,0 +1,2008 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Device Uniqueness Backend",
+    "description": "**Prove the device and register the username on People Chain.**\n\n### Validation flow\n\nThe iOS smoke drives this sequence end-to-end; each step gates the next:\n\n1. `POST /api/v1/auth/challenges` — mint a single-use challenge\n2. `POST /api/v1/auth/app-attest/attestations` — iOS App Attest (`202`, no-op in M0)\n3. `POST /api/v1/auth/token` — sr25519 proof exchanged for a JWT\n4. `POST /api/v1/usernames/available` — JWT-gated People Chain read\n5. `POST /api/v1/usernames` — `202` outbox reservation\n\n> **Attestation is disabled for M0.** Apple/Google verification is intentionally a no-op; the sr25519 account proof and People Chain reads still run end-to-end.\n\nErrors come in two shapes. The auth handshake (`/api/v1/auth/*`) answers the `ErrorResponse` envelope — `{ error, message }`, where `error` is a stable machine code. Every other route answers `{ error }`, a human-readable summary, plus a `fields` array of `{ field, message }` when the failure is per-field validation.",
+    "license": {
+      "name": "GPL-3.0-only",
+      "identifier": "GPL-3.0-only"
+    },
+    "version": "2"
+  },
+  "servers": [
+    {
+      "url": "https://identity.dotspark.app",
+      "description": "Test deployment"
+    }
+  ],
+  "paths": {
+    "/.well-known/jwks.json": {
+      "get": {
+        "tags": [
+          "Discovery"
+        ],
+        "summary": "Publish the Ed25519 public key so siblings can verify tokens.",
+        "operationId": "jwks",
+        "responses": {
+          "200": {
+            "description": "JWT verification keyset (Ed25519 / OKP).",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "keys": [
+                    {
+                      "kty": "OKP",
+                      "crv": "Ed25519",
+                      "use": "sig",
+                      "alg": "EdDSA",
+                      "kid": "...",
+                      "x": "..."
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/attester": {
+      "get": {
+        "tags": [
+          "Discovery"
+        ],
+        "summary": "`GET /api/v1/attester` — the attester authority public key (`0x`+hex, public).",
+        "operationId": "attester",
+        "responses": {
+          "200": {
+            "description": "The on-chain attester account the backend writes as.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttesterResponse"
+                },
+                "example": {
+                  "attester": "0xe4cd20d6d1e0e119d63a943afd2d7496fbbb0ac8e7cd99c3c5f16b63a68e7432"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/app-attest/attestations": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "Register an App Attest key: verify the attestation object and persist the\ncredential key (no-op `202 {}` while `AUTH_ENABLED=false`).",
+        "operationId": "register",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppAttestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted. With attestation enabled, the key is verified against Apple and stored; while disabled, the payload is not verified.",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Attestation rejected (hard mode), or the challenge was unknown, expired, or already used. Soft mode logs failed verdicts and returns 202.",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "_tag": "VERIFY_ATTESTATION_FAILED",
+                  "error": "attestation nonce mismatch"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/challenges": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "Issue a fresh single-use challenge (`201`).",
+        "operationId": "issue",
+        "responses": {
+          "201": {
+            "description": "A fresh single-use challenge. No body required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChallengeResponse"
+                },
+                "example": {
+                  "challenge": "base64-32-byte-challenge"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/token": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "Verify challenge + client proof and issue an access + refresh token pair.",
+        "operationId": "issue",
+        "parameters": [
+          {
+            "name": "Auth-ClientId",
+            "in": "header",
+            "description": "Base64 of the 32-byte sr25519 public key.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Auth-ClientProof",
+            "in": "header",
+            "description": "Base64 of the 64-byte sr25519 signature over the raw body.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Auth-Challenge",
+            "in": "header",
+            "description": "Challenge previously minted via /auth/challenges.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Auth-iOS-Package",
+            "in": "header",
+            "description": "iOS bundle id, e.g. io.pcf.polkadotapp. Selects the App Attest verification path.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Auth-Payload",
+            "in": "header",
+            "description": "Base64 App Attest assertion (iOS) or the raw classic Play Integrity token (Android play-integrity), verified when attestation is enabled.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Auth-iOS-KeyId",
+            "in": "header",
+            "description": "Base64 App Attest key id registered via /auth/app-attest/attestations.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Auth-Android-Package",
+            "in": "header",
+            "description": "Android package name; required for play-integrity and sets the JWT platform claim for Android clients.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Auth-Attestation-Type",
+            "in": "header",
+            "description": "Android attestation dispatch: `key-attestation` verifies the `attestationChain` field in the JSON body (base64 DER, leaf first); `play-integrity` verifies the token in Auth-Payload with self-managed response keys.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Raw body covered by the proof; may be empty {}. Android key-attestation requests carry the certificate chain here as `attestationChain` (2-10 base64 DER entries, leaf first).",
+          "content": {
+            "application/json": {
+              "schema": {},
+              "example": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Verified. Access JWT + opaque refresh token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                },
+                "example": {
+                  "token": "jwt",
+                  "refreshToken": "opaque-base64-token"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Bad or spent challenge, or invalid client proof.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": "UNAUTHORIZED",
+                  "message": "unauthorized"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Platform attestation failed verification (hard enforcement).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": "INTEGRITY_FAILED",
+                  "message": "attestation rejected"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Android attestation revocation list unavailable; retry with a fresh challenge (hard enforcement).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": "ATTESTATION_CRL_UNAVAILABLE",
+                  "message": "attestation CRL unavailable"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/token/refresh": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "Rotate a refresh token, returning a fresh access + refresh pair.",
+        "operationId": "rotate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Rotated. New access JWT + new opaque refresh token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                },
+                "example": {
+                  "token": "jwt",
+                  "refreshToken": "new-opaque-base64-token"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unknown, expired, or already-spent refresh token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": "UNAUTHORIZED",
+                  "message": "unauthorized"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/registration/queue": {
+      "get": {
+        "tags": [
+          "Usernames"
+        ],
+        "summary": "Registration-queue standing for the authenticated account.",
+        "description": "Queue standing for the caller's pending username claim. This route exists only on deployments with the registration queue enabled (`QUEUE_ENABLED`); with the queue disabled the path serves the standard plain-text 404. Clients should treat ANY 404 here as \"not (or no longer) queued\" and assume the registration is proceeding — queued claims keep draining even if the queue is later disabled. When an account has several queued claims, the response reports the earliest-enqueued one until it drains.",
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "description": "The caller's queued claim: position, priority group, and the estimated advancer iterations until it is promoted for on-chain registration.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueStatusResponse"
+                },
+                "example": {
+                  "queuePosition": 17,
+                  "group": 2,
+                  "estimatedIterationsRemaining": 5
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "The account has no queued registration (JSON body), or the deployment runs queue-disabled (plain-text body). Either way: stop polling, the claim is proceeding without the queue.",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "error": "No queue entry found"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Subject rate limit exceeded (with `Retry-After`).",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/api/v1/usernames": {
+      "post": {
+        "tags": [
+          "Usernames"
+        ],
+        "summary": "Reserve a lite username and enqueue it for on-chain registration.",
+        "operationId": "register",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The device must pay to register (hard-mode DeviceCheck: free slot already used, or — with the payment lane on — a missing device token). Not an error — a 200 outcome. With `PAYMENT_LANE_ENABLED` the body carries the deposit instructions (`paymentAddress`, `amountRequired` in planck as a string) and the claim is stored; registration proceeds automatically on the confirmed deposit (poll `GET /api/v1/usernames/payment-status`). Lane off: the bare outcome, no payment path.",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "registrationOutcome": "PAYMENT_REQUIRED",
+                  "paymentAddress": "5F...",
+                  "amountRequired": "10000000000"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Reservation accepted into the outbox for on-chain registration. With the registration queue enabled (`QUEUE_ENABLED`) and the queue service live, the claim waits in the balance-priority queue and the body additionally carries `registrationOutcome: \"QUEUED\"` plus the claim's queue standing (poll `GET /api/v1/registration/queue` for updates). A down queue service falls back to the direct registration path (no queue fields). With `REGISTRATION_VOUCHERS_ENABLED`, a valid `lifetimePoUDVoucher` bypasses the device gate and the queue: the reservation goes straight to the writer and the body carries `registrationOutcome: \"INSTANT\"`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisterResponse"
+                },
+                "example": {
+                  "base_username": "tallesx",
+                  "digits": "07",
+                  "username": "tallesx.07"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (with per-field `fields`), malformed JSON, or a `lifetimePoUDVoucher` that is unknown, already used, or expired (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright).",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "error": "The request body contains invalid values.",
+                  "fields": [
+                    {
+                      "field": "candidateSignature",
+                      "message": "Invalid signature."
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token, or hard-mode DeviceCheck required a usable Device-Token-iOS and none was present (payment lane off — with `PAYMENT_LANE_ENABLED` a missing token resolves to the 200 PAYMENT_REQUIRED outcome instead).",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "409": {
+            "description": "Preferred digits taken, no digits available, or username taken.",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "error": "Preferred digits 07 already taken for username tallesx"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Subject rate limit exceeded (with `Retry-After`).",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "500": {
+            "description": "Persistence failure or unexpected error.",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "error": "Failed to persist username registration"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Hard-mode DeviceCheck could not reach Apple to resolve the device.",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "error": "iOS DeviceCheck verification failed"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The DeviceCheck free slot could not be marked used at Apple after a successful gate (upstream write failure; retryable).",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "error": "Failed to mark iOS device as registered with Apple DeviceCheck"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/api/v1/usernames/available": {
+      "post": {
+        "tags": [
+          "Usernames"
+        ],
+        "summary": "Availability for each requested base.",
+        "operationId": "check",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AvailableRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Per-base availability read from People Chain UsernameOwnerOf plus pending outbox reservations, tagged `{_tag: \"v1\", value}` with availableDigits.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AvailableV1Response"
+                },
+                "example": {
+                  "_tag": "v1",
+                  "value": {
+                    "tallesx": {
+                      "status": "AVAILABLE",
+                      "availableDigits": [
+                        1,
+                        2,
+                        3
+                      ]
+                    },
+                    "abc": {
+                      "status": "INVALID"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid `usernames`, or malformed JSON.",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "error": "The request body contains invalid values.",
+                  "fields": [
+                    {
+                      "field": "usernames",
+                      "message": "must contain at most 100 items"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "429": {
+            "description": "Subject rate limit exceeded (with `Retry-After`).",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "500": {
+            "description": "People Chain failure or reservation-outbox failure.",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "error": "Internal server error. Please try again."
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/api/v1/usernames/payment-status": {
+      "get": {
+        "tags": [
+          "Usernames"
+        ],
+        "summary": "Payment status for the authenticated account's most recent request.",
+        "description": "Whether the deposit for the caller's PAYMENT_REQUIRED claim has been detected on-chain. Poll after receiving `registrationOutcome: \"PAYMENT_REQUIRED\"`. This route exists only on deployments with the payment lane enabled (`PAYMENT_LANE_ENABLED`); disabled, the path serves the standard plain-text 404. An expired quote answers 404 — re-claim for fresh deposit instructions.",
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "description": "`PENDING`: not yet detected, keep polling. `CONFIRMED`: deposit detected, username registration is in progress (~15s).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentStatusResponse"
+                },
+                "example": {
+                  "status": "PENDING"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "No active payment request for this account (JSON body), or the deployment runs payment-disabled (plain-text body).",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "error": "No active payment request"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Subject rate limit exceeded (with `Retry-After`).",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/healthcheck": {
+      "get": {
+        "tags": [
+          "Liveness & Readiness"
+        ],
+        "summary": "Process health probe. No dependencies checked.",
+        "operationId": "healthcheck",
+        "responses": {
+          "200": {
+            "description": "Process is up. No dependencies checked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                },
+                "example": {
+                  "status": "ok",
+                  "service": "device-attestation"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/livez": {
+      "get": {
+        "tags": [
+          "Liveness & Readiness"
+        ],
+        "summary": "Kubernetes liveness probe — \"should this pod be restarted\".",
+        "operationId": "livez",
+        "responses": {
+          "200": {
+            "description": "Process is alive.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                },
+                "example": {
+                  "status": "alive",
+                  "service": "device-attestation"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": [
+          "Liveness & Readiness"
+        ],
+        "summary": "Kubernetes readiness probe — checks `db` and `chain` subsystems.",
+        "operationId": "readyz",
+        "responses": {
+          "200": {
+            "description": "Instance can take traffic; db and chain reachable.",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "status": "ready",
+                  "service": "device-attestation",
+                  "db": "up",
+                  "chain": "up"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A required subsystem is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "status": "unavailable",
+                  "service": "device-attestation",
+                  "db": "down"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/poc/issue": {
+      "post": {
+        "tags": [
+          "Proof of compute"
+        ],
+        "summary": "Issue a proof-of-compute puzzle for an unauthenticated caller.",
+        "operationId": "issue_puzzle",
+        "responses": {
+          "201": {
+            "description": "A fresh puzzle to solve. Mine a `counter` whose `sha256(sessionId || timestamp || counter)` has at least `difficulty` leading zero bits, then send `Proof-Of-Compute: base64(sessionId:timestamp:difficulty:counter:checksum)` on the search request. Callers holding an device-attestation JWT do not need a puzzle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Puzzle"
+                },
+                "example": {
+                  "sessionId": "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed",
+                  "timestamp": 1700000000000,
+                  "difficulty": 16,
+                  "checksum": "c8828951fd6c123fdbf6501f111d27dd3f260839344a7370e0dd8f20e2c40482"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Proof of compute is disabled on this deployment (`POC_ENABLED=false`): the route is not mounted and the service-wide 404 answers instead.",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "error": "Not found"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/usernames/search": {
+      "get": {
+        "tags": [
+          "Usernames"
+        ],
+        "summary": "Public prefix search over the finalized username projection.",
+        "operationId": "search_usernames",
+        "parameters": [
+          {
+            "name": "prefix",
+            "in": "query",
+            "description": "Prefix of letters/digits, optionally followed by a dot and digits.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "ali"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Requested page size, defaulting to 100 and clamped to 1,000.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "example": 100
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque continuation cursor from an earlier response.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "Optional `Bearer <JWT>` from device-attestation. When proof of compute is enabled, a valid token satisfies this route and no puzzle is needed. An unverifiable token is treated as anonymous — this route never answers 401.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Proof-Of-Compute",
+            "in": "header",
+            "description": "Solved puzzle, required only when proof of compute is enabled and no valid bearer token is presented: `base64(sessionId:timestamp:difficulty:counter:checksum)` for a puzzle from `POST /api/v1/poc/issue`. Single-use.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching assigned usernames in continuation order. Registrations whose on-chain identifier key predates chat-spec RFC-0004 (pre-X25519) are omitted — the app cannot message them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResponse"
+                },
+                "example": {
+                  "usernames": [],
+                  "nextCursor": null
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameter (with per-field `fields`), invalid cursor (`{\"error\":\"Invalid cursor\"}`), or a malformed `Proof-Of-Compute` header.",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "error": "The request query contains invalid values.",
+                  "fields": [
+                    {
+                      "field": "prefix",
+                      "message": "Prefix is required"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Proof of compute is enabled and the caller presented neither a valid bearer token nor an acceptable puzzle. The `error` names the reason: missing proof, checksum mismatch, expired puzzle, already-used puzzle, or insufficient difficulty.",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "error": "Proof of compute required. Request a puzzle from POST /api/v1/poc/issue and present the solved proof in the Proof-Of-Compute header."
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Public rate limit exceeded (with `Retry-After`).",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "error": "Rate limit exceeded. Please retry after 60 seconds."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/invitation-ticket/claim": {
+      "post": {
+        "tags": [
+          "Invitation Tickets"
+        ],
+        "summary": "Claim an invitation ticket for a DIM, returning a signature (JWT-gated).",
+        "operationId": "claim_ticket",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaimRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Ticket claimed: the oldest `available` ticket of the `(dim, network)` pool, atomically flipped to `claimed`, with an sr25519 signature by the ticket key over the claimant's decoded 32-byte account id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClaimResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body validation failed (with per-field `fields`), or `Malformed JSON in request body` when the body is not JSON."
+          },
+          "401": {
+            "description": "Missing/malformed `Authorization` header or failed token verification."
+          },
+          "409": {
+            "description": "Ticket race lost — a concurrent request claimed the contended ticket."
+          },
+          "422": {
+            "description": "Pool exhausted — no `available` ticket in the `(dim, network)` pool."
+          },
+          "429": {
+            "description": "Per-subject rate limit exceeded (with `Retry-After`)."
+          },
+          "500": {
+            "description": "Unexpected internal failure (opaque)."
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/api/v1/turn/issue": {
+      "post": {
+        "tags": [
+          "TURN"
+        ],
+        "summary": "Issue short-lived TURN credentials for WebRTC ICE negotiation (JWT-gated).",
+        "operationId": "issue_credentials",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssueRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Credentials minted: `username` is `{unixExpiry}:{hexId}` (expiry = now + TTL), `password` is the base64 HMAC over `username` under the secret shared with the TURN relay (the coturn REST-API construction), `servers` echoes the configured ICE server list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body validation failed (with per-field `fields`), or `Malformed JSON in request body` when a body is present but not JSON. An empty body is accepted — every field is optional."
+          },
+          "401": {
+            "description": "Missing/malformed `Authorization` header or failed token verification."
+          },
+          "429": {
+            "description": "Per-subject rate limit exceeded (with `Retry-After`)."
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/api/v1/turn/issue-with-proof": {
+      "post": {
+        "tags": [
+          "TURN"
+        ],
+        "summary": "Redeem a personhood proof for the same credentials as `/turn/issue`.",
+        "operationId": "issue_with_proof",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssueWithProofBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Proof accepted; returns servers, username, password, and the configured TTL. Credentials expire `ttl` seconds after issuance; no alias appears in the response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unparseable body, invalid hex, a collection outside the canonical People Lite/People allowlist, a proof that is not a single-context ring-VRF signature, a product this deployment does not accept, or a timestamp outside the accepted skew."
+          },
+          "403": {
+            "description": "The proof did not verify against the named ring root under that product's context — including when `(ringIndex, ringRevision)` is outside the roots this deployment still holds (deliberately unspecific)."
+          },
+          "429": {
+            "description": "This person's redemption limit was exceeded (with `Retry-After`)."
+          },
+          "503": {
+            "description": "Verification unavailable: no ring-root snapshot yet (chain unreachable since boot), the bounded waiter queue is full, or all verification slots remained busy for the bounded wait. Saturation responses include `Retry-After`."
+          }
+        }
+      }
+    },
+    "/api/v1/notify": {
+      "post": {
+        "tags": [
+          "Notifications"
+        ],
+        "summary": "Handle `POST /api/v1/notify`.",
+        "description": "Order mirrors the sibling services: verified JWT (`401` problem details) →\nbody parse (`400` plain text on malformed JSON) → body validation (`400`\nproblem details with per-field `errors`) → per-subject rate limit (`429`\nwith `Retry-After`). Beyond that the relay always answers `200`: on provider\nfailure it preserves the legacy `success: false` body instead of an error\nstatus.",
+        "operationId": "handle",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotifyRequestDoc"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Relay accepted the request. The push result is echoed verbatim from the provider — including the legacy behavior of returning `200` with `success: false` on provider failure, so a non-200 status never signals a delivery failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotifyResponseDoc"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body validation failed (RFC 9457 problem details with per-field `errors`); or plain-text `Malformed JSON in request body` when the body is not JSON."
+          },
+          "401": {
+            "description": "Missing/malformed `Authorization` header or failed token verification (RFC 9457 problem details)."
+          },
+          "429": {
+            "description": "Per-subject rate limit exceeded (RFC 9457 problem details, with `Retry-After`)."
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AppAttestRequest": {
+        "type": "object",
+        "description": "iOS Apple App Attest key-registration payload.",
+        "required": [
+          "keyId",
+          "challenge",
+          "attestation"
+        ],
+        "properties": {
+          "keyId": {
+            "type": "string",
+            "description": "Base64 key identifier (SHA-256 of the credential public key).",
+            "example": "s/134MbeEEZDZKCvOTf+jZgNhpoDwdXZ8cKfTym8FUg="
+          },
+          "challenge": {
+            "type": "string",
+            "description": "Base64 challenge previously returned from `/auth/challenges`.",
+            "example": "challenge-from-/auth/challenges"
+          },
+          "attestation": {
+            "type": "string",
+            "description": "Base64 CBOR attestation object from the platform.",
+            "example": "base64-attestation-object"
+          }
+        }
+      },
+      "AttesterResponse": {
+        "type": "object",
+        "description": "`{ attester }` — the on-chain attester authority public key.",
+        "required": [
+          "attester"
+        ],
+        "properties": {
+          "attester": {
+            "type": "string",
+            "description": "`0x`-hex sr25519 public key the backend writes registrations as.",
+            "example": "0xe4cd20d6d1e0e119d63a943afd2d7496fbbb0ac8e7cd99c3c5f16b63a68e7432"
+          }
+        }
+      },
+      "AvailableRequest": {
+        "type": "object",
+        "description": "`{ usernames: [base, ...] }` — bases to validate and check on chain\n(documentation mirror; the handler validates raw JSON).",
+        "required": [
+          "usernames"
+        ],
+        "properties": {
+          "usernames": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Candidate base usernames to validate and check (max 100).",
+            "example": [
+              "tallesx",
+              "abc"
+            ]
+          }
+        }
+      },
+      "AvailableV1Response": {
+        "type": "object",
+        "description": "`{ _tag: \"v1\", value: { base: { status, availableDigits? } } }`.",
+        "required": [
+          "_tag",
+          "value"
+        ],
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "description": "Response schema tag; always `v1`.",
+            "example": "v1"
+          },
+          "value": {
+            "type": "object",
+            "description": "Per-base availability, keyed by the requested base username.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/NameAvailability"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ChallengeResponse": {
+        "type": "object",
+        "description": "`201` body: a fresh single-use challenge for the sr25519 proof flow.",
+        "required": [
+          "challenge"
+        ],
+        "properties": {
+          "challenge": {
+            "type": "string",
+            "description": "Opaque base64 32-byte challenge; echoed back in the `Auth-Challenge` header.",
+            "example": "base64-32-byte-challenge"
+          }
+        }
+      },
+      "Dotns": {
+        "type": "object",
+        "description": "Optional DotNS reservation, parking a base label for later full-person use.",
+        "required": [
+          "signature",
+          "signedAt"
+        ],
+        "properties": {
+          "signature": {
+            "type": "string",
+            "description": "`0x`-hex 64-byte signature.",
+            "example": "0x...64 bytes..."
+          },
+          "signedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix timestamp the reservation was signed at.",
+            "example": 1780000000
+          },
+          "reservedUsername": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional reserved-name override.",
+            "example": "reservedname"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "description": "The shared error envelope returned by every non-2xx response.\n\n`error` is a stable machine code (see [`AppError`]); `message` is a\nhuman-readable detail that may change. This type exists so the OpenAPI\ndocument can reference a single error schema across all endpoints.",
+        "required": [
+          "error",
+          "message"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Stable machine code, e.g. `WRONG_DATA`, `UNAUTHORIZED`, `CONFLICT`.",
+            "example": "WRONG_DATA"
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable detail; safe to log, not intended for programmatic use.",
+            "example": "human-readable detail"
+          }
+        }
+      },
+      "NameAvailability": {
+        "type": "object",
+        "description": "Availability of a single base username.",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "`AVAILABLE`, `EXHAUSTED` (all 100 taken), or `INVALID` (fails base rules).",
+            "example": "AVAILABLE"
+          },
+          "availableDigits": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "Free discriminators (`1..=99`); present only when `AVAILABLE`.",
+            "example": [
+              1,
+              2,
+              3
+            ]
+          }
+        }
+      },
+      "PaymentStatusResponse": {
+        "type": "object",
+        "description": "The spec-exact payment-status body: two states, nothing else.",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "`\"PENDING\"` — keep polling; `\"CONFIRMED\"` — payment detected,\nregistration in progress.",
+            "example": "PENDING"
+          }
+        }
+      },
+      "QueueStatusResponse": {
+        "type": "object",
+        "description": "Queue standing for one claim, as served by `GET /api/v1/registration/queue`\nand embedded in the claim response's `queue` field.",
+        "required": [
+          "queuePosition",
+          "group",
+          "estimatedIterationsRemaining"
+        ],
+        "properties": {
+          "queuePosition": {
+            "type": "integer",
+            "format": "int32",
+            "description": "1-based position in the drain order of the current queue snapshot.",
+            "example": 17,
+            "minimum": 0
+          },
+          "group": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Priority group `1..=4` (4 = highest; raised by topping up the account).",
+            "example": 2,
+            "minimum": 0
+          },
+          "estimatedIterationsRemaining": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Advancer iterations until promotion, per the snapshot simulation.",
+            "example": 5,
+            "minimum": 0
+          }
+        }
+      },
+      "RefreshRequest": {
+        "type": "object",
+        "description": "`{ refreshToken }` — present a prior opaque refresh token to rotate it.",
+        "required": [
+          "refreshToken"
+        ],
+        "properties": {
+          "refreshToken": {
+            "type": "string",
+            "description": "Opaque refresh token issued by `/auth/token` or a prior refresh.",
+            "example": "opaque-base64-token"
+          }
+        }
+      },
+      "RegisterRequest": {
+        "type": "object",
+        "description": "The flat registration request (documentation mirror — the handler\nvalidates raw JSON so it can report every failing field).",
+        "required": [
+          "candidateAccountId",
+          "username",
+          "candidateSignature",
+          "ringVrfKey",
+          "proofOfOwnership",
+          "consumerRegistrationSignature",
+          "identifierKey"
+        ],
+        "properties": {
+          "candidateAccountId": {
+            "type": "string",
+            "description": "SS58 beneficiary account that will own the username.",
+            "example": "5FbRAkhDvNVecNzHLFxBNXFXNwvBaV69S1W3nfBbnxYypkkT"
+          },
+          "username": {
+            "type": "string",
+            "description": "Base username (lowercase ASCII letters, 6..=29 chars).",
+            "example": "tallesx"
+          },
+          "preferredDigits": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional two-digit suffix, e.g. `\"07\"`; random-free if omitted.",
+            "example": "07"
+          },
+          "candidateSignature": {
+            "type": "string",
+            "description": "`0x`-hex 64-byte sr25519 signature proving control of the candidate.",
+            "example": "0x...64 bytes..."
+          },
+          "ringVrfKey": {
+            "type": "string",
+            "description": "`0x`-hex ring VRF key.",
+            "example": "0x..."
+          },
+          "proofOfOwnership": {
+            "type": "string",
+            "description": "`0x`-hex 64-byte ownership proof.",
+            "example": "0x...64 bytes..."
+          },
+          "consumerRegistrationSignature": {
+            "type": "string",
+            "description": "`0x`-hex 64-byte consumer registration signature.",
+            "example": "0x...64 bytes..."
+          },
+          "identifierKey": {
+            "type": "string",
+            "description": "`0x`-hex 65-byte identifier key.",
+            "example": "0x...65 bytes..."
+          },
+          "lifetimePoUDVoucher": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional single-use registration voucher (the INSTANT lane): bypasses\nthe PoUD gate and the registration queue. Ignored unless\n`REGISTRATION_VOUCHERS_ENABLED`.",
+            "example": "base64url-voucher-key"
+          },
+          "dotns": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Dotns",
+                "description": "Optional DotNS reservation block."
+              }
+            ]
+          }
+        }
+      },
+      "RegisterResponse": {
+        "type": "object",
+        "description": "`202` body: the reserved full username and its parts.",
+        "required": [
+          "base_username",
+          "digits",
+          "username"
+        ],
+        "properties": {
+          "base_username": {
+            "type": "string",
+            "description": "Reserved base username.",
+            "example": "tallesx"
+          },
+          "digits": {
+            "type": "string",
+            "description": "Selected two-digit discriminator.",
+            "example": "07"
+          },
+          "username": {
+            "type": "string",
+            "description": "Full `base.NN` username.",
+            "example": "tallesx.07"
+          },
+          "device_check_available": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Present only when the DeviceCheck free-slot gate ran and produced an\nadvisory availability (`Register`/`Proceed`); omitted when DeviceCheck\nis disabled or the outcome short-circuited (payment/token/unavailable)."
+          },
+          "registrationOutcome": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`\"QUEUED\"` when the registration queue is enabled and the claim is\nwaiting in it; `\"INSTANT\"` when a voucher bypassed the gate and the\nqueue; absent on the plain direct-to-writer path. (The\n`PAYMENT_REQUIRED` outcome is a separate `200` body, not this 202\nshape — see the route's 200 response.)",
+            "example": "QUEUED"
+          },
+          "queue": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/QueueStatusResponse",
+                "description": "Queue standing at claim time (present only with\n`registrationOutcome: \"QUEUED\"`)."
+              }
+            ]
+          }
+        }
+      },
+      "Status": {
+        "type": "object",
+        "description": "A liveness/health status body: `{ status, service }`.",
+        "required": [
+          "status",
+          "service"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Coarse status word, e.g. `ok`, `alive`, `ready`."
+          },
+          "service": {
+            "type": "string",
+            "description": "Service name emitting the status."
+          }
+        }
+      },
+      "TokenResponse": {
+        "type": "object",
+        "description": "`{ token, refreshToken }` — the shape both auth token routes return.",
+        "required": [
+          "token",
+          "refreshToken"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "Signed access JWT (EdDSA).",
+            "example": "jwt"
+          },
+          "refreshToken": {
+            "type": "string",
+            "description": "Opaque, single-use refresh token.",
+            "example": "opaque-base64-token"
+          }
+        }
+      },
+      "Puzzle": {
+        "type": "object",
+        "description": "A freshly issued puzzle, serialized as the frozen `201` body.",
+        "required": [
+          "sessionId",
+          "timestamp",
+          "difficulty",
+          "checksum"
+        ],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Opaque puzzle identifier (UUID); the replay-protection key.",
+            "example": "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed"
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Issue time in unix milliseconds; bounds the puzzle's validity.",
+            "example": 1700000000000
+          },
+          "difficulty": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Required number of leading zero bits in the work digest.",
+            "example": 16,
+            "maximum": 32,
+            "minimum": 1
+          },
+          "checksum": {
+            "type": "string",
+            "description": "Lowercase-hex HMAC-SHA256 over the puzzle fields; proves this server\nissued the puzzle, so nothing is stored at issue time.",
+            "example": "c8828951fd6c123fdbf6501f111d27dd3f260839344a7370e0dd8f20e2c40482"
+          }
+        }
+      },
+      "SearchResponse": {
+        "type": "object",
+        "description": "Public search response envelope.",
+        "required": [
+          "usernames"
+        ],
+        "properties": {
+          "usernames": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SearchUsername"
+            },
+            "description": "Assigned usernames in deterministic continuation order."
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when exhausted."
+          }
+        }
+      },
+      "SearchUsername": {
+        "type": "object",
+        "description": "One assigned username in the shipping mobile response shape.",
+        "required": [
+          "accountId",
+          "username",
+          "status",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "People Chain account encoded as SS58.",
+            "example": "5Example"
+          },
+          "username": {
+            "type": "string",
+            "description": "The username exactly as the chain holds it: the full username when\npresent, otherwise the lite username with its suffix unchanged\n(`alice.06`, never `alice.6` — the padded form is the only one\n`UsernameOwnerOf` answers to).",
+            "example": "alice.12"
+          },
+          "status": {
+            "type": "string",
+            "description": "Assignment state, always `ASSIGNED` for this projection.",
+            "example": "ASSIGNED"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Time the projection first observed the account.",
+            "example": "2026-07-11T10:00:00Z"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Time the projection last refreshed the account.",
+            "example": "2026-07-11T10:01:00Z"
+          }
+        }
+      },
+      "ClaimRequest": {
+        "type": "object",
+        "description": "`{ who, dim }` — the claim command.",
+        "required": [
+          "who",
+          "dim"
+        ],
+        "properties": {
+          "who": {
+            "type": "string",
+            "description": "SS58 address to claim a ticket for (any valid SS58 prefix).",
+            "example": "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+          },
+          "dim": {
+            "type": "string",
+            "description": "DIM to claim a ticket for: `Game` or `ProofOfInk`.",
+            "example": "Game"
+          }
+        }
+      },
+      "ClaimResponse": {
+        "type": "object",
+        "description": "The 200 claim body: the ticket keypair's public half plus the\nsr25519 signature over the claimant's decoded account id.",
+        "required": [
+          "publicKey",
+          "inviter",
+          "dim",
+          "network",
+          "claimedBy",
+          "createdAt",
+          "claimedAt",
+          "signature",
+          "remaining"
+        ],
+        "properties": {
+          "publicKey": {
+            "type": "string",
+            "description": "`0x`-hex 32-byte sr25519 public key of the claimed ticket.",
+            "example": "0xda8ab326da384dd49d5f12543b58acae730af7388b9348c51af6ee3a0962864d"
+          },
+          "inviter": {
+            "type": "string",
+            "description": "SS58 address of the inviter that registered the ticket on-chain.",
+            "example": "5C4hrfjw9DjXZTzV3MwzrrAr9P1MJhSrvWGWqi1eSuyUpnhM"
+          },
+          "dim": {
+            "type": "string",
+            "description": "DIM the ticket funds: `Game` or `ProofOfInk`.",
+            "example": "Game"
+          },
+          "network": {
+            "type": "string",
+            "description": "Network the ticket is registered on: `westend2`, `paseo`, or `polkadot`.",
+            "example": "paseo"
+          },
+          "claimedBy": {
+            "type": "string",
+            "description": "SS58 address the ticket was claimed for (echoes `who`).",
+            "example": "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "Ticket generation time (JS-style ISO, millisecond precision).",
+            "example": "2026-07-01T10:20:30.400Z"
+          },
+          "claimedAt": {
+            "type": "string",
+            "description": "Claim time (JS-style ISO, millisecond precision).",
+            "example": "2026-07-02T11:00:00.000Z"
+          },
+          "signature": {
+            "type": "string",
+            "description": "`0x`-hex 64-byte sr25519 signature by the ticket key over the raw\n32-byte account id decoded from `who`.",
+            "example": "0xa4a506e96aff250724590ef9527d8117ea2e9d633e813d22d32ad17e0b5c253c406cb22baf62283c6987f81b9bb55ea75f3bdff0259d84e5c282728043f77c88"
+          },
+          "remaining": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Tickets still `available` in this `(dim, network)` pool after the claim.",
+            "example": 41
+          }
+        }
+      },
+      "IssueRequest": {
+        "type": "object",
+        "description": "`{ regionHint? }` — the issue command (the hint is reserved and ignored).",
+        "properties": {
+          "regionHint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional region hint (reserved for future use; accepted and ignored).",
+            "example": "eu-west"
+          }
+        }
+      },
+      "IssueResponse": {
+        "type": "object",
+        "description": "The 201 body: coturn REST-API ephemeral credentials plus the ICE\nserver list.",
+        "required": [
+          "servers",
+          "username",
+          "password",
+          "ttl"
+        ],
+        "properties": {
+          "servers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Configured ICE server URLs (`stun:` / `turn:` forms), echoed verbatim.",
+            "example": [
+              "stun:stun.example.com:3478",
+              "turn:turn.example.com:3478?transport=udp"
+            ]
+          },
+          "username": {
+            "type": "string",
+            "description": "`{unixExpiry}:{hexId}`. JWT issuance uses mint time + configured TTL\nand 8 random id bytes; proof issuance uses mint time + configured TTL\nand a deterministic opaque 16-byte id derived from product and alias.",
+            "example": "1784757652:0a79e3412921701a"
+          },
+          "password": {
+            "type": "string",
+            "description": "Base64 HMAC over `username` under the relay-shared secret (algorithm\nper deployment config, default HMAC-SHA1).",
+            "example": "qmg5g7d1bXzY0qZkRUqtIPEIKjA="
+          },
+          "ttl": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Credential time-to-live in whole seconds (the configured `ttl_secs`).",
+            "example": 1800,
+            "minimum": 0
+          }
+        }
+      },
+      "IssueWithProofBody": {
+        "type": "object",
+        "description": "Proof-redemption request.",
+        "required": [
+          "productId",
+          "collection",
+          "proof",
+          "ringIndex",
+          "ringRevision",
+          "timestamp"
+        ],
+        "properties": {
+          "productId": {
+            "type": "string",
+            "description": "The product the proof was made for. Its context is the one the proof\nis verified under, so a product proves under its own identifier. Must\nbe one this deployment accepts.",
+            "example": "vox.dot"
+          },
+          "collection": {
+            "type": "string",
+            "description": "Hex-encoded 32-byte collection id from the proof's TrUAPI\n`ringLocation`. Only the canonical People Lite and People collections\nare accepted.",
+            "example": "0x706f703a706f6c6b61646f742e6e6574776f726b2f70656f706c652d6c697465"
+          },
+          "proof": {
+            "type": "string",
+            "description": "Ring-VRF proof over the derived message (hex), exactly as the host\nreturns it — raw signature bytes, with no SCALE length prefix."
+          },
+          "ringIndex": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Ring containing the proving member, used to locate the root.",
+            "example": 0,
+            "minimum": 0
+          },
+          "ringRevision": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Revision of that ring the proof was made against, as the host reports\nit. Only that revision's root is tried, so a revision this deployment\nno longer holds is refused without verifying anything.",
+            "example": 3,
+            "minimum": 0
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Client Unix seconds, bound into the proved message. Must be within the\nserver's accepted skew.",
+            "example": 1784757652,
+            "minimum": 0
+          }
+        }
+      },
+      "NotifyErrorDoc": {
+        "type": "object",
+        "description": "One per-device push error inside the `200` response.",
+        "required": [
+          "device"
+        ],
+        "properties": {
+          "device": {
+            "type": "string",
+            "description": "Device token the error is about."
+          },
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "APNs environment, when the provider distinguishes dev/prod."
+          },
+          "status": {
+            "description": "Provider status (string or number), when present."
+          },
+          "response": {
+            "description": "Raw provider response, when present."
+          }
+        }
+      },
+      "NotifyRequestDoc": {
+        "type": "object",
+        "description": "The frozen `POST /api/v1/notify` request body.",
+        "required": [
+          "deviceToken",
+          "pushId",
+          "message"
+        ],
+        "properties": {
+          "deviceToken": {
+            "type": "string",
+            "description": "Recipient device token (APNs hex or FCM token); platform is auto-detected.",
+            "example": "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+          },
+          "pushId": {
+            "type": "string",
+            "description": "Opaque push id echoed to the client app (32 or 64 hex chars).",
+            "example": "5d41402abc4b2a76b9719d911017c592"
+          },
+          "message": {
+            "type": "string",
+            "description": "Hex-encoded, already-encrypted message body (optional `0x` prefix).",
+            "example": "0x1234567890abcdef"
+          },
+          "platform": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Explicit platform override; auto-detected from the token when omitted.",
+            "example": "ios"
+          },
+          "bundlerId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "APNs topic override (the app bundle id); VoIP derives `<topic>.voip`.",
+            "example": "io.parity.brevity"
+          },
+          "voip": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Enable the iOS VoIP push type for a call.",
+            "example": false
+          }
+        }
+      },
+      "NotifyResponseDoc": {
+        "type": "object",
+        "description": "The frozen `200` push-result body (echoed from the provider).",
+        "required": [
+          "success",
+          "platform"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "description": "Whether the provider accepted the push.",
+            "example": true
+          },
+          "platform": {
+            "type": "string",
+            "description": "Platform the notification was routed to.",
+            "example": "ios"
+          },
+          "sent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Number of notifications sent, when the provider reports it (APNs/FCM).",
+            "example": 1,
+            "minimum": 0
+          },
+          "failed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Number of failed notifications, when the provider reports it (APNs).",
+            "example": 0,
+            "minimum": 0
+          },
+          "messageId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Provider message id, when returned (FCM)."
+          },
+          "errors": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/NotifyErrorDoc"
+            },
+            "description": "Per-device errors, on partial or full provider failure."
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearer_jwt": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Access JWT issued by POST /api/v1/auth/token."
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Liveness & Readiness",
+      "description": "Process, liveness, and readiness probes."
+    },
+    {
+      "name": "Discovery",
+      "description": "Public keyset and attester authority."
+    },
+    {
+      "name": "Authentication",
+      "description": "The attestation → JWT handshake."
+    },
+    {
+      "name": "Usernames",
+      "description": "Availability reads and registration intake."
+    },
+    {
+      "name": "Usernames",
+      "description": "Public username search over the finalized chain projection. Served to callers with an device-attestation JWT or, when proof of compute is enabled, a solved puzzle; rate-limited per subject or client IP."
+    },
+    {
+      "name": "Proof of compute",
+      "description": "Puzzle issuance for callers that hold no bearer token. Mounted only when `POC_ENABLED=true`."
+    },
+    {
+      "name": "Invitation Tickets",
+      "description": "Synchronous invitation-credential claims from a pre-staged, on-chain-registered sr25519 keypair pool. The route the shipping iOS/Android apps call for Game / ProofOfInk credentials."
+    },
+    {
+      "name": "TURN",
+      "description": "Short-lived TURN credentials for WebRTC ICE negotiation: the coturn REST-API construction (username = expiry:id, password = HMAC over the username) minted against a secret shared with the TURN relay. Stateless — nothing is stored. Issuance is authorized either by an access JWT (`/issue`) or, when enabled, by a personhood ring-VRF proof over a client-timestamped message (`/issue-with-proof`)."
+    },
+    {
+      "name": "Notifications",
+      "description": "Send a push notification to an iOS (APNs) or Android (FCM) device. Stateless verify-only relay: it authenticates the JWT and forwards the frozen mobile payload, returning the provider's result — including the legacy `200 success:false` on provider failure."
+    }
+  ]
+}

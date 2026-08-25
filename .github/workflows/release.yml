@@ -1,0 +1,290 @@
+name: Release
+
+# Publishes a release: per-platform binary tarballs plus a standalone compose
+# bundle, attached to a GitHub Release.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The existing tag to release, e.g. v0.3.0
+        required: true
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+
+      - id: check
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          case "$TAG" in
+            v[0-9]*) ;;
+            *) echo "::error::tag '$TAG' must look like vX.Y.Z"; exit 1 ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          manifest=$(grep -m1 -oP '^version = "\K[^"]+' Cargo.toml)
+          if [ "$TAG" != "v$manifest" ]; then
+            echo "::error::tag $TAG disagrees with Cargo.toml version $manifest"
+            echo "bump [workspace.package] version to ${TAG#v}, or retag" >&2
+            exit 1
+          fi
+          echo "version=$manifest" >> "$GITHUB_OUTPUT"
+
+      - name: Require a changelog entry
+        run: |
+          grep -qF '## [${{ steps.check.outputs.version }}]' CHANGELOG.md || {
+            echo "::error::CHANGELOG.md has no '## [${{ steps.check.outputs.version }}]' section"
+            exit 1
+          }
+
+  check:
+    needs: version
+    uses: ./.github/workflows/check.yml
+    with:
+      ref: refs/tags/${{ needs.version.outputs.tag }}
+
+  build:
+    needs: [version, check]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ needs.version.outputs.tag }}
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Export the binary
+        run: |
+          docker buildx build --target binaries \
+            --platform ${{ matrix.platform }} \
+            --output "type=local,dest=${{ runner.temp }}/bin" .
+
+      - name: Package the binary
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          name="dub-$VERSION-$TARGET"
+          mv "$RUNNER_TEMP/bin" "$RUNNER_TEMP/$name"
+          test -f "$RUNNER_TEMP/$name/dub" ||
+            { echo "::error::the binaries stage produced no dub"; exit 1; }
+          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/$name.tar.gz" "$name"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: binaries-${{ matrix.target }}
+          path: ${{ runner.temp }}/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  macos-binaries:
+    needs: [version, check]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ needs.version.outputs.tag }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the release binary
+        run: cargo build --release -p dub
+      - name: Package the binary
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          TARGET: aarch64-apple-darwin
+        run: |
+          name="dub-$VERSION-$TARGET"
+          mkdir -p "$RUNNER_TEMP/$name"
+          # One binary, every service: `dub --role <name>`. The tarball's
+          # contents match the Linux ones, with no list to keep in step.
+          cp target/release/dub "$RUNNER_TEMP/$name/"
+          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: binaries-aarch64-apple-darwin
+          path: ${{ runner.temp }}/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    needs: [version, build, macos-binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ needs.version.outputs.tag }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: binaries
+          pattern: binaries-*
+          merge-multiple: true
+
+      - id: image
+        name: Is the published image pullable at this tag?
+        env:
+          PUBLIC_REPO: ${{ vars.PUBLIC_IMAGE_REPO || 'docker.io/paritytech/device-uniqueness-backend' }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          repo="${PUBLIC_REPO#docker.io/}"
+          # `|| { …; }`, not a bare assignment: this step runs under `bash -e`,
+          # where a failed command substitution aborts the step — turning a
+          # network blip into a hard release failure.
+          token=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:$repo:pull" | jq -r .token) || {
+            echo "::warning::$repo is not anonymously pullable — the compose bundle will build from source instead."
+            echo 'pinned=' >> "$GITHUB_OUTPUT"; exit 0
+          }
+          curl -fsS -o /dev/null \
+            -H "Authorization: Bearer $token" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+            "https://registry-1.docker.io/v2/$repo/manifests/$TAG" || {
+            echo "::warning::$repo:$TAG is not anonymously pullable — the compose bundle will build from source instead."
+            echo 'pinned=' >> "$GITHUB_OUTPUT"; exit 0
+          }
+          echo "pinned=$PUBLIC_REPO" >> "$GITHUB_OUTPUT"
+
+      - name: Bundle the compose files
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          PINNED: ${{ steps.image.outputs.pinned }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          mkdir -p bundle/gateway
+          cp .env.example bundle/.env.example
+          cp gateway/Caddyfile gateway/docker-compose.yml bundle/gateway/
+
+          if [ -n "$PINNED" ]; then
+            # Every service names the same image, so pinning is two
+            # substitutions of one variable each. `command: ["--role", …]` is
+            # what still makes each service itself, and survives untouched.
+            sed -e '/^    build:$/,+2d' \
+                -e "s|\${IMAGE_REPO:-device-uniqueness-backend}|$PINNED|g" \
+                -e "s|\${IMAGE_TAG:-local}|$TAG|g" \
+                docker-compose.yml > bundle/docker-compose.yml
+
+            if grep -qE '^    build:' bundle/docker-compose.yml; then
+              echo '::error::the bundled docker-compose.yml still declares `build:` — it would try to build from a source tree the bundle does not carry'
+              exit 1
+            fi
+            if grep -qE '\$\{IMAGE_(REPO|TAG)' bundle/docker-compose.yml; then
+              echo '::error::the bundled docker-compose.yml still has unresolved image variables'
+              exit 1
+            fi
+            test "$(grep -cE "^    image: .*:$TAG\$" bundle/docker-compose.yml)" -eq 8 ||
+              { echo "::error::expected eight services pinned to the release image"; exit 1; }
+          else
+            # No pullable image: ship the file as-is. It builds from a source
+            # tree, which the notes then tell the reader to clone.
+            cp docker-compose.yml bundle/docker-compose.yml
+          fi
+
+          test "$(grep -cE '^    command: \["--role", ' bundle/docker-compose.yml)" -eq 8 ||
+            { echo "::error::the bundle lost a service's --role; every service would start the same way"; exit 1; }
+          # The edits above are textual; this proves the result is still a valid
+          # compose file rather than something the substitutions mangled.
+          docker compose -f bundle/docker-compose.yml config -q
+
+          tar -C bundle -czf "dub-compose-$VERSION.tar.gz" \
+            docker-compose.yml .env.example gateway
+
+      - name: Build the release notes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          TAG: ${{ needs.version.outputs.tag }}
+          PINNED: ${{ steps.image.outputs.pinned }}
+        run: |
+          # The section body for this version: everything between its heading
+          # and the next `## `, which is the previous release. Link definitions
+          # live at the end of the file, outside every section, so they are
+          # appended separately — without them the `[#31]`-style references in
+          # the notes would render as literal text.
+          awk -v heading="## [$VERSION]" '
+            /^\[[^]]+\]: / { next }
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > section.md
+          [ -s section.md ] || {
+            echo "::error::the CHANGELOG.md section for $VERSION is empty"
+            exit 1
+          }
+
+          {
+            printf '```bash\n'
+            printf '# the whole stack:\n'
+            printf 'tar xzf dub-compose-%s.tar.gz && cp .env.example .env\n' "$VERSION"
+            printf 'docker network create dub-edge dub-metrics   # once per host\n'
+            if [ -z "$PINNED" ]; then
+              printf 'docker buildx bake all                       # no published image for this tag\n'
+            fi
+            printf 'docker compose up -d\n'
+            if [ -n "$PINNED" ]; then
+              printf '\n# ...or one service:\n'
+              printf 'docker run %s:%s --role device-attestation-api\n' "$PINNED" "$TAG"
+            fi
+            printf '```\n'
+            printf 'No containers? `dub-%s-<target>.tar.gz` carries the single `dub` binary for `x86_64`/`aarch64` Linux and Apple Silicon — every service is a role of it (`dub --role device-attestation-api`, `dub --list-roles`). `SHA256SUMS` covers every asset here; verify with `sha256sum -c SHA256SUMS`.\n\n' "$VERSION"
+            if [ -z "$PINNED" ]; then
+              printf '> No published container image was found for `%s`, so the bundled compose file builds from source. Clone the repository at this tag alongside it.\n\n' "$TAG"
+            fi
+            cat section.md
+            grep -E '^\[[^]]+\]: ' CHANGELOG.md
+          } > notes.md
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # A `-` in the tag (v0.3.0-rc1) marks a pre-release.
+          prerelease=''
+          case "$TAG" in *-*) prerelease='--prerelease' ;; esac
+
+          # Every asset in one directory, then one checksum file over all of
+          # them — including the compose bundle, so `sha256sum -c` covers the
+          # whole release rather than only the binaries.
+          mv "dub-compose-$VERSION.tar.gz" binaries/
+          ( cd binaries && sha256sum ./*.tar.gz | sed 's| \./| |' > SHA256SUMS )
+
+          # The notes promise three targets plus the bundle; assert it rather
+          # than shipping notes that point at files nobody uploaded.
+          count=$(ls binaries/*.tar.gz | wc -l)
+          test "$count" -eq 4 ||
+            { echo "::error::expected 4 tarballs (3 binary targets + compose bundle), got $count"; exit 1; }
+
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file notes.md \
+            $prerelease \
+            binaries/*.tar.gz binaries/SHA256SUMS
+
+          {
+            echo "## Released \`$TAG\`"
+            echo
+            ls -1 binaries/
+          } >> "$GITHUB_STEP_SUMMARY"

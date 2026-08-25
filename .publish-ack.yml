@@ -1,0 +1,228 @@
+# Publish audit trail — device-uniqueness-backend-community
+#
+# Findings from the pre-publish checklist that were reviewed and deliberately
+# CARRIED FORWARD rather than removed, each with the reason. Chasing a clean
+# grep would have meant breaking something load-bearing or deleting something
+# a reader needs.
+#
+# Snapshot: this repository was published as a curated snapshot of Parity's
+# working tree, with fresh history — the first commit here IS the initial
+# public release.
+# Audited: 2026-08-25.
+
+audit:
+  gitleaks_full_history:
+    scanned: 308 commits
+    findings: 236
+    verdict: >-
+      All test fixtures and synthetic key material (see test_key_material and
+      wire_fixtures below). No live credential was ever committed, so nothing
+      needed rotating. Moot for the public repo in any case: history is fresh.
+  gitleaks_snapshot:
+    verdict: clean with .gitleaks.toml
+  dependency_branch_refs:
+    verdict: >-
+      None. One git dependency, paritytech/verifiable, pinned to a revision
+      rather than a branch (see verifiable_git_dep).
+  dependency_advisories:
+    verdict: >-
+      cargo deny check advisories passes. Three findings were FIXED during this
+      audit by updating the lockfile (h2 0.4.15 -> 0.4.19 for
+      RUSTSEC-2026-0258, and the yanked num-bigint and spin). Four have no
+      patched version and are ignored with reasons — see unfixable_advisories.
+  dependency_licences:
+    verdict: >-
+      cargo deny check licenses passes. CC0-1.0 and CDLA-Permissive-2.0 were
+      added to deny.toml's allow list during this audit — both permissive, both
+      compatible inbound to a GPL-3.0-only outbound. This was a real gap: the
+      check failed before the snapshot and nothing noticed, because `just deny`
+      is not part of `just check`.
+
+accepted:
+  - id: test_key_material
+    paths:
+      - crates/notifications/src/provider/apns.rs
+      - crates/notifications/src/provider/fcm.rs
+      - crates/device-attestation/src/auth/play_integrity/google.rs
+    finding: PEM private keys matched by gitleaks' private-key rule.
+    reason: >-
+      Synthetic keypairs generated for unit tests, all inside
+      `#[cfg(test)] mod tests`. apns.rs holds a P-256 .p8 standing in for an
+      APNs token-signing key; fcm.rs and google.rs hold the same throwaway RSA
+      key, used to sign a fixture JWT and then verify it. None has ever been
+      registered with Apple or Google. Removing them would mean the provider
+      tests could not run offline.
+    action: allowlisted by path in .gitleaks.toml
+
+  - id: wire_fixtures
+    paths:
+      - crates/*/tests/fixtures/*.json
+    finding: 209 JWT matches across the captured wire fixtures.
+    reason: >-
+      Recorded HTTP request/response bodies, asserted byte-for-byte so the
+      services' wire compatibility is testable without a live backend. The
+      tokens are unsigned or signed with a throwaway HS256 key; they
+      authenticate nothing.
+    action: allowlisted by path in .gitleaks.toml
+
+  - id: dev_public_key
+    paths:
+      - .env.example
+      - crates/http-common/src/config.rs
+      - crates/device-attestation/src/config.rs
+    finding: >-
+      JWT_ED25519_PUBLIC_KEY (0x8a88e3...6f5c) and the string
+      `key: "JWT_ED25519_SECRET"` matched by the generic-api-key rule.
+    reason: >-
+      The first is a PUBLIC verification key — the public half of the dev-only
+      secret documented beside it, and meant to be readable. The second is an
+      environment variable's NAME appearing as a struct field in the config
+      parser's error paths. A key's name is not the key.
+    action: allowlisted by regex in .gitleaks.toml
+
+  - id: dev_turn_secret
+    paths:
+      - .env.example
+    finding: TURN_SECRET ships a real base64 value rather than a placeholder.
+    reason: >-
+      turn-api refuses to boot on invalid base64, so the previous
+      `<base64-secret>` placeholder crash-looped a fresh `docker compose up` —
+      a real defect for a repository whose quickstart is
+      `cp .env.example .env`. The committed value is base64 of the literal
+      string "dev-only-turn-secret-change-me". It is published on purpose, the
+      file says so in capitals, and it authenticates against no real relay.
+    action: >-
+      fixed in the snapshot (was a broken placeholder upstream); allowlisted by
+      regex in .gitleaks.toml
+
+  - id: unfixable_advisories
+    paths:
+      - deny.toml
+    finding: >-
+      Four RUSTSEC advisories are ignored: RUSTSEC-2023-0071 (rsa, Marvin
+      Attack) and three unmaintained transitive crates (paste,
+      proc-macro-error2, smallstr).
+    reason: >-
+      None has a patched version. The rsa advisory is a timing sidechannel in
+      PRIVATE-key operations; this workspace uses rsa for verification only
+      (RsaPublicKey + Pkcs1v15Sign over attestation certificate chains in
+      crates/device-attestation/src/auth/x509.rs) and contains no RsaPrivateKey
+      and no RSA decryption, so the vulnerable path is never entered. The other
+      three are transitive build-time or decoding dependencies pulled by ark-ff
+      and subxt, with nothing to upgrade to.
+    action: >-
+      ignored with per-entry reasons in deny.toml; re-check on each dependency
+      bump. Three other advisories found in the same audit WERE fixed by
+      updating h2 (RUSTSEC-2026-0258) and the yanked num-bigint and spin.
+
+  - id: reference_deployment_endpoint
+    paths:
+      - docs/api-reference/openapi.json
+      - docs/api-reference/index.html
+      - docs/api-reference/template.html
+      - crates/device-attestation/src/openapi.rs
+      - README.md
+    finding: https://identity.dotspark.app appears as the OpenAPI `servers` entry.
+    reason: >-
+      A real, public, unauthenticated reference deployment run by Parity — not
+      an internal host. The API reference needs a server URL to be usable as a
+      try-it document, and a placeholder would make it worse. Readers are told
+      in the README that it is a reference deployment they do not control and
+      should not depend on; anyone running their own substitutes their domain.
+    action: kept, documented in README
+
+  - id: previewnet_rpc
+    paths:
+      - .env.example
+      - docker-compose.yml
+    finding: wss://previewnet.substrate.dev is the default People Chain RPC.
+    reason: >-
+      A public, volunteer-run test network endpoint. The stack cannot start
+      without an RPC URL, so a default is more useful than an empty value.
+      PreviewNet is wiped and re-spawned routinely — documented in the
+      operations guide, along with how to point at a different chain.
+    action: kept, documented in docs/operations.md
+
+  - id: verifiable_git_dep
+    paths:
+      - Cargo.toml
+      - deny.toml
+    finding: >-
+      verifiable is a git dependency
+      (github.com/paritytech/verifiable, rev 1f9f6752).
+    reason: >-
+      Ring-VRF personhood-proof verification, not published to crates.io. The
+      repository is PUBLIC and the dependency is pinned to an immutable
+      revision, not a branch or a personal fork, so the build is reproducible.
+      The revision matches what the People Chain runtime pins — the 288-byte
+      MembersCommitment encoding — so it cannot float independently.
+    action: kept; deny.toml's sources.allow-git lists exactly this one repo
+
+  - id: public_image_repo
+    paths:
+      - README.md
+      - CHANGELOG.md
+      - .github/workflows/release.yml
+      - docs/operations.md
+    finding: >-
+      docker.io/paritytech/device-uniqueness-backend is referenced as the image
+      source, and is published from a repository other than this one.
+    reason: >-
+      The Docker Hub repository is public and anonymously pullable (verified).
+      It is NOT published from this repository, and its tags do not line up with
+      this repository's tags: at first publish it carries v0.3.0, built from
+      source older than this release. The release workflow therefore probes for
+      an image at the release's exact tag before pinning the compose bundle to
+      it, and falls back to a build-from-source bundle with a warning when there
+      is none — which is what happens at v0.4.0. The README says all of this
+      plainly rather than implying the image corresponds to a tag here.
+    action: kept and documented; guarded in .github/workflows/release.yml
+
+  - id: version_starts_at_0_4_0
+    paths:
+      - Cargo.toml
+      - CHANGELOG.md
+    finding: >-
+      The first public release is 0.4.0, not 0.1.0, and there is no public
+      0.1-0.3 history in this repository.
+    reason: >-
+      The snapshot is five commits ahead of the internally-tagged v0.3.0, whose
+      image is already public under that name. Publishing this tree as v0.3.0
+      would put binaries and an identically-named image, built from different
+      source, into circulation together. Starting at 0.4.0 keeps every version
+      number meaning exactly one build. The CHANGELOG's 0.4.0 entry says why,
+      and lists what changed relative to the 0.3.0 image.
+    action: >-
+      version bumped in the snapshot; public HTTP surface verified byte-identical
+      to v0.3.0 (generated OpenAPI document diffed)
+
+excluded:
+  # Not carried into the snapshot at all. Listed so a later promotion applies
+  # the same exclusions rather than rediscovering why.
+  - path: helm/
+    reason: Deployment is out of scope for the public repo.
+  - path: docs/plans/
+    reason: >-
+      Named several private repositories, a colleague by first name, and a
+      PreviewNet operator key. Internal delivery tracking with no value to an
+      outside reader.
+  - path: docs/drafts/
+    reason: Unreviewed internal exploration; already gitignored upstream.
+  - path: docs/deploy.md, docs/runbook.md
+    reason: >-
+      Replaced by docs/operations.md. Contained a production server IP and SSH
+      user, CI deploy secret names, ghcr PAT instructions, and Kubernetes/SRE
+      process specific to Parity's infrastructure.
+  - path: .github/workflows/deploy.yml, image.yml, release-on-merge.yml, release-rehearsal.yml
+    reason: >-
+      Parity's deployment and image-promotion pipelines. All run on internal
+      `parity-int-*` runners that a public repository cannot reach.
+  - path: .github/CODEOWNERS
+    reason: Personal GitHub handles; ownership is set through repository settings instead.
+  - path: scripts/verify_helm_render.sh, verify_route_parity_live.sh, lib/merged_topology_routes.py
+    reason: Chart-only gates with nothing left to check once helm/ is gone.
+  - path: .claude/
+    reason: >-
+      Local agent settings plus a vendored planning skill that only makes sense
+      alongside docs/plans/. AGENTS.md is carried forward — it is the best short
+      introduction to the codebase for a human too.

@@ -1,0 +1,532 @@
+name: dub-paseo-next-v2
+
+# Local/dev topology: Postgres + the device-attestation binaries, plus the username-indexer
+# The People Chain RPC is external (a public PreviewNet endpoint by default,
+# paired with PreviewNet's Asset Hub so the dotNS lane can run), so
+# `docker compose up` needs outbound internet to reach it.
+#
+# Secrets below use dev-only defaults so `docker compose up` works out of the
+# box. Override anything real via a `.env` file next to this compose file (it is
+# auto-loaded) or the shell environment. NEVER ship these defaults to prod.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    # Role/password/database come from these three vars, and so does every
+    # DEVICE_ATTESTATION_DATABASE_URL below — one source, so init, healthcheck
+    # and the three consumers cannot drift apart. The image reads POSTGRES_*
+    # ONLY when initialising an empty data directory, so an environment whose
+    # volume predates the identity -> device_attestation rename keeps the old
+    # names: point these at them rather than renaming the database (see
+    # docs/runbook.md "One-time: the identity -> device-attestation rename").
+    environment:
+      POSTGRES_USER: ${DEVICE_ATTESTATION_DB_USER:-device_attestation}
+      POSTGRES_PASSWORD: ${DEVICE_ATTESTATION_DB_PASSWORD:-device_attestation}
+      POSTGRES_DB: ${DEVICE_ATTESTATION_DB_NAME:-device_attestation}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DEVICE_ATTESTATION_DB_USER:-device_attestation} -d ${DEVICE_ATTESTATION_DB_NAME:-device_attestation}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # N-replica HTTP API. Stateless; scale with `--scale device-attestation-api=N`.
+  # Applies embedded migrations on boot (advisory-locked, safe across replicas).
+  device-attestation-api:
+    build:
+      context: .
+      target: dub
+    image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
+    # One image, eight roles: this line is what makes the container this
+    # service. verify_role_split.sh checks it against `dub --list-roles`.
+    command: ["--role", "device-attestation-api"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Explicit allowlist: do not inject the shared .env wholesale because it
+    # also contains service-owned signing secrets.
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      # Composed from the three vars the postgres service initialises with,
+      # never overridden whole: the host must stay `postgres` (the service on
+      # this network), and `.env` already carries a DEVICE_ATTESTATION_DATABASE_URL
+      # pointing at localhost for host-side `cargo run`. Interpolating that name
+      # here would aim every container at its own loopback.
+      DEVICE_ATTESTATION_DATABASE_URL: postgres://${DEVICE_ATTESTATION_DB_USER:-device_attestation}:${DEVICE_ATTESTATION_DB_PASSWORD:-device_attestation}@postgres:5432/${DEVICE_ATTESTATION_DB_NAME:-device_attestation}
+      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      # Dev-only 32-byte Ed25519 seed (0x + 64 hex). Replace in prod.
+      JWT_ED25519_SECRET: ${JWT_ED25519_SECRET:-0x0101010101010101010101010101010101010101010101010101010101010101}
+      # Dev default = //Alice, matching the writer SURI below (signer ==
+      # attester, so the writer attests directly rather than via proxy).
+      ATTESTER_ACCOUNT: ${ATTESTER_ACCOUNT:-5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY}
+      JWT_ISSUER: ${JWT_ISSUER:-polkadot-app}
+      ACCESS_TOKEN_TTL_SECS: ${ACCESS_TOKEN_TTL_SECS:-86400}
+      REFRESH_TOKEN_TTL_SECS: ${REFRESH_TOKEN_TTL_SECS:-2592000}
+      CHALLENGE_TTL_SECS: ${CHALLENGE_TTL_SECS:-300}
+      AUTH_RATE_LIMIT: ${AUTH_RATE_LIMIT:-30}
+      AUTH_RATE_WINDOW_SECS: ${AUTH_RATE_WINDOW_SECS:-60}
+      AUTH_ENABLED: ${AUTH_ENABLED:-false}
+      ENFORCE_AUTH: ${ENFORCE_AUTH:-false}
+      IOS_PACKAGE_NAMES: ${IOS_PACKAGE_NAMES:-}
+      APPLE_APP_ATTEST_APP_IDS: ${APPLE_APP_ATTEST_APP_IDS:-}
+      ANDROID_PACKAGE_NAMES: ${ANDROID_PACKAGE_NAMES:-}
+      ANDROID_SIGNING_DIGEST_PLAYSTORE: ${ANDROID_SIGNING_DIGEST_PLAYSTORE:-}
+      ANDROID_SIGNING_DIGEST_WEBSITE: ${ANDROID_SIGNING_DIGEST_WEBSITE:-}
+      QUEUE_ENABLED: ${QUEUE_ENABLED:-false}
+      # On by default: the PEOPLE_RPC_URL and ASSET_HUB_RPC_URL defaults both
+      # name PreviewNet. That pairing IS the safety property. Split
+      # across two networks, the writer would claim LiteLabelOwner on one for
+      # usernames attested on another: a global claim, and unrecoverable,
+      # because only the client can re-sign. An environment that overrides
+      # PEOPLE_RPC_URL to another network MUST also repoint ASSET_HUB_RPC_URL to
+      # that environment, or set DOTNS_GATEWAY_ENABLED=false in the same .env.
+      # Both halves move together; intake accepting blocks the writer never
+      # submits is the other gap this pair closes.
+      DOTNS_GATEWAY_ENABLED: ${DOTNS_GATEWAY_ENABLED:-true}
+      DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS: ${DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS:-600}
+      # Matches the gateway pallet's MaxFutureSkewSeconds; see .env.example.
+      DOTNS_MAX_FUTURE_SKEW_SECS: ${DOTNS_MAX_FUTURE_SKEW_SECS:-30}
+      # Prometheus exporter, scraped on the private metrics network only.
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      METRICS_ADDR: ${METRICS_ADDR:-0.0.0.0:9090}
+      RUST_LOG: ${RUST_LOG:-info}
+      # JSON so the log shipper can query by field; the binaries default to text
+      # for `just run`. Every service below carries the same pair.
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    networks:
+      default: {}
+      edge:
+        aliases: ["device-attestation-api-${ENV_ID:-paseo-next-v2}"]
+      metrics:
+        aliases: ["device-attestation-api-${ENV_ID:-paseo-next-v2}"]
+    healthcheck:
+      test: ["CMD", "dub", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      # Covers migrations + the blocking People Chain connect at startup.
+      start_period: 40s
+
+  # Single-instance worker: drains the reservation outbox onto People Chain.
+  # Owns the `device-attestation-chain-writer` image (one binary). MUST stay at exactly one replica —
+  # one signer = one nonce lane. Do not `--scale` this service.
+  device-attestation-chain-writer:
+    build:
+      context: .
+      target: dub
+    image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
+    # One image, eight roles: this line is what makes the container this
+    # service. verify_role_split.sh checks it against `dub --list-roles`.
+    command: ["--role", "device-attestation-chain-writer"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      device-attestation-api:
+        condition: service_started
+    # Explicit allowlist: do not inject the shared .env wholesale because it
+    # also contains service-owned signing secrets.
+    environment:
+      DEVICE_ATTESTATION_DATABASE_URL: postgres://${DEVICE_ATTESTATION_DB_USER:-device_attestation}:${DEVICE_ATTESTATION_DB_PASSWORD:-device_attestation}@postgres:5432/${DEVICE_ATTESTATION_DB_NAME:-device_attestation}
+      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      # Dev signer. In prod the least-privilege proxy key; the writer proxies
+      # whenever ATTESTER_ACCOUNT is not this key.
+      CHAIN_WRITER_SIGNER_SURI: ${CHAIN_WRITER_SIGNER_SURI:-//Alice}
+      # Same value device-attestation-api publishes at /api/v1/attester.
+      ATTESTER_ACCOUNT: ${ATTESTER_ACCOUNT:-5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY}
+      CHAIN_WRITER_HOLDER_ID: ${CHAIN_WRITER_HOLDER_ID:-}
+      CHAIN_WRITER_LEASE_NAME: ${CHAIN_WRITER_LEASE_NAME:-people-chain-writer}
+      CHAIN_WRITER_LEASE_TTL_SECS: ${CHAIN_WRITER_LEASE_TTL_SECS:-30}
+      CHAIN_WRITER_POLL_SECS: ${CHAIN_WRITER_POLL_SECS:-2}
+      CHAIN_WRITER_BATCH_SIZE: ${CHAIN_WRITER_BATCH_SIZE:-25}
+      CHAIN_WRITER_FINALIZE_SECS: ${CHAIN_WRITER_FINALIZE_SECS:-120}
+      CHAIN_WRITER_MAX_ATTEMPTS: ${CHAIN_WRITER_MAX_ATTEMPTS:-8}
+      # dotNS gateway lane (Asset Hub). On by default, and must match
+      # device-attestation-api's DOTNS_GATEWAY_ENABLED. That side gates intake, this side
+      # submits. A split value means blocks are accepted that nothing ever
+      # writes. On + no ASSET_HUB_RPC_URL = startup abort, by design; every
+      # other dotNS failure parks the lane rather than the writer, including a
+      # reserve_name shape the connected runtime does not match.
+      # ATTESTER_ACCOUNT above covers both chains: proxying is derived from it,
+      # so the account clients bind their signatures to is this writer's
+      # signing origin by construction.
+      # The URL below must name the Asset Hub of the same network PEOPLE_RPC_URL
+      # points at, or the writer claims labels on the wrong chain. Both default
+      # to PreviewNet; an environment that moves one moves the other, or turns
+      # the lane off explicitly.
+      DOTNS_GATEWAY_ENABLED: ${DOTNS_GATEWAY_ENABLED:-true}
+      ASSET_HUB_RPC_URL: ${ASSET_HUB_RPC_URL:-wss://previewnet.substrate.dev/asset-hub}
+      # Must match device-attestation-api's QUEUE_ENABLED: on = QUEUED rows are never
+      # drained here (stranded-queue warning only); off = janitor drain.
+      QUEUE_ENABLED: ${QUEUE_ENABLED:-false}
+      QUEUE_FALLBACK_AFTER_SECS: ${QUEUE_FALLBACK_AFTER_SECS:-60}
+      # Attester-resources watch (read-only): allowance is the primary's under
+      # proxy signing, fees are the signer's, so the floors are separate.
+      ATTESTER_RESOURCE_POLL_SECS: ${ATTESTER_RESOURCE_POLL_SECS:-60}
+      ATTESTER_ALLOWANCE_FLOOR: ${ATTESTER_ALLOWANCE_FLOOR:-100}
+      ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK: ${ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK:-10000000000}
+      # Prometheus exporter, scraped on the private metrics network only.
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      METRICS_ADDR: ${METRICS_ADDR:-0.0.0.0:9090}
+      RUST_LOG: ${RUST_LOG:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    networks:
+      default: {}
+      metrics:
+        aliases: ["device-attestation-chain-writer-${ENV_ID:-paseo-next-v2}"]
+    deploy:
+      replicas: 1
+
+  # Registration-queue advancer: the queue's only drain while QUEUE_ENABLED
+  # is on. Its Postgres lease is the queue's liveness signal — stop this
+  # service and claims park as QUEUED behind the free lane's throttle (the
+  # chain-writer warns about the stranded rows; with QUEUE_ENABLED=false it
+  # instead drains leftovers). The lease also guards single-instance
+  # promotion; keep it at one replica.
+  registration-queue:
+    build:
+      context: .
+      target: dub
+    image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
+    # One image, eight roles: this line is what makes the container this
+    # service. verify_role_split.sh checks it against `dub --list-roles`.
+    command: ["--role", "registration-queue"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Explicit allowlist: no signing secrets — this service only reads chain
+    # balances and flips queue rows in the device-attestation DB.
+    environment:
+      DEVICE_ATTESTATION_DATABASE_URL: postgres://${DEVICE_ATTESTATION_DB_USER:-device_attestation}:${DEVICE_ATTESTATION_DB_PASSWORD:-device_attestation}@postgres:5432/${DEVICE_ATTESTATION_DB_NAME:-device_attestation}
+      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      QUEUE_ADVANCE_INTERVAL_SECS: ${QUEUE_ADVANCE_INTERVAL_SECS:-6}
+      QUEUE_LEASE_TTL_SECS: ${QUEUE_LEASE_TTL_SECS:-30}
+      # Prometheus exporter, scraped on the private metrics network only.
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      METRICS_ADDR: ${METRICS_ADDR:-0.0.0.0:9090}
+      RUST_LOG: ${RUST_LOG:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    networks:
+      default: {}
+      metrics:
+        aliases: ["registration-queue-${ENV_ID:-paseo-next-v2}"]
+    deploy:
+      replicas: 1
+
+  # username-indexer owns its persistence independently of the device-attestation DB, so its
+  # projection can be rebuilt or wiped without touching auth/registration state.
+  username-indexer-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: username_indexer
+      POSTGRES_PASSWORD: username_indexer
+      POSTGRES_DB: username_indexer
+    volumes:
+      - username_indexer_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U username_indexer -d username_indexer"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Independent public username-read service. Bootstraps a finalized projection
+  # from People Chain, then serves rate-limited prefix search.
+  username-indexer:
+    build:
+      context: .
+      target: dub
+    image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
+    # One image, eight roles: this line is what makes the container this
+    # service. verify_role_split.sh checks it against `dub --list-roles`.
+    command: ["--role", "username-indexer"]
+    restart: unless-stopped
+    depends_on:
+      username-indexer-postgres:
+        condition: service_healthy
+    # Explicit allowlist: do not inject the shared .env wholesale because it
+    # also contains service-owned signing secrets.
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      INDEXER_DATABASE_URL: postgres://username_indexer:username_indexer@username-indexer-postgres:5432/username_indexer
+      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      STORAGE_PAGE_SIZE: ${STORAGE_PAGE_SIZE:-1000}
+      SYNC_INTERVAL_SECS: ${SYNC_INTERVAL_SECS:-30}
+      SEARCH_RATE_LIMIT: ${SEARCH_RATE_LIMIT:-60}
+      SEARCH_RATE_LIMIT_WINDOW_SECS: ${SEARCH_RATE_LIMIT_WINDOW_SECS:-60}
+      # Proof-of-compute gate on public search, OFF by default. When enabled the
+      # gate is either-or: a valid device-attestation JWT satisfies search just as
+      # a solved puzzle does, so the shipping apps (which authenticate search)
+      # need no change and only anonymous callers mine.
+      POC_ENABLED: ${POC_ENABLED:-false}
+      POC_HMAC_SECRET: ${POC_HMAC_SECRET:-}
+      POC_DIFFICULTY_BITS: ${POC_DIFFICULTY_BITS:-16}
+      # VERIFY-ONLY key material for that bypass — the public half only, never
+      # JWT_ED25519_SECRET: this service can verify device-attestation tokens but
+      # can never mint one (enforced by scripts/verify_compose_boundaries.sh).
+      JWT_JWKS_JSON: ${JWT_JWKS_JSON:-}
+      JWT_ED25519_PUBLIC_KEY: ${JWT_ED25519_PUBLIC_KEY:-0x8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c}
+      # Prometheus exporter, scraped on the private metrics network only.
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      METRICS_ADDR: ${METRICS_ADDR:-0.0.0.0:9090}
+      RUST_LOG: ${RUST_LOG:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    networks:
+      default: {}
+      edge:
+        aliases: ["username-indexer-${ENV_ID:-paseo-next-v2}"]
+      metrics:
+        aliases: ["username-indexer-${ENV_ID:-paseo-next-v2}"]
+    healthcheck:
+      test: ["CMD", "dub", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      # Covers migrations + the finalized bootstrap scan + People Chain connect.
+      # The scan is the long pole on a first boot against a populated chain, and
+      # a health failure during it would restart the scan from the beginning.
+      start_period: 300s
+
+  # invite-tickets owns its persistence independently: the ticket-pool table
+  # holds private keys and must share nothing with the device-attestation DB.
+  invite-tickets-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: invite_tickets
+      POSTGRES_PASSWORD: invite_tickets
+      POSTGRES_DB: invite_tickets
+    volumes:
+      - invite_tickets_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U invite_tickets -d invite_tickets"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # N-replica claim API for the frozen /api/v1/invitation-ticket/claim route.
+  # DB-only (never touches the People Chain) and holds no signing secret —
+  # explicit environment, no .env pass-through.
+  invite-tickets-api:
+    build:
+      context: .
+      target: dub
+    image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
+    # One image, eight roles: this line is what makes the container this
+    # service. verify_role_split.sh checks it against `dub --list-roles`.
+    command: ["--role", "invite-tickets-api"]
+    restart: unless-stopped
+    depends_on:
+      invite-tickets-postgres:
+        condition: service_healthy
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      INVITE_TICKETS_DATABASE_URL: postgres://invite_tickets:invite_tickets@invite-tickets-postgres:5432/invite_tickets
+      PEOPLE_NETWORK: ${PEOPLE_NETWORK:-paseo}
+      # Verifies device-attestation JWTs. Dev default = the public half of
+      # device-attestation-api's dev JWT_ED25519_SECRET above; in prod prefer
+      # JWT_JWKS_JSON from device-attestation's /.well-known/jwks.json.
+      JWT_JWKS_JSON: ${JWT_JWKS_JSON:-}
+      JWT_ED25519_PUBLIC_KEY: ${JWT_ED25519_PUBLIC_KEY:-0x8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c}
+      INVITE_TICKETS_RATE_LIMIT: ${INVITE_TICKETS_RATE_LIMIT:-30}
+      INVITE_TICKETS_RATE_LIMIT_WINDOW_SECS: ${INVITE_TICKETS_RATE_LIMIT_WINDOW_SECS:-60}
+      # Prometheus exporter, scraped on the private metrics network only.
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      METRICS_ADDR: ${METRICS_ADDR:-0.0.0.0:9090}
+      RUST_LOG: ${RUST_LOG:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    networks:
+      default: {}
+      edge:
+        aliases: ["invite-tickets-api-${ENV_ID:-paseo-next-v2}"]
+      metrics:
+        aliases: ["invite-tickets-api-${ENV_ID:-paseo-next-v2}"]
+    healthcheck:
+      test: ["CMD", "dub", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      # Covers migrations (no chain connect on this bin).
+      start_period: 20s
+
+  # Single-instance pool maintainer: registers generated keypairs on People
+  # Chain as the inviter. MUST stay at exactly one replica — one inviter = one
+  # nonce lane (a Postgres advisory lock guards deploy overlaps). The inviter
+  # secret lives only in this service's environment; NOTE it must NOT share a
+  # signing account with any other chain writer (nonce lane conflict — see
+  # docs/deploy.md). Do not `--scale` this.
+  invite-tickets-pool:
+    build:
+      context: .
+      target: dub
+    image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
+    # One image, eight roles: this line is what makes the container this
+    # service. verify_role_split.sh checks it against `dub --list-roles`.
+    command: ["--role", "invite-tickets-pool"]
+    restart: unless-stopped
+    depends_on:
+      invite-tickets-postgres:
+        condition: service_healthy
+    environment:
+      INVITE_TICKETS_DATABASE_URL: postgres://invite_tickets:invite_tickets@invite-tickets-postgres:5432/invite_tickets
+      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      PEOPLE_NETWORK: ${PEOPLE_NETWORK:-paseo}
+      # Dev signer (unfunded: batches finalize with ItemFailed and no tickets
+      # insert). In prod: the hot invite-inviter key, or a delegate that
+      # proxies for …ADDRESS (the wrap is derived from the two).
+      # Interpolated from INVITE_INVITER_* so the invite pool keeps its own
+      # signing account, distinct from every other writer (nonce lanes — see
+      # docs/deploy.md). Dev default = //Bob.
+      INVITER_ADDRESS: ${INVITE_INVITER_ADDRESS:-5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty}
+      INVITER_SIGNER_SURI: ${INVITE_INVITER_SIGNER_SURI:-//Bob}
+      POOL_DIMS: ${POOL_DIMS:-Game,ProofOfInk}
+      POOL_TARGET_SIZE: ${POOL_TARGET_SIZE:-10000}
+      POOL_BATCH_MAX: ${POOL_BATCH_MAX:-100}
+      POOL_INTERVAL_SECS: ${POOL_INTERVAL_SECS:-6}
+      POOL_FINALIZE_SECS: ${POOL_FINALIZE_SECS:-60}
+      # Prometheus exporter, scraped on the private metrics network only.
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      METRICS_ADDR: ${METRICS_ADDR:-0.0.0.0:9090}
+      RUST_LOG: ${RUST_LOG:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    networks:
+      default: {}
+      metrics:
+        aliases: ["invite-tickets-pool-${ENV_ID:-paseo-next-v2}"]
+    deploy:
+      replicas: 1
+
+  # TURN credential issuer: stateless (no DB; read-only People Chain root cache
+  # when proof issuance is enabled). The only secret is the HMAC key shared
+  # with the TURN relay (coturn `--use-auth-secret` mode must use the SAME
+  # secret and algorithm, or minted credentials will not authenticate). Safe
+  # to scale within one environment; each environment pins its own RPC/genesis.
+  turn-api:
+    build:
+      context: .
+      target: dub
+    image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
+    # One image, eight roles: this line is what makes the container this
+    # service. verify_role_split.sh checks it against `dub --list-roles`.
+    command: ["--role", "turn-api"]
+    restart: unless-stopped
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      # Dev secret (base64 of 32×0x42 — the golden-capture secret). In prod
+      # this MUST be the relay-shared secret; rotate by restarting relay and
+      # issuer together.
+      TURN_SECRET: ${TURN_SECRET:-QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=}
+      TURN_AUTH_ALGORITHM: ${TURN_AUTH_ALGORITHM:-SHA1}
+      TURN_TTL_SECS: ${TURN_TTL_SECS:-1800}
+      TURN_REALM: ${TURN_REALM:-example.org}
+      ICE_SERVERS: ${ICE_SERVERS:-stun:stun.example.com:3478,turn:turn.example.com:3478?transport=udp}
+      # Verifies device-attestation JWTs. Dev default = the public half of
+      # device-attestation-api's dev JWT_ED25519_SECRET above; in prod prefer
+      # JWT_JWKS_JSON from device-attestation's /.well-known/jwks.json.
+      JWT_JWKS_JSON: ${JWT_JWKS_JSON:-}
+      JWT_ED25519_PUBLIC_KEY: ${JWT_ED25519_PUBLIC_KEY:-0x8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c}
+      TURN_RATE_LIMIT: ${TURN_RATE_LIMIT:-30}
+      TURN_RATE_LIMIT_WINDOW_SECS: ${TURN_RATE_LIMIT_WINDOW_SECS:-60}
+      # Proof-authorized issuance (POST /api/v1/turn/issue-with-proof).
+      # Absent unless TURN_PROOF_ENABLED=true, in which case every
+      # deployment-specific value below is required and startup fails without it.
+      TURN_PROOF_ENABLED: ${TURN_PROOF_ENABLED:-false}
+      TURN_PROOF_RPC_URL: ${TURN_PROOF_RPC_URL:-}
+      TURN_PROOF_GENESIS: ${TURN_PROOF_GENESIS:-}
+      TURN_PROOF_PRODUCTS: ${TURN_PROOF_PRODUCTS:-}
+      TURN_PROOF_CONTEXT_SUFFIX: ${TURN_PROOF_CONTEXT_SUFFIX:-0}
+      TURN_PROOF_CONCURRENCY: ${TURN_PROOF_CONCURRENCY:-auto}
+      # Prometheus exporter, scraped on the private metrics network only.
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      METRICS_ADDR: ${METRICS_ADDR:-0.0.0.0:9090}
+      RUST_LOG: ${RUST_LOG:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    networks:
+      default: {}
+      edge:
+        aliases: ["turn-api-${ENV_ID:-paseo-next-v2}"]
+      metrics:
+        aliases: ["turn-api-${ENV_ID:-paseo-next-v2}"]
+    healthcheck:
+      test: ["CMD", "dub", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Independent, stateless, DB-free `/api/v1/notify` push relay. No depends_on:
+  # stopping it or giving it invalid provider secrets can only fail
+  # `/api/v1/notify`. Verify-only: holds the JWT public key, never a signing key.
+  # Push secrets are service-owned (from the server's chmod-600 .env); absent
+  # providers report per-request failure without affecting readiness.
+  notify-relay:
+    build:
+      context: .
+      target: dub
+    image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
+    # One image, eight roles: this line is what makes the container this
+    # service. verify_role_split.sh checks it against `dub --list-roles`.
+    command: ["--role", "notify-relay"]
+    restart: unless-stopped
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      # Verifies device-attestation JWTs. Dev default = the public half of
+      # device-attestation-api's dev JWT_ED25519_SECRET above; in prod prefer JWT_JWKS_JSON.
+      JWT_JWKS_JSON: ${JWT_JWKS_JSON:-}
+      JWT_ED25519_PUBLIC_KEY: ${JWT_ED25519_PUBLIC_KEY:-0x8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c}
+      NOTIFY_RATE_LIMIT: ${NOTIFY_RATE_LIMIT:-60}
+      NOTIFY_RATE_LIMIT_WINDOW_SECS: ${NOTIFY_RATE_LIMIT_WINDOW_SECS:-60}
+      # APNs: point APNS_KEY_FILE at your .p8 (see the volume); unset -> stub.
+      APNS_PRIVATE_KEY_FILE: /run/secrets/notify/apns.p8
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      APNS_TOPIC: ${APNS_TOPIC:-}
+      APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-}
+      FCM_SERVICE_ACCOUNT_JSON: ${FCM_SERVICE_ACCOUNT_JSON:-}
+      # Prometheus exporter, scraped on the private metrics network only.
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      METRICS_ADDR: ${METRICS_ADDR:-0.0.0.0:9090}
+      RUST_LOG: ${RUST_LOG:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    # APNs key, read-only from wherever the operator keeps it. Unset -> /dev/null
+    # -> stub. Must exist before deploy, readable by uid 10001; see docs/deploy.md.
+    volumes:
+      - ${APNS_KEY_FILE:-/dev/null}:/run/secrets/notify/apns.p8:ro
+    networks:
+      default: {}
+      edge:
+        aliases: ["notify-relay-${ENV_ID:-paseo-next-v2}"]
+      metrics:
+        aliases: ["notify-relay-${ENV_ID:-paseo-next-v2}"]
+    healthcheck:
+      test: ["CMD", "dub", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+networks:
+  # Per-project private network: how each service reaches its own Postgres.
+  default:
+  # Shared with the edge gateway and every other environment's project. Created
+  # once out of band (`docker network create dub-edge`) so no project owns it.
+  # Services join it under an ENV_ID-suffixed alias, which is what lets two
+  # projects with identical service names coexist on one host.
+  edge:
+    external: true
+    name: ${EDGE_NETWORK:-dub-edge}
+  # Shared with the observability project (Prometheus) and nothing else.
+  # Created once out of band (`docker network create dub-metrics`); every
+  # process joins it under an ENV_ID-suffixed alias so one Prometheus can
+  # scrape several environments on one host. Never routed from the edge.
+  metrics:
+    external: true
+    name: ${METRICS_NETWORK:-dub-metrics}
+
+volumes:
+  pgdata:
+  username_indexer_pgdata:
+  invite_tickets_pgdata:

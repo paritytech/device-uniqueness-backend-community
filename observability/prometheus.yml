@@ -1,0 +1,51 @@
+# Scrape targets per environment. Every process exposes /metrics on 9090 and is
+# reachable on the metrics network under its `<service>-<ENV_ID>` alias, so an
+# environment is one job whose targets carry that suffix and whose `env_id`
+# label names it. `env_id` is what the dashboard filters on: a job without it
+# would silently merge two environments into one line.
+#
+# Targets are static: this host runs a fixed set of containers, and Docker
+# service discovery would need the daemon socket mounted into Prometheus.
+#
+
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  external_labels:
+    monitor: dub
+
+scrape_configs:
+  - job_name: paseo-next-v2
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - device-attestation-api-paseo-next-v2:9090
+          - device-attestation-chain-writer-paseo-next-v2:9090
+          - registration-queue-paseo-next-v2:9090
+          - username-indexer-paseo-next-v2:9090
+          - invite-tickets-api-paseo-next-v2:9090
+          - invite-tickets-pool-paseo-next-v2:9090
+          - turn-api-paseo-next-v2:9090
+          - notify-relay-paseo-next-v2:9090
+        labels:
+          env_id: paseo-next-v2
+
+  # PreviewNet runs a deliberate subset — the six services listed in
+  # docs/deploy.md ("Start only the services that environment needs"), of which
+  # four export metrics. `registration-queue` is absent (QUEUE_ENABLED=false),
+  # the ticket services are not deployed there, and `notify-relay` is shared.
+  # Listing an undeployed target here would only produce a permanent `down`.
+  - job_name: previewnet
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - device-attestation-api-previewnet:9090
+          - device-attestation-chain-writer-previewnet:9090
+          - username-indexer-previewnet:9090
+          - turn-api-previewnet:9090
+        labels:
+          env_id: previewnet
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

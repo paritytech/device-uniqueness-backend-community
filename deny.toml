@@ -1,0 +1,54 @@
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "GPL-3.0-only",
+    # verifiable (git dep): ring-VRF personhood-proof verification.
+    "GPL-3.0-or-later WITH Classpath-exception-2.0",
+    # Public-domain dedication; permissive inbound to GPL-3.0.
+    # bip39, bitcoin_hashes, hex-conservative, tiny-keccak (via subxt-signer).
+    "CC0-1.0",
+    # Permissive data licence on the bundled root-certificate sets.
+    # webpki-roots / webpki-root-certs (via reqwest and sqlx-core).
+    "CDLA-Permissive-2.0",
+]
+
+[sources]
+unknown-git = "deny"
+allow-git = ["https://github.com/paritytech/verifiable"]
+
+[bans]
+multiple-versions = "warn"
+
+[advisories]
+yanked = "deny"
+
+# Every entry below has NO patched version available. Each was checked for
+# actual reachability, not waved through — re-check on each dependency bump,
+# and delete the entry the moment a fix ships.
+ignore = [
+  # Marvin Attack: a timing sidechannel in RSA PRIVATE-key operations.
+  # `rsa` is used here for verification only — `RsaPublicKey` +
+  # `Pkcs1v15Sign` over attestation certificate chains in
+  # crates/device-attestation/src/auth/x509.rs. There is no `RsaPrivateKey`
+  # and no decryption anywhere in the workspace, so the vulnerable code path
+  # is never entered. (Play Integrity response decryption is AES-256, and
+  # unrelated.) Upstream has no fixed release.
+  "RUSTSEC-2023-0071",
+
+  # Unmaintained, not vulnerable. All three are transitive build-time or
+  # decoding dependencies we do not select:
+  #   paste             <- ark-ff, via the ring-VRF stack
+  #   proc-macro-error2 <- subxt-macro
+  #   smallstr          <- scale-info-legacy, via subxt
+  # Nothing to upgrade to; they leave when their parents replace them.
+  "RUSTSEC-2024-0436",
+  "RUSTSEC-2026-0173",
+  "RUSTSEC-2026-0215",
+]

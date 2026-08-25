@@ -1,0 +1,84 @@
+name: Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        description: The ref to check out. Defaults to the caller's ref.
+        required: false
+        type: string
+
+concurrency:
+  group: check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Reclaim runner disk
+        run: |
+          df -h /
+          # Preinstalled toolchains this workspace never uses. `|| true`: the
+          # image's contents change, and a missing directory is not a failure.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: compose configuration boundaries
+        run: scripts/verify_compose_boundaries.sh
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: role split
+        run: scripts/verify_role_split.sh
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: tests
+        run: cargo test --workspace
+
+      - name: disk usage after tests
+        if: always()
+        run: df -h /
+
+  database:
+    needs: offline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: Swatinem/rust-cache@v2
+      - name: database integration tests
+        run: scripts/run_live_suites.sh db cargo test
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_CONFIG: .gitleaks.toml
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

@@ -1,0 +1,42 @@
+# Build output
+/target
+**/*.rs.bk
+coverage/
+
+# Environment. `.env*` rather than `.env.local`: the `.local` forms do not cover
+# a plain `.env`, which is exactly where a real credential ends up.
+.env*
+!.env.example
+
+# Lockfile policy: Cargo.lock IS committed. This is a workspace of binaries, not
+# a published library, so a reproducible build beats dependency-range coverage.
+
+# Local runtime / scratch
+*.log
+/output
+/.local/
+/.zdx/
+/.playwright-cli
+
+# OS
+.DS_Store
+*.local
+
+# AI-assistant session state. Agent *configuration* is deliberately not ignored:
+# AGENTS.md is tracked, and so is anything under .claude/{commands,skills,agents}
+# that documents this project.
+.claude/sessions/
+.claude/cache/
+.claude/settings.local.json
+.cursor/
+.codeium/
+.gemini/
+.roo/
+.cline/
+.codex/
+.aider*
+.swarm/
+.ai/
+.llm/
+.mcp.json
+opencode.json

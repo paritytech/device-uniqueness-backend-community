@@ -1,0 +1,117 @@
+# The single-URL gateway: one public origin for the whole migration.
+#
+# This file is a GENERATED artifact: the region between the
+# `generated:route-table` markers is rendered by `just routes` from the one
+# ownership map in crates/dub/src/routes/table.rs, and a test fails if it is
+# stale. Never hand-edit inside the markers. It is loaded by the edge
+# container defined in gateway/docker-compose.yml — the only container on the
+# host that publishes a port. Upstreams are container aliases on the shared
+# `dub-edge` network, resolved by docker DNS, so adding an environment is a
+# new alias rather than a new port.
+#
+# One site block per environment, both importing the same `routes` snippet, so
+# the ownership map exists once no matter how many environments run. An
+# environment is only ever reachable through its own hostname — there is no
+# header, no path prefix, and therefore no default to fall through to when a
+# caller names the wrong one.
+#
+# Every {$VAR:default} default matches the production layout, so the edge
+# project starts with no environment at all. For a local run set both addresses
+# to `http://<hostname>` (the scheme keeps Caddy off HTTPS and off ACME) and
+# publish the container's port 80 elsewhere with EDGE_HTTP_PORT — see the header
+# of gateway/docker-compose.yml.
+#
+# No secrets live here or in the gateway process: it terminates TLS and
+# routes, nothing else.
+
+# The route table, once. Imported per environment with that environment's
+# upstreams; adding an environment adds a site block, never a second copy of
+# the ownership map.
+#
+# Arguments, in order (Caddy snippet args are positional):
+#   0 device-attestation  1 indexer  2 invite-tickets  3 turn
+#   4 notify
+(routes) {
+	# generated:route-table
+	# The committed API reference. Caddy file-serves it; a deployment that serves it from a
+	# static server instead is still in the ownership map, and must strip the same way. The
+	# prefix is STRIPPED before the server sees it — without that the static server is handed
+	# /docs/openapi.json, looks for it under its document root and 404s, while its readiness
+	# probe stays green. Ownership parity is not path parity.
+	handle_path /docs* {
+		root * {$GATEWAY_DOCS_ROOT:/srv/docs}
+		file_server
+	}
+
+	# GET username reads belong to the indexer — EXCEPT the payment-status poll, which is
+	# device-attestation-api's, and except every non-GET method (the write and availability surface,
+	# and the collection-root CORS preflight). A plain path-prefix rule can express neither
+	# carve-out; this is why the Traefik emitter renders an IngressRoute rather than an Ingress.
+	@username_reads {
+		method GET
+		path /api/v1/usernames /api/v1/usernames/*
+		not path /api/v1/usernames/payment-status
+	}
+	handle @username_reads {
+		reverse_proxy {args[1]}
+	}
+
+	# The synchronous invitation-credential claim route.
+	handle /api/v1/invitation-ticket/* {
+		reverse_proxy {args[2]}
+	}
+
+	# Each environment runs its own issuer because proof verification pins one People Chain
+	# RPC and genesis hash; routing to another environment would verify against the wrong ring.
+	handle /api/v1/turn/* {
+		reverse_proxy {args[3]}
+	}
+
+	# Shared across environments. NOTE: this service answers an EMPTY 404 for an unmatched path and
+	# 405 for a wrong method, where every sibling answers the JSON 404 body. The
+	# whole prefix is routed here, so that is the live contract — see routes::fallback.
+	handle /api/v1/notify* {
+		reverse_proxy {args[4]}
+	}
+
+	# Proof-of-compute gates the indexer's own public search, so it is the indexer's route.
+	# Off by default, in which case the service answers its plain-text 404.
+	handle /api/v1/poc* {
+		reverse_proxy {args[1]}
+	}
+
+	# Everything else: auth, attester, username writes, JWKS, root health.
+	handle {
+		reverse_proxy {args[0]}
+	}
+
+	# /generated:route-table
+}
+
+# --- Paseo Next v2 -------------------------------------------------------
+{$GATEWAY_ADDRESS:identity.dotspark.app} {
+	import routes \
+ {$DEVICE_ATTESTATION_UPSTREAM:device-attestation-api-paseo-next-v2:8080} \
+ {$USERNAME_INDEXER_UPSTREAM:username-indexer-paseo-next-v2:8080} \
+ {$INVITE_TICKETS_UPSTREAM:invite-tickets-api-paseo-next-v2:8080} \
+ {$TURN_UPSTREAM:turn-api-paseo-next-v2:8080} \
+ {$NOTIFY_UPSTREAM:notify-relay-paseo-next-v2:8080}
+}
+
+# --- PreviewNet ----------------------------------------------------------
+# Same routes, this environment's upstreams. TURN is local because proof
+# verification pins one People Chain RPC and genesis; notify remains shared and
+# verifies both environments' tokens from a merged JWKS. invite-tickets is not
+# deployed here, so its route points at this environment's device-attestation-api
+# and answers its 404 rather than a 502.
+#
+# This environment's own upstreams are literals: they follow from ENV_ID, and
+# nothing sets a per-environment override — only the hostname is a variable.
+{$PREVIEW_GATEWAY_ADDRESS:identity-previewnet.dotspark.app} {
+	import routes \
+ device-attestation-api-previewnet:8080 \
+ username-indexer-previewnet:8080 \
+ device-attestation-api-previewnet:8080 \
+ turn-api-previewnet:8080 \
+ {$NOTIFY_UPSTREAM:notify-relay-paseo-next-v2:8080}
+}
