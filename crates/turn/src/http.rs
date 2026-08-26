@@ -97,16 +97,6 @@ pub async fn readiness(_state: AppState) -> health::Readiness {
     Ok(&[])
 }
 
-fn check_rate_limit(state: &AppState, subject: &str) -> Result<(), AppError> {
-    if state.limiter.allow(subject) {
-        Ok(())
-    } else {
-        Err(AppError::RateLimited {
-            retry_after_secs: state.limiter.window_secs(),
-        })
-    }
-}
-
 /// Validate the request body: an object whose optional `regionHint` is a
 /// string or null. The value itself is ignored (reserved).
 fn validate_body(body: &serde_json::Value) -> Result<(), Vec<FieldError>> {
@@ -156,7 +146,7 @@ verification.",
 )]
 pub(crate) async fn issue_credentials(
     State(state): State<AppState>,
-    auth: AuthSubject,
+    _auth: AuthSubject,
     body: axum::body::Bytes,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     // The content type is ignored; an empty body is an empty command, since
@@ -166,8 +156,6 @@ pub(crate) async fn issue_credentials(
             serde_json::from_slice(&body).map_err(|_| AppError::MalformedJson)?;
         validate_body(&body).map_err(AppError::InvalidBody)?;
     }
-
-    check_rate_limit(&state, &auth.subject)?;
 
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

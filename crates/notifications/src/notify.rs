@@ -12,10 +12,6 @@ use crate::platform::{self, Platform};
 use crate::provider::{ProviderError, PushOutcome, PushRequest};
 use http_common::AuthSubject;
 
-/// Route component of the rate-limit key (kept explicit so the key is
-/// `route:subject`, not subject alone, if more authenticated routes are added).
-const NOTIFY_ROUTE: &str = "/api/v1/notify";
-
 /// Validated `POST /api/v1/notify` request, built by [`validate_body`].
 #[derive(Debug)]
 struct NotifyRequest {
@@ -118,19 +114,11 @@ with `Retry-After`)."),
 )]
 pub async fn handle(
     State(state): State<AppState>,
-    auth: AuthSubject,
+    _auth: AuthSubject,
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> AppResult<Json<NotifyResponse>> {
     let Json(body) = body.map_err(|_| AppError::MalformedJson)?;
     let request = validate_body(&body).map_err(AppError::InvalidBody)?;
-
-    // Abuse control keyed on the authenticated subject + route (never raw IP).
-    let rate_key = format!("{NOTIFY_ROUTE}:{}", auth.subject);
-    if !state.limiter.allow(&rate_key) {
-        return Err(AppError::RateLimited {
-            retry_after_secs: state.limiter.window_secs(),
-        });
-    }
 
     let platform = platform::detect(&request.device_token, request.platform);
     let push = PushRequest {

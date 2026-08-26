@@ -8,7 +8,6 @@ use sqlx::PgPool;
 
 use secrecy::ExposeSecret as _;
 
-use super::middleware::RateLimiter;
 use crate::auth::key_attest::crl::CrlCache;
 use crate::auth::play_integrity::google::GoogleDecoder;
 use crate::chain::ChainClient;
@@ -24,8 +23,6 @@ pub struct AppState {
     /// JWT issuer (Ed25519).
     pub jwt: Arc<Jwt>,
     pub config: Arc<Config>,
-    /// Per-route rate limiter for the auth handshake.
-    pub limiter: RateLimiter,
     /// Cached Android attestation revocation list (fetched lazily).
     pub crl: CrlCache,
     /// Temporary Play Integrity `decodeIntegrityToken` fallback client
@@ -45,7 +42,6 @@ impl http_common::HasJwtVerifier for AppState {
 
 impl AppState {
     pub fn new(pool: PgPool, chain: ChainClient, jwt: Jwt, config: Config) -> Self {
-        let limiter = RateLimiter::new(config.auth_rate_limit, config.auth_rate_window);
         let crl = CrlCache::new(
             config.android_crl_url.clone(),
             config.android_crl_cache_ttl,
@@ -72,7 +68,6 @@ impl AppState {
             chain,
             jwt: Arc::new(jwt),
             config: Arc::new(config),
-            limiter,
             crl,
             play_integrity_google,
             device_check,

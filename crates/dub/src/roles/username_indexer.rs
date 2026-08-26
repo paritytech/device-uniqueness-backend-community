@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 
-use username_indexer::http::middleware::RateLimiter;
 use username_indexer::poc::{self, Poc};
 use username_indexer::sync::{self, Freshness, FreshnessSnapshot};
 use username_indexer::{db, ensure_seeded, routes, AppState, ChainClient, Config};
@@ -96,11 +95,7 @@ pub async fn build_state(
         freshness.clone(),
     ));
 
-    let limiter = RateLimiter::new(
-        config.search_rate_limit,
-        Duration::from_secs(config.search_rate_limit_window_secs.into()),
-    );
-    let mut state = AppState::new(pool.clone(), chain, freshness, limiter);
+    let mut state = AppState::new(pool.clone(), chain, freshness);
     if let Some(poc) = poc {
         tracing::info!(
             difficulty_bits = config.poc_difficulty_bits,

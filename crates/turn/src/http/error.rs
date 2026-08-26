@@ -7,8 +7,6 @@ pub use http_common::FieldError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
-    #[error("rate limited")]
-    RateLimited { retry_after_secs: u64 },
     #[error("invalid request body")]
     InvalidBody(Vec<FieldError>),
     #[error("malformed JSON body")]
@@ -34,9 +32,6 @@ pub enum AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match self {
-            AppError::RateLimited { retry_after_secs } => {
-                http_common::error::rate_limited(retry_after_secs)
-            }
             AppError::InvalidBody(errors) => http_common::error::invalid_body(&errors),
             AppError::MalformedJson => http_common::error::malformed_json(),
             AppError::BadProofRequest(detail) => http_common::error::bad_request(detail),

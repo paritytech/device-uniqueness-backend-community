@@ -11,7 +11,6 @@ use base64::Engine as _;
 use ed25519_dalek::{Signer as _, SigningKey};
 use http_body_util::BodyExt as _;
 use tower::ServiceExt as _;
-use username_indexer::http::middleware::RateLimiter;
 use username_indexer::poc::puzzle::{checksum_hex, derive_secret};
 use username_indexer::poc::solution::{leading_zero_bits, mine};
 use username_indexer::poc::{now_millis, Poc, Solution};
@@ -45,12 +44,7 @@ async fn app(gate: bool) -> axum::Router {
         .acquire_timeout(Duration::from_millis(50))
         .connect_lazy("postgres://nobody@127.0.0.1:1/nothing")
         .expect("lazy pool");
-    let state = AppState::new(
-        pool,
-        dead_chain_client().await,
-        Freshness::new(),
-        RateLimiter::new(1_000, Duration::from_secs(60)),
-    );
+    let state = AppState::new(pool, dead_chain_client().await, Freshness::new());
     let state = if gate {
         state.with_poc(Poc::new(
             derive_secret(IKM),

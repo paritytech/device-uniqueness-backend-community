@@ -10,8 +10,6 @@ use serde_json::json;
 /// A usernames handler error mapped to its HTTP response.
 #[derive(Debug, thiserror::Error)]
 pub enum UsernamesError {
-    #[error("rate limited")]
-    RateLimited { retry_after_secs: u64 },
     #[error("invalid request body")]
     InvalidBody(Vec<FieldError>),
     #[error("invalid query parameters")]
@@ -72,9 +70,6 @@ pub enum UsernamesError {
 impl IntoResponse for UsernamesError {
     fn into_response(self) -> Response {
         match self {
-            UsernamesError::RateLimited { retry_after_secs } => {
-                http_common::error::rate_limited(retry_after_secs)
-            }
             UsernamesError::InvalidBody(errors) => http_common::error::invalid_body(&errors),
             UsernamesError::InvalidQuery(errors) => http_common::error::invalid_query(&errors),
             UsernamesError::InvalidHeader(errors) => http_common::error::invalid_header(&errors),

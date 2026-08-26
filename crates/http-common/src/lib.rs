@@ -7,9 +7,7 @@ pub mod error;
 pub mod health;
 pub mod layers;
 pub mod metrics;
-pub mod rate_limit;
 pub mod telemetry;
 
 pub use auth::{AuthSubject, HasJwtVerifier};
 pub use error::FieldError;
-pub use rate_limit::RateLimiter;

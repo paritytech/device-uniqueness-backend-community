@@ -74,18 +74,6 @@ pub(crate) async fn taken_discriminators(
     Ok(merge_discriminators(chain, pending))
 }
 
-/// Subject-keyed rate limit for the authenticated usernames surface (never
-/// IP — the CGNAT postmortem). Renders the 429 with `Retry-After`.
-pub(crate) fn check_rate_limit(state: &AppState, subject: &str) -> UsernamesResult<()> {
-    let key = format!("/api/v1/usernames:{subject}");
-    if state.limiter.allow(&key) {
-        return Ok(());
-    }
-    Err(UsernamesError::RateLimited {
-        retry_after_secs: state.config.auth_rate_window.as_secs(),
-    })
-}
-
 /// Parse the request body as JSON, content type ignored. Unparseable → 400.
 pub(crate) fn parse_json_body(body: &Bytes) -> UsernamesResult<Value> {
     serde_json::from_slice(body).map_err(|_| UsernamesError::MalformedJson)

@@ -556,14 +556,6 @@ pub async fn status(
 ) -> crate::usernames::error::UsernamesResult<axum::Json<PaymentStatusResponse>> {
     use crate::usernames::error::UsernamesError;
 
-    // Own bucket, subject-keyed (the queue-status precedent): polling here
-    // must not eat the claim path's quota.
-    let key = format!("/api/v1/usernames/payment-status:{}", auth.subject);
-    if !state.limiter.allow(&key) {
-        return Err(UsernamesError::RateLimited {
-            retry_after_secs: state.config.auth_rate_window.as_secs(),
-        });
-    }
     let row = sqlx::query(
         "SELECT status FROM payment_requests WHERE account_id = $1 ORDER BY id DESC LIMIT 1",
     )

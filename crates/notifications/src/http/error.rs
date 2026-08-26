@@ -12,9 +12,6 @@ pub enum AppError {
     /// Request body was not parseable JSON (400).
     #[error("malformed JSON body")]
     MalformedJson,
-    /// Authenticated subject exceeded the notify rate limit (429).
-    #[error("rate limited")]
-    RateLimited { retry_after_secs: u64 },
 }
 
 impl IntoResponse for AppError {
@@ -22,9 +19,6 @@ impl IntoResponse for AppError {
         match self {
             AppError::InvalidBody(errors) => http_common::error::invalid_body(&errors),
             AppError::MalformedJson => http_common::error::malformed_json(),
-            AppError::RateLimited { retry_after_secs } => {
-                http_common::error::rate_limited(retry_after_secs)
-            }
         }
     }
 }

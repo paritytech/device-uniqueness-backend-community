@@ -54,10 +54,6 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             middleware::poc_gate,
         ))
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            middleware::rate_limit,
-        ))
         .fallback(not_found);
     let api = Router::new().route("/api/v1/usernames/search", search);
     let poc_api = if state.poc.is_some() {

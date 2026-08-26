@@ -26,8 +26,6 @@ pub struct ErrorResponse {
 /// A handler error mapped to an HTTP response.
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
-    #[error("rate limited")]
-    RateLimited,
     #[error("{0}")]
     BadRequest(String),
     #[error("unauthorized")]
@@ -71,7 +69,6 @@ impl AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, code) = match &self {
-            AppError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "RATE_LIMITED"),
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "WRONG_DATA"),
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
             AppError::Forbidden(_) => (StatusCode::FORBIDDEN, "FORBIDDEN"),
@@ -125,12 +122,6 @@ mod tests {
     #[tokio::test]
     async fn every_variant_maps_to_its_frozen_status_code_and_message() {
         let cases = [
-            (
-                AppError::RateLimited,
-                StatusCode::TOO_MANY_REQUESTS,
-                "RATE_LIMITED",
-                "rate limited",
-            ),
             (
                 AppError::bad_request("candidateSignature is malformed"),
                 StatusCode::BAD_REQUEST,

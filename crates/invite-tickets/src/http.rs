@@ -62,17 +62,6 @@ pub async fn readiness(state: AppState) -> health::Readiness {
     Ok(&["db"])
 }
 
-/// Enforce the per-subject fixed window; `429` with `Retry-After` on excess.
-fn check_rate_limit(state: &AppState, subject: &str) -> Result<(), AppError> {
-    if state.limiter.allow(subject) {
-        Ok(())
-    } else {
-        Err(AppError::RateLimited {
-            retry_after_secs: state.limiter.window_secs(),
-        })
-    }
-}
-
 /// Retry a transient-failure-prone DB operation with exponential back-off,
 /// mirroring the legacy shell's `dbRetry` posture: infra errors are retried
 /// then surfaced as a 500; domain outcomes (`Ok`) are never retried.
@@ -210,7 +199,7 @@ contended ticket.",
 )]
 pub(crate) async fn claim_ticket(
     State(state): State<AppState>,
-    auth: AuthSubject,
+    _auth: AuthSubject,
     body: axum::body::Bytes,
 ) -> AppResult<Json<serde_json::Value>> {
     // The content type is ignored; anything that is not parseable JSON is a
@@ -218,8 +207,6 @@ pub(crate) async fn claim_ticket(
     let body: serde_json::Value =
         serde_json::from_slice(&body).map_err(|_| AppError::MalformedJson)?;
     let request = validate_body(&body).map_err(AppError::InvalidBody)?;
-
-    check_rate_limit(&state, &auth.subject)?;
 
     let dim = request.dim;
     let network = state.config.network;

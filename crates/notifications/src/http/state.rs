@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 
-use http_common::RateLimiter;
 use jwt_verify::Verifier;
 
 use crate::provider::PushProvider;
@@ -14,8 +13,6 @@ pub struct AppState {
     pub verifier: Verifier,
     pub apns: Arc<dyn PushProvider>,
     pub fcm: Arc<dyn PushProvider>,
-    /// In-memory per-subject rate limiter for `/api/v1/notify`.
-    pub limiter: RateLimiter,
 }
 
 impl AppState {
@@ -23,13 +20,11 @@ impl AppState {
         verifier: Verifier,
         apns: Arc<dyn PushProvider>,
         fcm: Arc<dyn PushProvider>,
-        limiter: RateLimiter,
     ) -> Self {
         Self {
             verifier,
             apns,
             fcm,
-            limiter,
         }
     }
 }

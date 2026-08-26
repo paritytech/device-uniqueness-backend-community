@@ -98,7 +98,7 @@ fn app_with_rate_limit(
 
 fn state_with_rate_limit(
     proof: Option<(ProofConfig, Option<Snapshot>)>,
-    rate_limit: u32,
+    _rate_limit: u32,
 ) -> AppState {
     let key = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
     let (proof_config, snapshot) = match proof {
@@ -113,8 +113,6 @@ fn state_with_rate_limit(
         realm: "example.org".to_string(),
         ice_servers: vec!["turn:turn.example.org:3478?transport=udp".to_string()],
         jwt_verifier: jwt_verify::Verifier::from_public_key(None, key.verifying_key().as_bytes()),
-        rate_limit,
-        rate_window: Duration::from_secs(60),
         proof: proof_config,
     };
     let state = AppState::new(config);
@@ -479,78 +477,6 @@ async fn each_canonical_collection_selects_only_its_own_cache() {
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-}
-
-#[tokio::test]
-async fn alias_throttle_limits_the_same_person() {
-    let ring = test_ring();
-    let app = app_with_rate_limit(
-        Some((proof_config(), Some(snapshot_of(ring.commitment.clone())))),
-        1,
-    );
-
-    let (status, _) = post_json(
-        &app,
-        "/api/v1/turn/issue-with-proof",
-        Some(fresh_body(&ring, 1)),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
-
-    let (status, _) = post_json(
-        &app,
-        "/api/v1/turn/issue-with-proof",
-        Some(fresh_body(&ring, 1)),
-    )
-    .await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-
-    let (status, _) = post_json(
-        &app,
-        "/api/v1/turn/issue-with-proof",
-        Some(fresh_body(&ring, 3)),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
-}
-
-#[tokio::test]
-async fn each_product_gets_its_own_budget_for_the_same_person() {
-    let ring = test_ring();
-    let app = app_with_rate_limit(
-        Some((proof_config(), Some(snapshot_of(ring.commitment.clone())))),
-        1,
-    );
-
-    let (status, _) = post_json(
-        &app,
-        "/api/v1/turn/issue-with-proof",
-        Some(fresh_body(&ring, 1)),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
-    let (status, _) = post_json(
-        &app,
-        "/api/v1/turn/issue-with-proof",
-        Some(fresh_body(&ring, 1)),
-    )
-    .await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-
-    let timestamp = now_unix() + PROOF_MAX_SKEW_SECS;
-    let proof = prove(
-        &ring,
-        1,
-        &turn::proof::context::product_context(OTHER_PRODUCT, SUFFIX),
-        timestamp,
-    );
-    let (status, _) = post_json(
-        &app,
-        "/api/v1/turn/issue-with-proof",
-        Some(body_for(OTHER_PRODUCT, &proof, 0, timestamp)),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
 }
 
 #[tokio::test]

@@ -2,15 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use base64::Engine as _;
 use ed25519_dalek::{Signer as _, SigningKey};
 use serde_json::{json, Value};
 
 use notifications::{
-    routes, AppState, ProviderError, PushOutcome, PushProvider, RateLimiter, RecordingProvider,
-    Verifier,
+    routes, AppState, ProviderError, PushOutcome, PushProvider, RecordingProvider, Verifier,
 };
 
 const B64: base64::engine::general_purpose::GeneralPurpose =
@@ -41,11 +39,10 @@ async fn spawn(apns: Arc<dyn PushProvider>, fcm: Arc<dyn PushProvider>) -> Strin
 async fn spawn_limited(
     apns: Arc<dyn PushProvider>,
     fcm: Arc<dyn PushProvider>,
-    limit: u32,
+    _limit: u32,
 ) -> String {
     let verifier = Verifier::from_public_key(None, signing_key().verifying_key().as_bytes());
-    let limiter = RateLimiter::new(limit, Duration::from_secs(60));
-    let state = AppState::new(verifier, apns, fcm, limiter);
+    let state = AppState::new(verifier, apns, fcm);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -199,32 +196,6 @@ async fn provider_failure_stays_200_with_success_false() {
     assert_eq!(body["success"], false);
     assert_eq!(body["errors"][0]["device"], IOS_TOKEN);
     assert_eq!(body["errors"][0]["response"], "Network error");
-}
-
-#[tokio::test]
-async fn rate_limits_the_authenticated_subject_with_429() {
-    let base = spawn_limited(ios_success(), android_success(), 1).await;
-    let client = reqwest::Client::new();
-    let send = || {
-        client
-            .post(format!("{base}/api/v1/notify"))
-            .bearer_auth(mint(&signing_key()))
-            .json(&json!({ "deviceToken": IOS_TOKEN, "pushId": PUSH_ID, "message": MESSAGE }))
-            .send()
-    };
-
-    assert_eq!(send().await.unwrap().status(), 200);
-    let limited = send().await.unwrap();
-    assert_eq!(limited.status(), 429);
-    assert_eq!(limited.headers()["content-type"], "application/json");
-    assert!(limited.headers().contains_key("retry-after"));
-    let body: Value = limited.json().await.unwrap();
-    assert!(
-        body["error"]
-            .as_str()
-            .is_some_and(|error| error.starts_with("Rate limit exceeded.")),
-        "{body}"
-    );
 }
 
 #[tokio::test]

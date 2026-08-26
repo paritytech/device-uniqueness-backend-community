@@ -1,8 +1,6 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::time::Duration;
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt as _;
@@ -22,8 +20,6 @@ fn app(proof: bool) -> axum::Router {
         realm: "example.org".to_string(),
         ice_servers: vec!["turn:turn.example.org:3478?transport=udp".to_string()],
         jwt_verifier: jwt_verify::Verifier::from_public_key(None, key.verifying_key().as_bytes()),
-        rate_limit: 100,
-        rate_window: Duration::from_secs(60),
         proof: proof.then(|| ProofConfig {
             rpc_url: "ws://unused.invalid".to_string(),
             genesis: [7u8; 32],

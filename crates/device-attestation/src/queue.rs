@@ -566,15 +566,6 @@ pub async fn status(
     State(state): State<AppState>,
     auth: AuthSubject,
 ) -> UsernamesResult<Json<QueueStatusResponse>> {
-    // Subject-keyed like the rest of the authenticated usernames surface, but
-    // its own bucket: each hit is O(queue) work, and polling here must not
-    // eat the claim path's quota.
-    let key = format!("/api/v1/registration/queue:{}", auth.subject);
-    if !state.limiter.allow(&key) {
-        return Err(UsernamesError::RateLimited {
-            retry_after_secs: state.config.auth_rate_window.as_secs(),
-        });
-    }
     let snapshot = queued_snapshot(&state.pool).await?;
     let status =
         status_in_snapshot(&snapshot, &auth.subject).ok_or(UsernamesError::NoQueueEntry)?;

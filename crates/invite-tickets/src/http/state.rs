@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 
-use http_common::RateLimiter;
 use sqlx::PgPool;
 
 use crate::config::Config;
@@ -17,18 +16,14 @@ pub struct AppState {
     /// Verify-only JWT verifier (shared `jwt-verify` crate).
     pub verifier: Arc<jwt_verify::Verifier>,
     pub config: Arc<Config>,
-    /// Per-subject rate limiter for the authenticated route.
-    pub limiter: RateLimiter,
 }
 
 impl AppState {
     pub fn new(pool: PgPool, config: Config) -> Self {
-        let limiter = RateLimiter::new(config.rate_limit, config.rate_window);
         Self {
             pool,
             verifier: Arc::new(config.jwt_verifier.clone()),
             config: Arc::new(config),
-            limiter,
         }
     }
 }

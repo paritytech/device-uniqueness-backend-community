@@ -1,10 +1,3 @@
-// Copyright (C) 2026 Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: GPL-3.0-only
-
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::{IntoResponse as _, Response};
@@ -12,77 +5,6 @@ use axum::response::{IntoResponse as _, Response};
 use super::error::AppError;
 use super::state::AppState;
 use crate::poc::Rejection;
-
-/// Fixed-window rate limiter shared across handlers (cheap to clone).
-#[derive(Clone)]
-pub struct RateLimiter {
-    windows: Arc<Mutex<HashMap<String, (Instant, u32)>>>,
-    limit: u32,
-    window: Duration,
-}
-
-impl RateLimiter {
-    /// Allow `limit` requests per `window` per key.
-    pub fn new(limit: u32, window: Duration) -> Self {
-        Self {
-            windows: Arc::new(Mutex::new(HashMap::new())),
-            limit,
-            window,
-        }
-    }
-
-    /// The window length in whole seconds (the `Retry-After` value).
-    pub fn window_secs(&self) -> u64 {
-        self.window.as_secs()
-    }
-
-    pub fn allow(&self, key: &str) -> bool {
-        let now = Instant::now();
-        let mut windows = self.windows.lock().expect("rate limiter mutex poisoned");
-        let entry = windows.entry(key.to_string()).or_insert((now, 0));
-        if now.duration_since(entry.0) > self.window {
-            *entry = (now, 0);
-        }
-        if entry.1 >= self.limit {
-            return false;
-        }
-        entry.1 += 1;
-        true
-    }
-}
-
-/// Reject public read requests over the per-IP limit.
-///
-/// Keyed on the best-effort client IP and deliberately doing no signature work:
-/// it must be the cheapest layer on the route so a client that has exhausted its
-/// window cannot force JWT verification or puzzle hashing. The 429 renders the
-/// shared JSON envelope with `Retry-After`.
-pub async fn rate_limit(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    if !state.limiter.allow(&client_ip(&req)) {
-        return AppError::RateLimited {
-            retry_after_secs: state.limiter.window_secs(),
-        }
-        .into_response();
-    }
-    next.run(req).await
-}
-
-/// Best-effort client IP from proxy headers (edge terminates TLS).
-fn client_ip(req: &Request) -> String {
-    let headers = req.headers();
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(|v| v.trim().to_string())
-        .or_else(|| {
-            headers
-                .get("cf-connecting-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.to_string())
-        })
-        .unwrap_or_else(|| "unknown".to_string())
-}
 
 /// Admit a public read when the caller presents **either** a valid
 /// device-attestation JWT **or** a fresh, solved proof-of-compute puzzle.
@@ -133,29 +55,5 @@ fn bearer_token(req: &Request) -> Option<&str> {
     match (parts.next(), parts.next(), parts.next()) {
         (Some("Bearer"), Some(token), None) if !token.is_empty() => Some(token),
         _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::RateLimiter;
-
-    #[test]
-    fn allows_up_to_limit_then_denies() {
-        let limiter = RateLimiter::new(3, Duration::from_secs(60));
-        assert!(limiter.allow("1.2.3.4"));
-        assert!(limiter.allow("1.2.3.4"));
-        assert!(limiter.allow("1.2.3.4"));
-        assert!(!limiter.allow("1.2.3.4"));
-    }
-
-    #[test]
-    fn tracks_keys_independently() {
-        let limiter = RateLimiter::new(1, Duration::from_secs(60));
-        assert!(limiter.allow("1.1.1.1"));
-        assert!(!limiter.allow("1.1.1.1"));
-        assert!(limiter.allow("2.2.2.2"));
     }
 }

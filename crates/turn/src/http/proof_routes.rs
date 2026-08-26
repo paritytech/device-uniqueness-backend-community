@@ -145,13 +145,6 @@ pub(crate) async fn issue_with_proof(
         VerifyError::Internal => AppError::ProofInternal,
     })?;
 
-    // Keep the alias confined to private throttle and keyed-derivation inputs.
-    if !proof_state.alias_limiter.allow(&hex::encode(alias)) {
-        return Err(AppError::RateLimited {
-            retry_after_secs: proof_state.alias_limiter.window_secs(),
-        });
-    }
-
     let credentials = state
         .issuer
         .issue_for_proof(now_unix(), &body.product_id, alias.as_ref());

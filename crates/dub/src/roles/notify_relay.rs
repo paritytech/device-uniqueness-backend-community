@@ -7,7 +7,7 @@ use anyhow::Context as _;
 
 use notifications::{
     routes, ApnsConfig, ApnsProvider, AppState, Config, FcmConfig, FcmProvider, PushProvider,
-    RateLimiter, UnconfiguredProvider,
+    UnconfiguredProvider,
 };
 
 pub async fn run() -> anyhow::Result<()> {
@@ -45,13 +45,12 @@ pub async fn run() -> anyhow::Result<()> {
 pub fn build_state(config: Config) -> anyhow::Result<AppState> {
     let apns = build_apns_provider()?;
     let fcm = build_fcm_provider()?;
-    let limiter = RateLimiter::new(config.rate_limit, config.rate_window);
     tracing::info!(
         limit = config.rate_limit,
         window_secs = config.rate_window.as_secs(),
         "per-subject notify rate limit configured"
     );
-    Ok(AppState::new(config.jwt_verifier, apns, fcm, limiter))
+    Ok(AppState::new(config.jwt_verifier, apns, fcm))
 }
 
 /// Build the iOS provider: real APNs when configured, else an unconfigured stub.

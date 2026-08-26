@@ -15,9 +15,6 @@ pub enum AppError {
     InvalidQuery(Vec<FieldError>),
     #[error("invalid cursor")]
     InvalidCursor,
-    /// Client exceeded the public per-IP limit (429).
-    #[error("rate limited")]
-    RateLimited { retry_after_secs: u64 },
     /// The proof-of-compute gate refused the request (400 malformed / 402 rest).
     #[error(transparent)]
     Poc(#[from] crate::poc::Rejection),
@@ -35,9 +32,6 @@ impl IntoResponse for AppError {
                 Json(json!({ "error": "Invalid cursor" })),
             )
                 .into_response(),
-            AppError::RateLimited { retry_after_secs } => {
-                http_common::error::rate_limited(retry_after_secs)
-            }
             AppError::Poc(rejection) => match rejection {
                 crate::poc::Rejection::Malformed => {
                     http_common::error::bad_request(rejection.detail())

@@ -207,7 +207,6 @@ pub async fn register(
     headers: HeaderMap,
     body: Bytes,
 ) -> UsernamesResult<Response> {
-    super::check_rate_limit(&state, &auth.subject)?;
     validate_device_token_header(&headers)?;
 
     let value = super::parse_json_body(&body)?;

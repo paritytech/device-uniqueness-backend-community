@@ -29,10 +29,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/token", post(token::issue))
         // The single clean refresh path; the prod double-mount is not reproduced.
         .route("/token/refresh", post(refresh::rotate))
-        .layer(axum::middleware::from_fn_with_state(
-            state,
-            crate::http::middleware::rate_limit,
-        ))
+        .with_state(state)
 }
 
 /// Decode a required base64 header into raw bytes.

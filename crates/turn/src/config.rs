@@ -41,9 +41,6 @@ pub struct Config {
     pub ice_servers: Vec<String>,
     /// Verify-only JWT key material (required; no default — fail closed).
     pub jwt_verifier: jwt_verify::Verifier,
-    /// Max requests per authenticated subject per window.
-    pub rate_limit: u32,
-    pub rate_window: std::time::Duration,
     /// Proof-authorized issuance (`TURN_PROOF_*`); `None` = feature off.
     pub proof: Option<ProofConfig>,
 }
@@ -60,8 +57,6 @@ impl std::fmt::Debug for Config {
             .field("realm", &self.realm)
             .field("ice_servers", &self.ice_servers)
             .field("jwt_verifier", &"<jwt_verifier>")
-            .field("rate_limit", &self.rate_limit)
-            .field("rate_window", &self.rate_window)
             .field("proof", &self.proof)
             .finish()
     }
@@ -86,11 +81,6 @@ impl Config {
         let realm = validated_realm(&required_var("TURN_REALM")?)?;
         let ice_servers = parse_ice_servers(&std::env::var("ICE_SERVERS").unwrap_or_default())?;
 
-        let rate_limit: u32 = positive("TURN_RATE_LIMIT", parse_var("TURN_RATE_LIMIT", "30")?)?;
-        let rate_window_secs: u64 = positive(
-            "TURN_RATE_LIMIT_WINDOW_SECS",
-            parse_var("TURN_RATE_LIMIT_WINDOW_SECS", "60")?,
-        )?;
         let proof = ProofConfig::from_env()?;
         Ok(Self {
             bind_addr: parse_var("BIND_ADDR", "0.0.0.0:8080")?,
@@ -100,8 +90,7 @@ impl Config {
             realm,
             ice_servers,
             jwt_verifier: jwt_verifier_from_env()?,
-            rate_limit,
-            rate_window: std::time::Duration::from_secs(rate_window_secs),
+
             proof,
         })
     }

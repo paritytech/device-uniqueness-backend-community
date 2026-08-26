@@ -83,11 +83,9 @@ pub(crate) struct NameAvailability {
 )]
 pub async fn check(
     State(state): State<AppState>,
-    auth: AuthSubject,
+    _auth: AuthSubject,
     body: Bytes,
 ) -> UsernamesResult<Response> {
-    super::check_rate_limit(&state, &auth.subject)?;
-
     let value = super::parse_json_body(&body)?;
     let usernames = validate_usernames(&value)?;
 
