@@ -13,12 +13,17 @@ pub mod people {}
 pub use subxt;
 
 /// The vendored metadata [`people`] is generated from, decoded once.
-pub fn metadata() -> &'static subxt::Metadata {
-    static METADATA: std::sync::LazyLock<subxt::Metadata> = std::sync::LazyLock::new(|| {
-        subxt::Metadata::decode_from(include_bytes!("../metadata/people.scale"))
-            .expect("vendored People Chain metadata decodes")
+static METADATA: std::sync::LazyLock<subxt::metadata::ArcMetadata> =
+    std::sync::LazyLock::new(|| {
+        std::sync::Arc::new(
+            subxt::Metadata::decode_from(include_bytes!("../metadata/people.scale"))
+                .expect("vendored People Chain metadata decodes"),
+        )
     });
-    &METADATA
+
+/// subxt's own error-decoding entry point
+pub fn metadata_arc() -> subxt::metadata::ArcMetadata {
+    METADATA.clone()
 }
 
 macro_rules! delegating_config {

@@ -1,12 +1,17 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
+use std::collections::{BTreeSet, HashMap};
+
 use anyhow::Context as _;
 use chain_types::AssetHubConfig;
+use subxt::config::RpcConfigFor;
 use subxt::dynamic::{At as _, Value};
 use subxt::utils::AccountId32;
 use subxt::OnlineClient;
+use subxt_rpcs::{LegacyRpcMethods, RpcClient};
 
+use super::client::{decode_owner, values_from_changes};
 use crate::dotns;
 
 const PALLET: &str = "DotnsGateway";
@@ -20,20 +25,27 @@ pub struct ValidityWindow {
 #[derive(Clone)]
 pub struct AssetHubClient {
     client: OnlineClient<AssetHubConfig>,
+    /// Raw RPC over the same connection, for the multi-key storage read.
+    rpc: LegacyRpcMethods<RpcConfigFor<AssetHubConfig>>,
 }
 
 impl AssetHubClient {
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
-        let client = chain_client::connect_asset_hub(url).await?;
-        let this = Self { client };
+        let (client, rpc) = chain_client::connect_asset_hub_with_rpc(url).await?;
+        let this = Self::from_parts(client, rpc);
         this.check_reserve_name_shape()
             .await
             .with_context(|| format!("Asset Hub at {url}"))?;
         Ok(this)
     }
 
-    pub fn from_online(client: OnlineClient<AssetHubConfig>) -> Self {
-        Self { client }
+    /// Wraps an already-constructed online client and the RPC client it was
+    /// built on. For offline replay tests.
+    pub fn from_parts(client: OnlineClient<AssetHubConfig>, rpc: RpcClient) -> Self {
+        Self {
+            client,
+            rpc: LegacyRpcMethods::new(rpc),
+        }
     }
 
     pub fn online(&self) -> &OnlineClient<AssetHubConfig> {
@@ -76,6 +88,44 @@ impl AssetHubClient {
             Some(value) => Ok(Some(value.decode()?.0)),
             None => Ok(None),
         }
+    }
+
+    pub async fn lite_label_owners(
+        &self,
+        labels: &[&str],
+    ) -> anyhow::Result<HashMap<String, [u8; 32]>> {
+        if labels.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let unique: BTreeSet<&str> = labels.iter().copied().collect();
+
+        let at = self.client.at_current_block().await?;
+        let block_hash = at.block_hash();
+        let entry = at
+            .storage()
+            .entry(subxt::dynamic::storage::<_, AccountId32>(
+                PALLET,
+                "LiteLabelOwner",
+            ))?;
+        let keys = unique
+            .iter()
+            .map(|label| entry.fetch_key((label_key(label),)))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let changes = self
+            .rpc
+            .state_query_storage_at(keys.iter().map(Vec::as_slice), Some(block_hash))
+            .await
+            .context("reading dotNS lite label owners")?;
+
+        let values = values_from_changes(&keys, &block_hash, changes)?;
+        let mut owners = HashMap::with_capacity(unique.len());
+        for (label, value) in unique.iter().zip(values) {
+            if let Some(bytes) = value {
+                owners.insert((*label).to_string(), decode_owner(&bytes)?);
+            }
+        }
+        Ok(owners)
     }
 
     pub async fn attestation_allowance(&self, account: [u8; 32]) -> anyhow::Result<u32> {

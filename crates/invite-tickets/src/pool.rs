@@ -25,7 +25,8 @@ pub struct PoolTuning {
     pub interval: Duration,
     /// Target `available` count per pool.
     pub target: i64,
-    pub batch_max: u32,
+    /// Max tickets per submitted batch.
+    pub batch_max: u16,
     /// Budget for one batch's submission + finalization.
     pub finalize_timeout: Duration,
 }
@@ -41,25 +42,17 @@ impl Default for PoolTuning {
     }
 }
 
-/// The AIMD batch-size settlement (port of the legacy `settleBatchAttempt`):
-/// success grows by one up to `max`; failure halves, floor 1.
-pub fn settle_batch_size(current: u32, max: u32, succeeded: bool) -> u32 {
-    if succeeded {
-        current.saturating_add(1).min(max)
-    } else {
-        (current / 2).max(1)
-    }
-}
+pub use chain_client::settle_batch_size;
 
 /// How many tickets one tick should submit: the shortfall against `target`,
 /// capped by the current AIMD `batch_size`. Returns 0 when the pool is already
 /// at (or above) target — the tick submits nothing.
-pub fn plan_refill(available: i64, target: i64, batch_size: u32) -> u32 {
+pub fn plan_refill(available: i64, target: i64, batch_size: u16) -> u16 {
     let needed = target.saturating_sub(available);
     if needed <= 0 {
         return 0;
     }
-    u32::try_from(needed).unwrap_or(u32::MAX).min(batch_size)
+    u16::try_from(needed).unwrap_or(u16::MAX).min(batch_size)
 }
 
 /// Whether the generated keypair at `index` was accepted on chain — the
@@ -91,8 +84,8 @@ pub async fn tick_pool(
     dim: Dim,
     network: Network,
     tuning: &PoolTuning,
-    batch_size: u32,
-) -> anyhow::Result<(u32, u32)> {
+    batch_size: u16,
+) -> anyhow::Result<(u16, u16)> {
     let available = tickets::count_available(pool, dim, network)
         .await
         .context("counting available tickets")?;
@@ -142,7 +135,7 @@ pub async fn tick_pool(
 
     // Insert exactly the accepted items; everything else is discarded with
     // its keypair (the seeds drop with `generated`).
-    let mut inserted = 0u32;
+    let mut inserted = 0u16;
     for (index, (keypair, seed)) in generated.iter().enumerate() {
         if !item_accepted(&finalized.items, index) {
             continue;
@@ -192,7 +185,7 @@ pub async fn run_loop(
     network: Network,
     tuning: PoolTuning,
 ) -> anyhow::Result<()> {
-    let mut batch_sizes: Vec<(Dim, u32)> =
+    let mut batch_sizes: Vec<(Dim, u16)> =
         dims.iter().map(|dim| (*dim, tuning.batch_max)).collect();
     loop {
         match acquire_tick_lock(&pool).await {
@@ -245,8 +238,8 @@ const SUBMIT_OUTCOMES: [&str; 3] = ["ok", "retry", "terminal"];
 
 /// Count ticket-registration outcomes on the shared `dub_chain_submit_total`
 /// family, under this service's own lane. `count` is per item for a finalized
-/// batch and `1` for a failed tick.
-fn record_submit_outcome(outcome: &'static str, count: u32) {
+/// batch and `1` for a failed tick, so it is bounded by the batch size.
+fn record_submit_outcome(outcome: &'static str, count: u16) {
     if count == 0 {
         return;
     }
@@ -406,7 +399,7 @@ impl MaintainerConfig {
             tuning: PoolTuning {
                 interval: Duration::from_secs(interval_secs),
                 target: i64::try_from(target).context("POOL_TARGET_SIZE is too large")?,
-                batch_max: u32::try_from(batch_max).context("POOL_BATCH_MAX is too large")?,
+                batch_max: u16::try_from(batch_max).context("POOL_BATCH_MAX is too large")?,
                 finalize_timeout: Duration::from_secs(finalize_secs),
             },
         })
@@ -554,7 +547,7 @@ mod tests {
     #[test]
     fn plan_refill_saturates_on_extreme_shortfall() {
         assert_eq!(plan_refill(i64::MIN, i64::MAX, 100), 100);
-        assert_eq!(plan_refill(0, i64::MAX, u32::MAX), u32::MAX);
+        assert_eq!(plan_refill(0, i64::MAX, u16::MAX), u16::MAX);
     }
 
     #[test]

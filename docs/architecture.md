@@ -216,6 +216,26 @@ Operational invariants an agent must respect when touching the code.
   People Chain calls (`PeopleLite.attest` / `Resources.register_lite_person`), advancing
   `RESERVED → SUBMITTING → ASSIGNED | RETRY_AFTER | FAILED_TERMINAL`. The DB row is source of truth;
   chain is reconciled to it. No service reads another service's tables.
+- **The writer submits a whole pass as one extrinsic.** A claimed set becomes one
+  `Utility.force_batch` of `attest` calls (proxied as a whole when the signer is a delegate), so N
+  registrations cost one finalization rather than N. `force_batch`, never `batch_all`: one poison row
+  must not block its batch. Each row's fate comes from its own `Utility.ItemCompleted` / `ItemFailed`
+  **positionally**, and only when the item count matches the calls submitted — otherwise the
+  positional mapping is discarded entirely and a batched `UsernameOwnerOf` read decides. A single-row
+  set skips the wrapper and submits a bare `attest`. `ASSIGNED` is never inferred from an extrinsic
+  succeeding, and never from `ProxyExecuted` being `Ok` around a `force_batch` (it is `Ok` even when
+  every item failed).
+- **A whole-batch failure is nobody's row's fault.** Nonce, signing, transport, or a proxy rejection
+  of the batch itself re-queues the set as `RETRY_AFTER` at an **unchanged** `attempt`, on one shared
+  backoff. Only per-item failures spend a row's attempt budget. Without this, eight flapping-RPC
+  passes would send a whole claimed set to `FAILED_TERMINAL` for a fault no row caused.
+- **`CHAIN_WRITER_BATCH_SIZE` is a maximum, not a fixed claim size.** Each lane holds an adaptive
+  size (AIMD, `chain_client::settle_batch_size`): halved on a whole-batch failure (floor 1), grown by
+  one per successful submission, capped at the configured value and at one below the smallest size
+  known to have failed — the lane re-probes that size only after a long clean run, so a chain that
+  rejects every batch of two or more converges on 1 instead of alternating forever. The two lanes size independently —
+  Asset Hub's weight budget and `reserve_name`'s cost are unrelated to People's. Published as
+  `dub_chain_batch_size{lane}`.
 - **The registration queue is an outbox entry state, not a second pipeline.** With
   `QUEUE_ENABLED` (default off), `POST /api/v1/usernames` inserts claims as `QUEUED` rows with a
   `queue_group` (1–4) derived from the JWT subject's People Chain free balance (<10 DOT → 1,
@@ -305,8 +325,12 @@ Operational invariants an agent must respect when touching the code.
   its own signer, and wraps it in `Proxy.proxy(real = authority, …)` otherwise. A proxied call's
   real outcome is `Proxy.ProxyExecuted`, not the extrinsic's — the outer extrinsic succeeds even
   when the inner call is rejected — so the writer inspects `ProxyExecuted` before advancing a row to
-  `ASSIGNED`, recording any rejection as `Pallet::Variant` (resolved through the vendored metadata).
-  `ASSIGNED` therefore always means the registration is on chain.
+  `ASSIGNED`, recording any rejection as `Pallet::Variant` — resolved through subxt's own
+  `DispatchError`, against the metadata of the block the extrinsic landed in, by one implementation
+  shared with the Asset Hub lane. `ASSIGNED` therefore always means the registration is on chain.
+  Under batching the `ProxyExecuted` check narrows to a whole-batch gate: it reports the outer
+  `force_batch`, which succeeds even when every item in it failed, so the per-row verdict comes from
+  the item events instead.
 - **device-attestation-api and device-attestation-chain-writer read the same `ATTESTER_ACCOUNT`.** Clients fetch
   `GET /api/v1/attester` and bind their consumer-registration signature to it, so the published key
   and the attesting account are one value by construction and cannot drift into

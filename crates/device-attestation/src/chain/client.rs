@@ -28,6 +28,10 @@ pub enum BatchReadError {
     DuplicateKey,
     #[error("storage left {0} of the requested keys unanswered")]
     MissingKeys(usize),
+    /// A stored value that is not the `AccountId32` this map is declared to
+    /// hold — a runtime that changed the value's shape, not a transport fault.
+    #[error("storage answered with a value that is not an AccountId32")]
+    UndecodableValue,
 }
 
 fn owner_key(
@@ -36,11 +40,11 @@ fn owner_key(
     people::runtime_types::bounded_collections::bounded_vec::BoundedVec(username.as_ref().to_vec())
 }
 
-fn taken_from_changes<H: PartialEq + std::fmt::Debug>(
+pub(super) fn values_from_changes<H: PartialEq + std::fmt::Debug>(
     keys: &[Vec<u8>],
     want_block: &H,
     changes: Vec<StorageChangeSet<H>>,
-) -> Result<BTreeSet<u8>, BatchReadError> {
+) -> Result<Vec<Option<Vec<u8>>>, BatchReadError> {
     let [set] = <[_; 1]>::try_from(changes)
         .map_err(|changes: Vec<_>| BatchReadError::ChangeSetCount(changes.len()))?;
     if &set.block != want_block {
@@ -56,7 +60,7 @@ fn taken_from_changes<H: PartialEq + std::fmt::Debug>(
         .map(|(i, key)| (key.as_slice(), i))
         .collect();
     let mut answered = vec![false; keys.len()];
-    let mut taken = BTreeSet::new();
+    let mut values = vec![None; keys.len()];
 
     for (key, value) in set.changes {
         let i = *index
@@ -65,16 +69,38 @@ fn taken_from_changes<H: PartialEq + std::fmt::Debug>(
         if std::mem::replace(&mut answered[i], true) {
             return Err(BatchReadError::DuplicateKey);
         }
-        if value.is_some() {
-            taken.insert(i as u8);
-        }
+        values[i] = value.map(|bytes| bytes.0);
     }
 
     let unanswered = answered.iter().filter(|seen| !**seen).count();
     if unanswered > 0 {
         return Err(BatchReadError::MissingKeys(unanswered));
     }
-    Ok(taken)
+    Ok(values)
+}
+
+fn taken_from_changes<H: PartialEq + std::fmt::Debug>(
+    keys: &[Vec<u8>],
+    want_block: &H,
+    changes: Vec<StorageChangeSet<H>>,
+) -> Result<BTreeSet<u8>, BatchReadError> {
+    Ok(values_from_changes(keys, want_block, changes)?
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, value)| value.is_some().then_some(i as u8))
+        .collect())
+}
+
+pub(super) fn decode_owner(bytes: &[u8]) -> Result<[u8; 32], BatchReadError> {
+    use subxt::ext::codec::Decode as _;
+
+    let mut input = bytes;
+    let owner = subxt::utils::AccountId32::decode(&mut input)
+        .map_err(|_| BatchReadError::UndecodableValue)?;
+    if !input.is_empty() {
+        return Err(BatchReadError::UndecodableValue);
+    }
+    Ok(owner.0)
 }
 
 #[derive(Clone)]
@@ -188,6 +214,41 @@ impl ChainClient {
 
         Ok(taken_from_changes(&keys, &block_hash, changes)?)
     }
+
+    pub async fn username_owners(
+        &self,
+        names: &[&str],
+    ) -> anyhow::Result<HashMap<String, [u8; 32]>> {
+        if names.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let unique: BTreeSet<&str> = names.iter().copied().collect();
+
+        let at = self.client.at_current_block().await?;
+        let block_hash = at.block_hash();
+        let entry = at
+            .storage()
+            .entry(people::storage().resources().username_owner_of())?;
+        let keys = unique
+            .iter()
+            .map(|name| entry.fetch_key((owner_key(name),)))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let changes = self
+            .rpc
+            .state_query_storage_at(keys.iter().map(Vec::as_slice), Some(block_hash))
+            .await
+            .context("reading username owners")?;
+
+        let values = values_from_changes(&keys, &block_hash, changes)?;
+        let mut owners = HashMap::with_capacity(unique.len());
+        for (name, value) in unique.iter().zip(values) {
+            if let Some(bytes) = value {
+                owners.insert((*name).to_string(), decode_owner(&bytes)?);
+            }
+        }
+        Ok(owners)
+    }
 }
 
 #[cfg(test)]
@@ -299,5 +360,42 @@ mod tests {
     fn empty_change_set_is_an_error() {
         let error = taken_from_changes(&keys(), &7, set(7, &[])).expect_err("empty response");
         assert!(matches!(error, BatchReadError::MissingKeys(3)), "{error:?}");
+    }
+
+    #[test]
+    fn values_are_returned_positionally() {
+        let changes = vec![StorageChangeSet {
+            block: 7u8,
+            changes: vec![
+                (
+                    subxt_rpcs::methods::legacy::Bytes(vec![0xc0]),
+                    Some(subxt_rpcs::methods::legacy::Bytes(vec![0xcc])),
+                ),
+                (subxt_rpcs::methods::legacy::Bytes(vec![0xa0]), None),
+                (
+                    subxt_rpcs::methods::legacy::Bytes(vec![0xb0]),
+                    Some(subxt_rpcs::methods::legacy::Bytes(vec![0xbb])),
+                ),
+            ],
+        }];
+        let values = values_from_changes(&keys(), &7, changes).expect("well-formed response");
+        assert_eq!(values, vec![None, Some(vec![0xbb]), Some(vec![0xcc])]);
+    }
+
+    #[test]
+    fn owner_values_decode_as_account_ids() {
+        let account = [9u8; 32];
+        assert_eq!(decode_owner(&account).expect("32 bytes"), account);
+
+        let mut trailing = account.to_vec();
+        trailing.push(0);
+        assert!(matches!(
+            decode_owner(&trailing),
+            Err(BatchReadError::UndecodableValue)
+        ));
+        assert!(matches!(
+            decode_owner(&account[..31]),
+            Err(BatchReadError::UndecodableValue)
+        ));
     }
 }
