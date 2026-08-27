@@ -131,14 +131,13 @@ impl ChainClient {
                 Some(status) => match status? {
                     TransactionStatus::InFinalizedBlock(in_block) => {
                         let events = in_block.wait_for_success().await?;
-                        let items = chain_client::batch_item_outcomes(
-                            events.iter().filter_map(|event| event.ok()).map(|event| {
-                                (
-                                    event.pallet_name().to_string(),
-                                    event.event_name().to_string(),
-                                )
-                            }),
-                        );
+                        let items = chain_client::batch_item_results(
+                            events.iter().filter_map(|event| event.ok()),
+                            |event| (event.pallet_name(), event.event_name()),
+                        )
+                        .into_iter()
+                        .map(|item| item.is_ok())
+                        .collect();
                         let block_hash = format!("{:?}", in_block.block_hash());
                         return Ok(FinalizedBatch { items, block_hash });
                     }

@@ -8,6 +8,84 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Changed
+
+- **`device-attestation-chain-writer` submits a whole pass as one extrinsic.** A
+  claimed set now becomes one `Utility.force_batch` of `PeopleLite.attest` calls
+  (wrapped as a whole in `Proxy.proxy` when the signer is a delegate) instead of
+  one extrinsic per row, so N registrations cost one finalization rather than N.
+  The dotNS gateway lane batches `DotnsGateway.reserve_name` the same way on
+  Asset Hub. A single-row set still submits a bare call, unwrapped. Each row's
+  outcome comes from its own `Utility.ItemCompleted` / `ItemFailed`
+  positionally — and only when the item count matches the calls submitted;
+  otherwise the positional mapping is discarded and chain state decides, so
+  `ASSIGNED` can never be inferred from a mapping that does not line up.
+  Failures split: a whole-batch fault (nonce, signing, transport, a proxy
+  rejection of the batch) re-queues the set at an **unchanged** `attempt` on one
+  shared backoff, while a per-item failure spends that row's own budget as
+  before, carrying its dispatch error into `last_error` resolved to
+  `Pallet::Variant`.
+- **`CHAIN_WRITER_BATCH_SIZE` is now a maximum rather than a fixed claim size.**
+  Each lane holds an adaptive size — halved on a whole-batch failure (floor 1),
+  grown by one per successful submission, capped at the configured value — so
+  the writer finds the chain's real per-batch ceiling instead of being
+  configured with a guess. A lane also remembers the smallest size it has seen
+  fail and stops one below it, re-probing that size only after 20 consecutive
+  successful submissions: without that memory a chain that rejects *every* batch
+  of two or more would make the lane alternate 1 → 2 → fail forever, paying a
+  fee and a nonce on every other pass. The People and Asset Hub lanes size
+  independently. The variable name and default (25) are unchanged; only its
+  meaning is — a configured value that does not fit a `u16` falls back to the
+  default rather than claiming the whole outbox at once.
+- **The writer's owner reads are batched.** A drain pass resolves
+  `Resources::UsernameOwnerOf` for its whole claimed set in one
+  `state_queryStorageAt`, as does the startup `SUBMITTING` reconcile and the
+  dotNS lane's `LiteLabelOwner` read — one round trip per pass instead of one
+  per row. Unchanged semantics: a partial or unexpected answer is an error, never
+  "unowned". Because one read now decides a whole set, a failed read is treated
+  as a whole-batch fault: the set is re-queued at an **unchanged** `attempt` on
+  one shared backoff, so a flapping RPC cannot walk an entire claimed set to
+  `FAILED_TERMINAL`. The startup reconcile reads in chunks and keeps the rows it
+  did resolve, rather than abandoning all of them on one bad response.
+
+### Added
+
+- **Batch observability.** `dub_chain_batch_size{lane}` (the adaptive size in
+  use), `dub_chain_batch_items{lane}` (rows per submission),
+  `dub_chain_batch_failed_total{lane}` (whole-batch failures),
+  `dub_chain_batch_item_failed_total{lane}` (individual rejected calls),
+  `dub_chain_batch_reconciled_total{lane}` (rows from a batch that submitted but
+  had to be resolved from chain state — kept off the whole-batch failure counter
+  so that one keeps meaning "the chain is rejecting batches"), and
+  `dub_registration_latency_seconds` (end-to-end intake→on-chain, per row, and
+  only for assignments the writer's own submission produced).
+- **Chain failures are named the same way on both lanes.** `ProxyExecuted` and
+  `Utility.ItemFailed` are now decoded through subxt's own `DispatchError`,
+  against the metadata of the block the extrinsic landed in, by one
+  implementation shared by People and Asset Hub. The dotNS lane previously
+  recorded an undecoded value in `dotns_last_error`, having no vendored Asset Hub
+  metadata to resolve names against; it now records `Pallet::Variant` like the
+  People lane. People's names come from the runtime that actually executed the
+  call rather than from the vendored metadata blob. The one error name the
+  writer treats as success is now matched pallet-qualified
+  (`PeopleLite::AlreadyRegistered`), so a gateway error that happens to be
+  spelled the same way is retried rather than recorded as a reservation that
+  landed.
+- **`subxt` pinned to 0.50.3** (from 0.50.1), which picks up `frame-decode`
+  0.18.1: V5 signer payloads now include the transaction extension version and
+  call data as an immutable base implication, and unknown `Option<T>`
+  transaction extensions encode as `None` instead of failing. Both are on the
+  path this release's batched submission takes.
+
+### Fixed
+
+- **A proxied dotNS reservation rejected by the gateway is no longer recorded as
+  reserved.** `Proxy.proxy` emits `ExtrinsicSuccess` even when the inner call
+  fails, and the Asset Hub lane was reading that as success — the People lane has
+  checked `ProxyExecuted` since the earlier silent-failure fix, but its Asset
+  Hub twin never did. The check fails closed: a result field that is not a
+  `Result<(), DispatchError>` is an error rather than a pass.
+
 ## [0.4.0] - 2026-08-25
 
 Initial public release. Development up to this point happened in a private

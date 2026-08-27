@@ -106,8 +106,8 @@ The values you must decide, at minimum:
 | Variable | What it is |
 | --- | --- |
 | `ENV_ID` | This environment's name; suffixes every network alias. |
-| `PEOPLE_RPC_URL` | People Chain RPC. Must be a **full** node — see the availability failure mode below. |
-| `ASSET_HUB_RPC_URL` | Asset Hub RPC, if `DOTNS_GATEWAY_ENABLED=true`. **Must name the same network as `PEOPLE_RPC_URL`** — a split pair claims labels on the wrong chain, unrecoverably. |
+| `PEOPLE_RPC_URL` | People Chain RPC. Must be a **full** node serving the legacy `state_queryStorageAt` — see the availability failure mode below. |
+| `ASSET_HUB_RPC_URL` | Asset Hub RPC, if `DOTNS_GATEWAY_ENABLED=true`. Same `state_queryStorageAt` requirement. **Must name the same network as `PEOPLE_RPC_URL`** — a split pair claims labels on the wrong chain, unrecoverably. |
 | `ATTESTER_ACCOUNT` | The on-chain attester authority (SS58). |
 | `CHAIN_WRITER_SIGNER_SURI` | The writer's signing key; must be an authorized attester or its proxy, and funded. |
 | `JWT_ED25519_SECRET` | 32 bytes. `device-attestation-api` only. |
@@ -296,6 +296,48 @@ sudo docker compose exec -T postgres psql -U device_attestation -d device_attest
 - `FAILED_TERMINAL` never retries — inspect `last_error`.
 - Independent check: query `Resources.UsernameOwnerOf("<base>.<NN>")` on the
   People Chain.
+- A pass submits its whole claimed set as **one** `Utility.force_batch`, so rows
+  share a `tx_hash` and a `nonce`. Many rows on one hash is normal, not a
+  duplicate submission.
+
+### Batch size is adaptive
+
+`CHAIN_WRITER_BATCH_SIZE` (default 25) is the *maximum*.
+`dub_chain_batch_size{lane="people"|"dotns"}` is the size actually in use: it
+halves on every whole-batch failure (floor 1) and climbs back one per successful
+submission, but never back into the smallest size it has seen fail — that one is
+retried only after 20 consecutive successful submissions. A chain that rejects
+*every* batch of two or more (a proxy whose `ProxyType` allows the inner call but
+not `Utility.force_batch` is the case to check first) therefore settles at a size
+of 1 rather than alternating 1 → 2 → fail and paying a fee on every other pass.
+
+- Size sitting well below the max, or pinned at 1 → the chain is rejecting whole
+  batches. Look for `registration batch failed as a whole` in the logs; the line
+  carries the reason and the next size. The usual cause is the block's weight
+  budget (each `attest` verifies two sr25519 signatures and writes storage),
+  which the halving search resolves on its own within a few passes. If it settles
+  much lower than 25, lower `CHAIN_WRITER_BATCH_SIZE` to near it so a fresh
+  writer does not re-run the search on every restart.
+- A whole-batch failure does **not** advance any row toward `FAILED_TERMINAL`:
+  `attempt` is unchanged and the set is deferred on one shared backoff. Rows
+  piling up in `RETRY_AFTER` with a low `attempt` is the batch failing, not the
+  rows.
+- `dub_chain_batch_failed_total{lane}` counts whole-batch failures;
+  `dub_chain_batch_item_failed_total{lane}` counts individual rejected calls. The
+  first climbing with the second flat means the chain, not the claims. A batch
+  that *submitted* but had to be resolved from chain state is neither: it counts
+  on `dub_chain_batch_reconciled_total{lane}`, leaving the lane's size and
+  failure counter untouched.
+- `dub_registration_latency_seconds` is end-to-end intake→on-chain, measured per
+  row from its own `created_at`. Only assignments this writer's own submission
+  produced are recorded; a row the chain already showed as owned (an idempotent
+  replay, or one carried over from a previous writer at startup) is assigned
+  without touching the histogram, so its age does not skew the number.
+- **A count-guard error is serious.** `force_batch reported a different number of
+  items than calls submitted` at ERROR means the positional mapping was discarded
+  and chain state decided instead. Nothing is mis-assigned — that is what the
+  guard is for — but a repeat means the runtime's batch event shape changed and
+  the fan-out needs revisiting.
 
 ## dotNS gateway lane (Asset Hub)
 
@@ -502,7 +544,7 @@ you expect.
 | Symptom | Action |
 |---|---|
 | `readyz`: `chain: down` | People Chain RPC unreachable or changed — check `PEOPLE_RPC_URL`. |
-| Availability checks failing while `readyz` is green and registration works | The endpoint does not serve the legacy `state_queryStorageAt` method (a trimmed or `chainHead`-only RPC or proxy). Availability reads all 100 `{base}.{NN}` keys in one such request; nothing else uses it, so readiness stays green. Repoint at a full node. A response that is incomplete, doubled, or for another block also fails closed by design — never as "available". |
+| Availability checks failing while `readyz` is green | The endpoint does not serve the legacy `state_queryStorageAt` method (a trimmed or `chainHead`-only RPC or proxy). Availability reads all 100 `{base}.{NN}` keys in one such request, and the writer resolves `UsernameOwnerOf` (People) and `LiteLabelOwner` (Asset Hub) for a whole claimed set the same way, so writer passes fail wholesale too — but `readyz` only probes it on People, so readiness can stay green. Repoint `PEOPLE_RPC_URL` (and `ASSET_HUB_RPC_URL`) at a full node. A response that is incomplete, doubled, or for another block also fails closed by design — never as "available". |
 | Claims returning `422 Pool exhausted` | The ticket pool drained. Check `invite-tickets-pool` logs: `ticket batch finalized … registered=0` means the inviter is out of `AvailableInvites` quota or unauthorized; `pool tick failed` means RPC or signer trouble. Pool size is logged each tick — treat sustained `available < ~10% of POOL_TARGET_SIZE` as the alert threshold. |
 | `invite-tickets-pool`: `another maintainer instance holds the pool lock` | A second replica or a stuck deploy overlap. Scale back to exactly one. |
 | Writer: `queue advancer is down with claims queued; holding the throttle` | The registration queue is enabled but `registration-queue` is dead, so free-lane claims park as `QUEUED` and nothing drains. This is deliberate: the queue is the free lane's throughput control and a dead queue never falls back to unthrottled registration. Restart it. To retire the queue instead, set `QUEUE_ENABLED=false` for **both** `device-attestation-api` and the writer (writer last). Treat a warning that survives one restart as a page. |
