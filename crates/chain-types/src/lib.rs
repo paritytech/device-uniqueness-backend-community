@@ -487,7 +487,8 @@ mod tests {
 
     #[test]
     fn vendored_metadata_extensions_are_all_in_the_tuple() {
-        let declared: Vec<&str> = metadata()
+        let metadata = metadata_arc();
+        let declared: Vec<&str> = metadata
             .extrinsic()
             .transaction_extensions_to_use_for_encoding()
             .map(|extension| extension.identifier())
