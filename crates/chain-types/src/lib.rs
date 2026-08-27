@@ -4,6 +4,8 @@
 //! Refresh with:
 //! `subxt metadata --url <people-rpc> --pallets System,Balances,Utility,Proxy,People,PeopleLite,Resources,Game,ProofOfInk,Members -f bytes -o crates/chain-types/metadata/people.scale`
 
+use subxt::config::transaction_extensions as tx_ext;
+
 #[allow(clippy::all, missing_docs, rustdoc::all)]
 #[subxt::subxt(runtime_metadata_path = "metadata/people.scale")]
 pub mod people {}
@@ -19,43 +21,118 @@ pub fn metadata() -> &'static subxt::Metadata {
     &METADATA
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct PeopleConfig(subxt::PolkadotConfig);
+macro_rules! delegating_config {
+    ($(#[$meta:meta])* $name:ident => $extensions:ident) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Default)]
+        pub struct $name(subxt::PolkadotConfig);
 
-impl subxt::Config for PeopleConfig {
-    type AccountId = <subxt::PolkadotConfig as subxt::Config>::AccountId;
-    type Address = <subxt::PolkadotConfig as subxt::Config>::Address;
-    type Signature = <subxt::PolkadotConfig as subxt::Config>::Signature;
-    type Header = <subxt::PolkadotConfig as subxt::Config>::Header;
-    type TransactionExtensions = PeopleTransactionExtensions<Self>;
-    type AssetId = <subxt::PolkadotConfig as subxt::Config>::AssetId;
-    type Hasher = <subxt::PolkadotConfig as subxt::Config>::Hasher;
+        impl subxt::Config for $name {
+            type AccountId = <subxt::PolkadotConfig as subxt::Config>::AccountId;
+            type Address = <subxt::PolkadotConfig as subxt::Config>::Address;
+            type Signature = <subxt::PolkadotConfig as subxt::Config>::Signature;
+            type Header = <subxt::PolkadotConfig as subxt::Config>::Header;
+            type TransactionExtensions = $extensions<Self>;
+            type AssetId = <subxt::PolkadotConfig as subxt::Config>::AssetId;
+            type Hasher = <subxt::PolkadotConfig as subxt::Config>::Hasher;
 
-    fn genesis_hash(&self) -> Option<subxt::config::HashFor<Self>> {
-        self.0.genesis_hash()
-    }
+            fn genesis_hash(&self) -> Option<subxt::config::HashFor<Self>> {
+                self.0.genesis_hash()
+            }
 
-    fn spec_and_transaction_version_for_block_number(
-        &self,
-        block_number: u64,
-    ) -> Option<(u32, u32)> {
-        self.0
-            .spec_and_transaction_version_for_block_number(block_number)
-    }
+            fn spec_and_transaction_version_for_block_number(
+                &self,
+                block_number: u64,
+            ) -> Option<(u32, u32)> {
+                self.0
+                    .spec_and_transaction_version_for_block_number(block_number)
+            }
 
-    fn metadata_for_spec_version(&self, spec_version: u32) -> Option<subxt::ArcMetadata> {
-        self.0.metadata_for_spec_version(spec_version)
-    }
+            fn metadata_for_spec_version(&self, spec_version: u32) -> Option<subxt::ArcMetadata> {
+                self.0.metadata_for_spec_version(spec_version)
+            }
 
-    fn set_metadata_for_spec_version(&self, spec_version: u32, metadata: subxt::ArcMetadata) {
-        self.0.set_metadata_for_spec_version(spec_version, metadata);
-    }
+            fn set_metadata_for_spec_version(
+                &self,
+                spec_version: u32,
+                metadata: subxt::ArcMetadata,
+            ) {
+                self.0.set_metadata_for_spec_version(spec_version, metadata);
+            }
+        }
+    };
 }
 
-type PeopleTransactionExtensions<T> = (
+macro_rules! extrinsic_params_builder {
+    (
+        $(#[$meta:meta])*
+        $builder:ident<$config:ty> => $extensions:ident,
+        |$mortality:ident, $nonce:ident, $tip:ident| $params:expr
+    ) => {
+        $(#[$meta])*
+        pub struct $builder {
+            mortality: tx_ext::CheckMortalityParams<$config>,
+            nonce: Option<u64>,
+            tip: u128,
+        }
+
+        impl $builder {
+            pub fn new() -> Self {
+                Self {
+                    mortality: tx_ext::CheckMortalityParams::immortal(),
+                    nonce: None,
+                    tip: 0,
+                }
+            }
+
+            #[must_use]
+            pub fn nonce(mut self, nonce: u64) -> Self {
+                self.nonce = Some(nonce);
+                self
+            }
+
+            #[must_use]
+            pub fn tip(mut self, tip: u128) -> Self {
+                self.tip = tip;
+                self
+            }
+
+            #[must_use]
+            pub fn mortality(mut self, mortality: tx_ext::CheckMortalityParams<$config>) -> Self {
+                self.mortality = mortality;
+                self
+            }
+
+            pub fn build(
+                self,
+            ) -> <$extensions<$config> as subxt::config::TransactionExtensions<$config>>::Params {
+                let $mortality = self.mortality;
+                let $nonce = self.nonce.map_or_else(
+                    tx_ext::CheckNonceParams::from_chain,
+                    tx_ext::CheckNonceParams::with_nonce,
+                );
+                let $tip = tx_ext::ChargeAssetTxPaymentParams::tip(self.tip);
+                $params
+            }
+        }
+
+        impl Default for $builder {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+    };
+}
+
+delegating_config! {
+    PeopleConfig => PeopleTransactionExtensions
+}
+
+#[rustfmt::skip]
+pub type PeopleTransactionExtensions<T> = (
     Noop<UnitTransactionExtension>,
     Noop<AuthorizeValueTransfer>,
-    subxt::config::transaction_extensions::VerifySignature<T>,
+    tx_ext::VerifySignature<T>,
     Noop<AsPerson>,
     Noop<AsProofOfInkParticipant>,
     Noop<ScoreAsParticipant>,
@@ -68,110 +145,30 @@ type PeopleTransactionExtensions<T> = (
     Noop<AuthorizeCall>,
     Noop<RestrictOrigins>,
     Noop<CheckNonZeroSender>,
-    subxt::config::transaction_extensions::CheckSpecVersion,
-    subxt::config::transaction_extensions::CheckTxVersion,
-    subxt::config::transaction_extensions::CheckGenesis<T>,
-    subxt::config::transaction_extensions::CheckMortality<T>,
-    subxt::config::transaction_extensions::CheckNonce,
+    tx_ext::CheckSpecVersion,
+    tx_ext::CheckTxVersion,
+    tx_ext::CheckGenesis<T>,
+    tx_ext::CheckMortality<T>,
+    tx_ext::CheckNonce,
     Noop<CheckWeight>,
-    subxt::config::transaction_extensions::ChargeAssetTxPayment<T>,
+    tx_ext::ChargeAssetTxPayment<T>,
     Noop<StorageWeightReclaim>,
 );
 
-pub struct PeopleExtrinsicParamsBuilder<T: subxt::Config> {
-    mortality: subxt::config::transaction_extensions::CheckMortalityParams<T>,
-    nonce: Option<u64>,
-    tip: u128,
+extrinsic_params_builder! {
+    PeopleExtrinsicParamsBuilder<PeopleConfig> => PeopleTransactionExtensions,
+    |mortality, nonce, tip| (
+        (), (), (), (), (), (), (), (), (), (), (), (), (), (), (), (), (), (),
+        mortality, nonce, (), tip, (),
+    )
 }
 
-impl<T: subxt::Config> PeopleExtrinsicParamsBuilder<T> {
-    pub fn new() -> Self {
-        Self {
-            mortality: subxt::config::transaction_extensions::CheckMortalityParams::immortal(),
-            nonce: None,
-            tip: 0,
-        }
-    }
-
-    pub fn nonce(mut self, nonce: u64) -> Self {
-        self.nonce = Some(nonce);
-        self
-    }
-
-    pub fn build(
-        self,
-    ) -> <PeopleTransactionExtensions<T> as subxt::config::TransactionExtensions<T>>::Params {
-        (
-            (),
-            (),
-            (),
-            (),
-            (),
-            (),
-            (),
-            (),
-            (),
-            (),
-            (),
-            (),
-            (),
-            (),
-            (),
-            (),
-            (),
-            (),
-            self.mortality,
-            self.nonce.map_or_else(
-                subxt::config::transaction_extensions::CheckNonceParams::from_chain,
-                subxt::config::transaction_extensions::CheckNonceParams::with_nonce,
-            ),
-            (),
-            subxt::config::transaction_extensions::ChargeAssetTxPaymentParams::tip(self.tip),
-            (),
-        )
-    }
+delegating_config! {
+    AssetHubConfig => AssetHubTransactionExtensions
 }
 
-impl<T: subxt::Config> Default for PeopleExtrinsicParamsBuilder<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct AssetHubConfig(subxt::PolkadotConfig);
-
-impl subxt::Config for AssetHubConfig {
-    type AccountId = <subxt::PolkadotConfig as subxt::Config>::AccountId;
-    type Address = <subxt::PolkadotConfig as subxt::Config>::Address;
-    type Signature = <subxt::PolkadotConfig as subxt::Config>::Signature;
-    type Header = <subxt::PolkadotConfig as subxt::Config>::Header;
-    type TransactionExtensions = AssetHubTransactionExtensions<Self>;
-    type AssetId = <subxt::PolkadotConfig as subxt::Config>::AssetId;
-    type Hasher = <subxt::PolkadotConfig as subxt::Config>::Hasher;
-
-    fn genesis_hash(&self) -> Option<subxt::config::HashFor<Self>> {
-        self.0.genesis_hash()
-    }
-
-    fn spec_and_transaction_version_for_block_number(
-        &self,
-        block_number: u64,
-    ) -> Option<(u32, u32)> {
-        self.0
-            .spec_and_transaction_version_for_block_number(block_number)
-    }
-
-    fn metadata_for_spec_version(&self, spec_version: u32) -> Option<subxt::ArcMetadata> {
-        self.0.metadata_for_spec_version(spec_version)
-    }
-
-    fn set_metadata_for_spec_version(&self, spec_version: u32, metadata: subxt::ArcMetadata) {
-        self.0.set_metadata_for_spec_version(spec_version, metadata);
-    }
-}
-
-type AssetHubTransactionExtensions<T> = (
+#[rustfmt::skip]
+pub type AssetHubTransactionExtensions<T> = (
     Noop<UnitTransactionExtension>,
     Noop<AuthorizeValueTransfer>,
     Noop<AuthorizeCall>,
@@ -180,74 +177,24 @@ type AssetHubTransactionExtensions<T> = (
     Noop<AsDotnsGateway>,
     Noop<RestrictOrigins>,
     Noop<CheckNonZeroSender>,
-    subxt::config::transaction_extensions::CheckSpecVersion,
-    subxt::config::transaction_extensions::CheckTxVersion,
-    subxt::config::transaction_extensions::CheckGenesis<T>,
-    subxt::config::transaction_extensions::CheckMortality<T>,
-    subxt::config::transaction_extensions::CheckNonce,
+    tx_ext::CheckSpecVersion,
+    tx_ext::CheckTxVersion,
+    tx_ext::CheckGenesis<T>,
+    tx_ext::CheckMortality<T>,
+    tx_ext::CheckNonce,
     Noop<CheckWeight>,
-    subxt::config::transaction_extensions::ChargeAssetTxPayment<T>,
-    // Real, not a `Noop`. Its *implicit* is `Option<[u8; 32]> = None`. A `Noop`
-    // would encode that as nothing, which is a signer-payload mismatch. subxt's
-    // version never provides a hash, so it encodes disabled mode.
-    subxt::config::transaction_extensions::CheckMetadataHash,
+    tx_ext::ChargeAssetTxPayment<T>,
+    tx_ext::CheckMetadataHash,
     Noop<EthSetOrigin>,
     Noop<StorageWeightReclaim>,
 );
 
-pub struct AssetHubExtrinsicParamsBuilder<T: subxt::Config> {
-    mortality: subxt::config::transaction_extensions::CheckMortalityParams<T>,
-    nonce: Option<u64>,
-    tip: u128,
-}
-
-impl<T: subxt::Config> AssetHubExtrinsicParamsBuilder<T> {
-    pub fn new() -> Self {
-        Self {
-            mortality: subxt::config::transaction_extensions::CheckMortalityParams::immortal(),
-            nonce: None,
-            tip: 0,
-        }
-    }
-
-    pub fn nonce(mut self, nonce: u64) -> Self {
-        self.nonce = Some(nonce);
-        self
-    }
-
-    pub fn build(
-        self,
-    ) -> <AssetHubTransactionExtensions<T> as subxt::config::TransactionExtensions<T>>::Params {
-        (
-            (),
-            (),
-            (),
-            (),
-            (),
-            (),
-            (),
-            (),
-            (),
-            (),
-            (),
-            self.mortality,
-            self.nonce.map_or_else(
-                subxt::config::transaction_extensions::CheckNonceParams::from_chain,
-                subxt::config::transaction_extensions::CheckNonceParams::with_nonce,
-            ),
-            (),
-            subxt::config::transaction_extensions::ChargeAssetTxPaymentParams::tip(self.tip),
-            (),
-            (),
-            (),
-        )
-    }
-}
-
-impl<T: subxt::Config> Default for AssetHubExtrinsicParamsBuilder<T> {
-    fn default() -> Self {
-        Self::new()
-    }
+extrinsic_params_builder! {
+    AssetHubExtrinsicParamsBuilder<AssetHubConfig> => AssetHubTransactionExtensions,
+    |mortality, nonce, tip| (
+        (), (), (), (), (), (), (), (), (), (), (),
+        mortality, nonce, (), tip, (), (), (),
+    )
 }
 
 pub trait NoopName {
@@ -255,12 +202,23 @@ pub trait NoopName {
     const VALUE: &'static [u8] = &[];
 }
 
-#[derive(Debug, Clone)]
-pub struct Noop<N>(core::marker::PhantomData<N>);
+pub struct Noop<N>(core::marker::PhantomData<fn() -> N>);
 
-impl<T: subxt::Config, N: NoopName + Send + Sync + 'static> subxt::config::TransactionExtension<T>
-    for Noop<N>
-{
+impl<N> Clone for Noop<N> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<N> Copy for Noop<N> {}
+
+impl<N: NoopName> core::fmt::Debug for Noop<N> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("Noop").field(&N::NAME).finish()
+    }
+}
+
+impl<T: subxt::Config, N: NoopName> subxt::config::TransactionExtension<T> for Noop<N> {
     type Decoded = ();
     type Params = ();
 
@@ -275,7 +233,7 @@ impl<T: subxt::Config, N: NoopName + Send + Sync + 'static> subxt::config::Trans
 impl<R: subxt::ext::scale_type_resolver::TypeResolver, N: NoopName>
     subxt::ext::frame_decode::extrinsics::TransactionExtension<R> for Noop<N>
 {
-    const NAME: &str = N::NAME;
+    const NAME: &'static str = N::NAME;
 
     fn encode_value_to(
         &self,
@@ -297,54 +255,46 @@ impl<R: subxt::ext::scale_type_resolver::TypeResolver, N: NoopName>
     }
 }
 
-macro_rules! noop_name {
-    ($ty:ident, $name:literal) => {
-        pub struct $ty;
-        impl NoopName for $ty {
-            const NAME: &'static str = $name;
-        }
-    };
-    ($ty:ident, $name:literal, $value:expr) => {
-        pub struct $ty;
-        impl NoopName for $ty {
-            const NAME: &'static str = $name;
-            const VALUE: &'static [u8] = $value;
-        }
+macro_rules! noop_names {
+    ($($ty:ident $(= $value:expr)?),* $(,)?) => {
+        $(
+            #[doc = concat!("The `", stringify!($ty), "` transaction extension.")]
+            pub struct $ty;
+
+            impl NoopName for $ty {
+                const NAME: &'static str = stringify!($ty);
+                $(const VALUE: &'static [u8] = $value;)?
+            }
+        )*
     };
 }
 
-// Slot 0 differs per build, not per spec version: Paseo Next v2 declares
-// `AuthorizeValueTransfer` (`Option<[u8; 64]>`, encoded `None`), PreviewNet
-// declares `UnitTransactionExtension` (`()`). Both names live in the tuple;
-// only the one the connected runtime declares is encoded.
-noop_name!(UnitTransactionExtension, "UnitTransactionExtension");
-noop_name!(AuthorizeValueTransfer, "AuthorizeValueTransfer", &[0]);
-noop_name!(AsPerson, "AsPerson", &[0]);
-noop_name!(AsProofOfInkParticipant, "AsProofOfInkParticipant", &[0]);
-noop_name!(ScoreAsParticipant, "ScoreAsParticipant", &[0]);
-noop_name!(GameAsInvited, "GameAsInvited", &[0]);
-noop_name!(PeopleLiteAuth, "PeopleLiteAuth", &[0]);
-noop_name!(AsMember, "AsMember", &[0]);
-noop_name!(AsCoinage, "AsCoinage", &[0]);
-noop_name!(AsResources, "AsResources", &[0]);
-noop_name!(HonourAuth, "HonourAuth", &[0]);
-noop_name!(AuthorizeCall, "AuthorizeCall");
-noop_name!(RestrictOrigins, "RestrictOrigins", &[0]);
-noop_name!(CheckNonZeroSender, "CheckNonZeroSender");
-noop_name!(CheckWeight, "CheckWeight");
-noop_name!(StorageWeightReclaim, "StorageWeightReclaim");
-
-// Asset Hub-only origin modifiers. All three are `Option<…>`, encoded `None`.
-// `EthSetOrigin` (pallet_revive's `SetOrigin`) carries no value at all.
-noop_name!(AsPgas, "AsPgas", &[0]);
-noop_name!(AsRingAlias, "AsRingAlias", &[0]);
-noop_name!(AsDotnsGateway, "AsDotnsGateway", &[0]);
-noop_name!(EthSetOrigin, "EthSetOrigin");
+noop_names! {
+    UnitTransactionExtension,
+    AuthorizeValueTransfer = &[0],
+    AsPerson = &[0],
+    AsProofOfInkParticipant = &[0],
+    ScoreAsParticipant = &[0],
+    GameAsInvited = &[0],
+    PeopleLiteAuth = &[0],
+    AsMember = &[0],
+    AsCoinage = &[0],
+    AsResources = &[0],
+    HonourAuth = &[0],
+    AuthorizeCall,
+    RestrictOrigins = &[0],
+    CheckNonZeroSender,
+    CheckWeight,
+    StorageWeightReclaim,
+    AsPgas = &[0],
+    AsRingAlias = &[0],
+    AsDotnsGateway = &[0],
+    EthSetOrigin,
+}
 
 #[cfg(test)]
 mod tests {
-    use super::people;
-    use super::NoopName as _;
+    use super::*;
     use subxt::storage::Address as _;
 
     const TUPLE_EXTENSIONS: &[&str] = &[
@@ -531,17 +481,31 @@ mod tests {
     }
 
     #[test]
+    fn vendored_metadata_extensions_are_all_in_the_tuple() {
+        let declared: Vec<&str> = metadata()
+            .extrinsic()
+            .transaction_extensions_to_use_for_encoding()
+            .map(|extension| extension.identifier())
+            .collect();
+
+        assert!(
+            !declared.is_empty(),
+            "vendored metadata must declare transaction extensions"
+        );
+        for name in &declared {
+            assert!(
+                TUPLE_EXTENSIONS.contains(name),
+                "vendored metadata declares extension {name}, which the tuple cannot satisfy"
+            );
+        }
+    }
+
+    #[test]
     fn slot_zero_noops_encode_their_runtime_value() {
-        assert_eq!(
-            super::AuthorizeValueTransfer::NAME,
-            "AuthorizeValueTransfer"
-        );
-        assert_eq!(super::AuthorizeValueTransfer::VALUE, &[0]);
-        assert_eq!(
-            super::UnitTransactionExtension::NAME,
-            "UnitTransactionExtension"
-        );
-        assert!(super::UnitTransactionExtension::VALUE.is_empty());
+        assert_eq!(AuthorizeValueTransfer::NAME, "AuthorizeValueTransfer");
+        assert_eq!(AuthorizeValueTransfer::VALUE, &[0]);
+        assert_eq!(UnitTransactionExtension::NAME, "UnitTransactionExtension");
+        assert!(UnitTransactionExtension::VALUE.is_empty());
     }
 
     #[test]
@@ -583,8 +547,6 @@ mod tests {
 
     #[test]
     fn builds_available_invites_queries() {
-        use subxt::storage::Address as _;
-
         let game = people::storage().game().available_invites();
         assert_eq!(game.pallet_name(), "Game");
         assert_eq!(game.entry_name(), "AvailableInvites");
@@ -600,7 +562,7 @@ mod tests {
             .arc()
     }
 
-    fn offline_client_state() -> subxt::config::ClientState<super::PeopleConfig> {
+    fn offline_client_state() -> subxt::config::ClientState<PeopleConfig> {
         subxt::config::ClientState {
             genesis_hash: subxt::utils::H256::zero(),
             spec_version: 1_000_030,
@@ -611,30 +573,36 @@ mod tests {
 
     #[test]
     fn builder_nonce_flows_into_check_nonce_encoding() {
-        use subxt::config::transaction_extensions::CheckNonce;
-        use subxt::config::TransactionExtension as _;
-        use subxt::ext::frame_decode::extrinsics::TransactionExtension as _;
-
         let state = offline_client_state();
 
-        let (.., nonce, _, _, _) =
-            super::PeopleExtrinsicParamsBuilder::<super::PeopleConfig>::new()
-                .nonce(7)
-                .build();
-        assert_eq!(format!("{nonce:?}"), "CheckNonceParams(Some(7))");
-        let mut encoded = Vec::new();
-        CheckNonce::new(&state, nonce)
-            .expect("CheckNonce builds offline")
-            .encode_value_to(0, state.metadata.types(), &mut encoded)
-            .expect("CheckNonce encodes offline");
-        assert_eq!(encoded, [28], "nonce 7 must encode as Compact(7), 7 << 2");
+        fn encode_nonce(
+            state: &subxt::config::ClientState<PeopleConfig>,
+            params: tx_ext::CheckNonceParams,
+        ) -> Vec<u8> {
+            use subxt::config::TransactionExtension as _;
+            use subxt::ext::frame_decode::extrinsics::TransactionExtension as _;
 
-        let (.., nonce, _, _, _) =
-            super::PeopleExtrinsicParamsBuilder::<super::PeopleConfig>::new().build();
+            let mut out = Vec::new();
+            tx_ext::CheckNonce::new(state, params)
+                .expect("CheckNonce builds offline")
+                .encode_value_to(0, state.metadata.types(), &mut out)
+                .expect("CheckNonce encodes offline");
+            out
+        }
+
+        let (.., nonce, _, _, _) = PeopleExtrinsicParamsBuilder::new().nonce(7).build();
         assert_eq!(
-            format!("{nonce:?}"),
-            "CheckNonceParams(None)",
-            "without an explicit nonce the slot must defer to the chain lookup"
+            encode_nonce(&state, nonce),
+            [28],
+            "nonce 7 must encode as Compact(7), 7 << 2"
+        );
+
+        let (.., nonce, _, _, _) = PeopleExtrinsicParamsBuilder::new().build();
+        assert_eq!(
+            encode_nonce(&state, nonce),
+            [0],
+            "without an explicit nonce the slot carries none of its own and \
+             defers to the nonce subxt injects from the chain"
         );
     }
 
@@ -645,8 +613,7 @@ mod tests {
         use subxt::ext::frame_decode::extrinsics::TransactionExtension as _;
 
         let state = offline_client_state();
-        let (.., mortality, _, _, tip, _) =
-            super::PeopleExtrinsicParamsBuilder::<super::PeopleConfig>::new().build();
+        let (.., mortality, _, _, tip, _) = PeopleExtrinsicParamsBuilder::new().build();
 
         let mut era = Vec::new();
         CheckMortality::new(&state, mortality)
@@ -662,13 +629,39 @@ mod tests {
 
     #[test]
     fn default_builder_matches_new() {
-        let (.., new_nonce, _, new_tip, _) =
-            super::PeopleExtrinsicParamsBuilder::<super::PeopleConfig>::new().build();
-        let (.., default_nonce, _, default_tip, _) =
-            super::PeopleExtrinsicParamsBuilder::<super::PeopleConfig>::default().build();
+        use subxt::config::TransactionExtension as _;
+        use subxt::ext::frame_decode::extrinsics::TransactionExtension as _;
 
-        assert_eq!(format!("{default_nonce:?}"), format!("{new_nonce:?}"));
-        assert_eq!(format!("{default_tip:?}"), format!("{new_tip:?}"));
+        let state = offline_client_state();
+
+        let mut encoded = Vec::new();
+        for builder in [
+            PeopleExtrinsicParamsBuilder::new(),
+            PeopleExtrinsicParamsBuilder::default(),
+        ] {
+            let (.., mortality, nonce, _, tip, _) = builder.build();
+            let mut out = Vec::new();
+
+            tx_ext::CheckMortality::new(&state, mortality)
+                .expect("mortality params build offline")
+                .encode_value_to(0, state.metadata.types(), &mut out)
+                .expect("CheckMortality encodes offline");
+            tx_ext::CheckNonce::new(&state, nonce)
+                .expect("CheckNonce builds offline")
+                .encode_value_to(0, state.metadata.types(), &mut out)
+                .expect("CheckNonce encodes offline");
+            tx_ext::ChargeAssetTxPayment::new(&state, tip)
+                .expect("tip params build offline")
+                .encode_value_to(0, state.metadata.types(), &mut out)
+                .expect("ChargeAssetTxPayment encodes offline");
+
+            encoded.push(out);
+        }
+
+        assert_eq!(
+            encoded[0], encoded[1],
+            "`default()` must encode identically to `new()`"
+        );
     }
 
     #[test]
@@ -679,8 +672,8 @@ mod tests {
         let state = offline_client_state();
         let types = state.metadata.types();
 
-        let authorize = super::Noop::<super::AuthorizeValueTransfer>::new(&state, ())
-            .expect("noop gates build offline");
+        let authorize =
+            Noop::<AuthorizeValueTransfer>::new(&state, ()).expect("noop gates build offline");
         let mut out = vec![0xAA];
         authorize
             .encode_value_to(0, types, &mut out)
@@ -691,8 +684,8 @@ mod tests {
             .expect("noop implicit encodes");
         assert_eq!(out, [0xAA, 0x00], "the implicit part writes nothing");
 
-        let unit = super::Noop::<super::UnitTransactionExtension>::new(&state, ())
-            .expect("noop gates build offline");
+        let unit =
+            Noop::<UnitTransactionExtension>::new(&state, ()).expect("noop gates build offline");
         let mut out = vec![0xAA];
         unit.encode_value_to(0, types, &mut out)
             .expect("noop value encodes");
@@ -705,7 +698,7 @@ mod tests {
     fn config_delegates_caches_to_polkadot_config() {
         use subxt::Config as _;
 
-        let config = super::PeopleConfig::default();
+        let config = PeopleConfig::default();
         assert_eq!(config.genesis_hash(), None);
         assert_eq!(
             config.spec_and_transaction_version_for_block_number(0),
