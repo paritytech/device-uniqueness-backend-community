@@ -4,7 +4,7 @@
 use anyhow::{bail, Context as _};
 use chain_types::people;
 use chain_types::people::runtime_types::indiv_support::traits::reality::RingExponent;
-use chain_types::{PeopleConfig, PeopleExtrinsicParamsBuilder};
+use chain_types::PeopleExtrinsicParamsBuilder;
 use rand::RngCore as _;
 use subxt::ext::codec::Decode as _;
 use verifiable::ring::bandersnatch::BandersnatchVrfVerifiable;
@@ -110,9 +110,7 @@ async fn attest(rpc: &str, state_path: &str) -> anyhow::Result<()> {
             ownership,
             None,
         );
-        let params = PeopleExtrinsicParamsBuilder::<PeopleConfig>::new()
-            .nonce(nonce)
-            .build();
+        let params = PeopleExtrinsicParamsBuilder::new().nonce(nonce).build();
         let signed = api
             .tx()
             .await?

@@ -7,8 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use chain_types::people::runtime_types::sp_runtime::DispatchError;
 use chain_types::{
-    people, AssetHubConfig, AssetHubExtrinsicParamsBuilder, PeopleConfig,
-    PeopleExtrinsicParamsBuilder,
+    people, AssetHubExtrinsicParamsBuilder, PeopleConfig, PeopleExtrinsicParamsBuilder,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use sqlx::PgPool;
@@ -579,9 +578,7 @@ impl Writer {
         payload: &DynamicPayload<Vec<Value>>,
         nonce: u64,
     ) -> anyhow::Result<()> {
-        let params = PeopleExtrinsicParamsBuilder::<PeopleConfig>::new()
-            .nonce(nonce)
-            .build();
+        let params = PeopleExtrinsicParamsBuilder::new().nonce(nonce).build();
         let mut tx_client = self.chain.online().tx().await?;
         let signed = tx_client
             .create_signed(payload, &self.signer, params)
@@ -888,9 +885,7 @@ impl Writer {
         payload: &DynamicPayload<Vec<Value>>,
         nonce: u64,
     ) -> anyhow::Result<()> {
-        let params = AssetHubExtrinsicParamsBuilder::<AssetHubConfig>::new()
-            .nonce(nonce)
-            .build();
+        let params = AssetHubExtrinsicParamsBuilder::new().nonce(nonce).build();
         let mut tx_client = asset_hub.online().tx().await?;
         let signed = tx_client
             .create_signed(payload, &self.signer, params)
