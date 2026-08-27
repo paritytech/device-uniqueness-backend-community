@@ -8,7 +8,7 @@ use chain_types::people::runtime_types::indiv_pallet_resources::types::ConsumerI
 use sqlx::{PgPool, Postgres, Row as _, Transaction};
 use subxt::utils::AccountId32;
 
-use crate::chain::{BoxError, ChainClient, ChainError};
+use crate::chain::{BoxError, ChainError, PeopleChain};
 use crate::projection;
 use crate::ss58::Ss58Error;
 
@@ -55,7 +55,7 @@ pub enum IndexError {
 /// checkpoint row is missing (bootstrap seeds it at startup).
 pub async fn index_finalized_range(
     pool: &PgPool,
-    chain: &ChainClient,
+    chain: &PeopleChain,
 ) -> Result<Option<IndexReport>, IndexError> {
     let mut lock_connection = pool.acquire().await?;
     lock_connection.close_on_drop();
@@ -121,7 +121,7 @@ pub async fn index_finalized_range(
 /// Index one finalized block, committing its writes and checkpoint atomically.
 async fn index_block(
     pool: &PgPool,
-    chain: &ChainClient,
+    chain: &PeopleChain,
     number: u64,
     report: &mut IndexReport,
 ) -> Result<(), IndexError> {

@@ -8,7 +8,7 @@ use anyhow::Context as _;
 use username_indexer::http::middleware::RateLimiter;
 use username_indexer::poc::{self, Poc};
 use username_indexer::sync::{self, Freshness, FreshnessSnapshot};
-use username_indexer::{db, ensure_seeded, routes, AppState, ChainClient, Config};
+use username_indexer::{db, ensure_seeded, routes, AppState, Config, PeopleChain};
 
 pub async fn run() -> anyhow::Result<()> {
     http_common::telemetry::init("username-indexer");
@@ -24,7 +24,7 @@ pub async fn run() -> anyhow::Result<()> {
     );
 
     let pool = db::connect(&config.database_url).await?;
-    let chain = ChainClient::connect(&config.people_rpc_url, config.storage_page_size).await?;
+    let chain = PeopleChain::connect(&config.people_rpc_url, config.storage_page_size).await?;
 
     let bind_addr = config.bind_addr;
     let state = build_state(&config, pool.clone(), chain).await?;
@@ -56,7 +56,7 @@ pub async fn run() -> anyhow::Result<()> {
 pub async fn build_state(
     config: &Config,
     pool: sqlx::PgPool,
-    chain: ChainClient,
+    chain: PeopleChain,
 ) -> anyhow::Result<AppState> {
     // Resolved before any I/O so a misconfigured gate fails at startup rather
     // than after the finalized bootstrap scan (which can take minutes).

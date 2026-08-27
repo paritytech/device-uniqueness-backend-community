@@ -15,7 +15,7 @@ use tower::ServiceExt as _;
 
 use device_attestation::config::{DeviceCheckConfig, PaymentConfig};
 use device_attestation::eligibility;
-use device_attestation::{AppState, ChainClient, Config, Jwt};
+use device_attestation::{AppState, Config, Jwt, PeopleChain};
 
 const JWT_SEED: [u8; 32] = [7u8; 32];
 const SUBJECT: &str = "0xpaymenthttplive";
@@ -128,7 +128,7 @@ async fn missing_device_token_resolves_to_a_payment_quote_over_the_production_ro
         .expect("pre-clean");
     let rpc_url = std::env::var("PEOPLE_RPC_URL")
         .unwrap_or_else(|_| "wss://paseo-people-next-system-rpc.polkadot.io".to_string());
-    let chain = ChainClient::connect(&rpc_url).await.expect("live RPC");
+    let chain = PeopleChain::connect(&rpc_url).await.expect("live RPC");
 
     let mut config = Config::test_default();
     config.enforce_auth = true;
@@ -193,7 +193,7 @@ async fn missing_device_token_resolves_to_a_payment_quote_over_the_production_ro
             .expect("row")
             .try_get("id")
             .unwrap();
-    let chain2 = ChainClient::connect(&rpc_url).await.expect("live RPC");
+    let chain2 = PeopleChain::connect(&rpc_url).await.expect("live RPC");
     device_attestation::payment::confirm_by_id(&pool, &chain2, request_id)
         .await
         .expect("confirm")
@@ -261,7 +261,7 @@ async fn non_store_install_routes_to_payment_and_store_install_proceeds() {
     }
     let rpc_url = std::env::var("PEOPLE_RPC_URL")
         .unwrap_or_else(|_| "wss://paseo-people-next-system-rpc.polkadot.io".to_string());
-    let chain = ChainClient::connect(&rpc_url).await.expect("live RPC");
+    let chain = PeopleChain::connect(&rpc_url).await.expect("live RPC");
 
     let mut config = Config::test_default();
     config.payment = Some(PaymentConfig {
@@ -317,7 +317,7 @@ async fn a_valid_voucher_beats_the_non_store_payment_gate() {
         .expect("pre-clean");
     let rpc_url = std::env::var("PEOPLE_RPC_URL")
         .unwrap_or_else(|_| "wss://paseo-people-next-system-rpc.polkadot.io".to_string());
-    let chain = ChainClient::connect(&rpc_url).await.expect("live RPC");
+    let chain = PeopleChain::connect(&rpc_url).await.expect("live RPC");
 
     let mut config = Config::test_default();
     config.registration_vouchers_enabled = true;

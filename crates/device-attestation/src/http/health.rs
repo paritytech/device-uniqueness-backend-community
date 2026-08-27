@@ -106,7 +106,7 @@ pub(crate) async fn readyz(State(state): State<AppState>) -> Response {
 /// can never disagree.
 pub async fn probe(
     pool: sqlx::PgPool,
-    chain: crate::ChainClient,
+    chain: crate::PeopleChain,
 ) -> http_common::health::Readiness {
     if let Err(err) = sqlx::query("SELECT 1").execute(&pool).await {
         tracing::warn!(error = ?err, "readiness check failed: database unavailable");

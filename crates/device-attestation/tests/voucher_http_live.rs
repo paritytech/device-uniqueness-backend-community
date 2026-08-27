@@ -11,7 +11,7 @@ use sqlx::Row as _;
 use tower::ServiceExt as _;
 
 use device_attestation::eligibility;
-use device_attestation::{AppState, ChainClient, Config, Jwt};
+use device_attestation::{AppState, Config, Jwt, PeopleChain};
 
 const JWT_SEED: [u8; 32] = [7u8; 32];
 const SUBJECT: &str = "0xvoucherhttplive";
@@ -108,7 +108,7 @@ async fn voucher_claim_is_instant_over_the_production_router() {
         .expect("connect and migrate");
     let rpc_url = std::env::var("PEOPLE_RPC_URL")
         .unwrap_or_else(|_| "wss://paseo-people-next-system-rpc.polkadot.io".to_string());
-    let chain = ChainClient::connect(&rpc_url).await.expect("live RPC");
+    let chain = PeopleChain::connect(&rpc_url).await.expect("live RPC");
 
     let mut config = Config::test_default();
     config.queue_enabled = true;

@@ -15,7 +15,7 @@ pub mod ss58;
 pub mod sync;
 
 pub use bootstrap::{ensure_seeded, BootstrapError, BootstrapReport, BootstrapTrigger};
-pub use chain::{ChainClient, ChainError};
+pub use chain::{ChainError, PeopleChain};
 pub use config::{Config, ConfigError};
 pub use http::{routes, AppState};
 pub use incremental::{index_finalized_range, IndexError, IndexReport};

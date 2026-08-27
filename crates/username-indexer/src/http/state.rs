@@ -6,7 +6,7 @@ use sqlx::PgPool;
 use super::middleware::RateLimiter;
 use crate::poc::Poc;
 use crate::sync::Freshness;
-use crate::ChainClient;
+use crate::PeopleChain;
 
 /// Cheap-to-clone database and People Chain handles for handlers.
 #[derive(Clone)]
@@ -14,7 +14,7 @@ pub struct AppState {
     /// Service-owned Postgres pool.
     pub pool: PgPool,
     /// Reconnecting People Chain client.
-    pub chain: ChainClient,
+    pub chain: PeopleChain,
     /// Latest finalized-sync freshness, updated by the resync loop.
     pub freshness: Freshness,
     /// In-memory per-IP rate limiter for the public search route.
@@ -32,7 +32,7 @@ impl AppState {
     /// The proof-of-compute gate is off; add it with [`AppState::with_poc`].
     pub fn new(
         pool: PgPool,
-        chain: ChainClient,
+        chain: PeopleChain,
         freshness: Freshness,
         limiter: RateLimiter,
     ) -> Self {

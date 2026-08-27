@@ -11,7 +11,7 @@ use subxt::utils::AccountId32;
 use subxt::OnlineClient;
 use subxt_rpcs::{LegacyRpcMethods, RpcClient};
 
-use super::client::{decode_owner, values_from_changes};
+use super::people::{decode_owner, values_from_changes};
 use crate::dotns;
 
 const PALLET: &str = "DotnsGateway";
@@ -23,13 +23,13 @@ pub struct ValidityWindow {
 }
 
 #[derive(Clone)]
-pub struct AssetHubClient {
+pub struct AssetHub {
     client: OnlineClient<AssetHubConfig>,
     /// Raw RPC over the same connection, for the multi-key storage read.
     rpc: LegacyRpcMethods<RpcConfigFor<AssetHubConfig>>,
 }
 
-impl AssetHubClient {
+impl AssetHub {
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
         let (client, rpc) = chain_client::connect_asset_hub_with_rpc(url).await?;
         let this = Self::from_parts(client, rpc);

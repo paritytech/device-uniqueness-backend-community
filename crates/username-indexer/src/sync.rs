@@ -8,7 +8,7 @@ use serde::Serialize;
 use sqlx::{PgPool, Row as _};
 use time::OffsetDateTime;
 
-use crate::chain::ChainClient;
+use crate::chain::PeopleChain;
 use crate::config::Config;
 use crate::incremental::index_finalized_range;
 
@@ -79,7 +79,7 @@ pub async fn checkpoint_freshness(pool: &PgPool) -> Result<Option<FreshnessSnaps
 /// Ticks on the configured interval and updates `freshness` on success; on
 /// failure logs and waits a bounded exponential backoff, never advancing the
 /// checkpoint. The caller bootstraps, so this waits one interval first.
-pub async fn run(pool: PgPool, chain: ChainClient, config: Config, freshness: Freshness) {
+pub async fn run(pool: PgPool, chain: PeopleChain, config: Config, freshness: Freshness) {
     let mut interval = tokio::time::interval(Duration::from_secs(config.sync_interval_secs.into()));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     interval.tick().await;
@@ -136,7 +136,7 @@ pub async fn run(pool: PgPool, chain: ChainClient, config: Config, freshness: Fr
 ///
 /// The gap is the projection's real staleness — search answers from the
 /// checkpoint, so it can grow while every individual pass reports success.
-async fn record_lag_gauges(pool: &PgPool, chain: &ChainClient) -> anyhow::Result<()> {
+async fn record_lag_gauges(pool: &PgPool, chain: &PeopleChain) -> anyhow::Result<()> {
     let head = chain.online().at_current_block().await?.block_number();
     metrics::gauge!("dub_chain_finalized_head_block").set(head as f64);
 

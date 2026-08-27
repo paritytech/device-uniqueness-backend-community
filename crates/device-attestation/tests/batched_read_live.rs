@@ -7,7 +7,7 @@ use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 use chain_types::{people, PeopleConfig};
-use device_attestation::chain::ChainClient;
+use device_attestation::chain::PeopleChain;
 
 const DISCRIMINATORS: u8 = 100;
 
@@ -92,7 +92,7 @@ async fn some_registered_lite_username(at: &PeopleBlock) -> anyhow::Result<Optio
 #[tokio::test]
 #[ignore = "requires a live People Chain RPC; set PEOPLE_RPC_URL and run with --ignored"]
 async fn batched_read_matches_per_key_read() {
-    let chain = step("connect", ChainClient::connect(&rpc_url()))
+    let chain = step("connect", PeopleChain::connect(&rpc_url()))
         .await
         .expect("connect");
     let at = step("selecting a block", chain.online().at_current_block())
@@ -146,7 +146,7 @@ async fn batched_read_matches_per_key_read() {
 #[tokio::test]
 #[ignore = "requires a live People Chain RPC; set PEOPLE_RPC_URL and run with --ignored"]
 async fn batched_owner_read_matches_per_name_read() {
-    let chain = step("connect", ChainClient::connect(&rpc_url()))
+    let chain = step("connect", PeopleChain::connect(&rpc_url()))
         .await
         .expect("connect");
     let at = step("selecting a block", chain.online().at_current_block())
@@ -223,7 +223,7 @@ async fn concurrent_load_probe_prints_latency() {
         .expect("BATCH_PROBE_CONCURRENCY must be a positive integer");
     let concurrency = concurrency.get();
 
-    let chain = step("connect", ChainClient::connect(&rpc_url()))
+    let chain = step("connect", PeopleChain::connect(&rpc_url()))
         .await
         .expect("connect");
     let online = chain.online().clone();

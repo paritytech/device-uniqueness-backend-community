@@ -11,7 +11,7 @@ use secrecy::ExposeSecret as _;
 use super::middleware::RateLimiter;
 use crate::auth::key_attest::crl::CrlCache;
 use crate::auth::play_integrity::google::GoogleDecoder;
-use crate::chain::ChainClient;
+use crate::chain::PeopleChain;
 use crate::config::Config;
 use crate::device_check;
 
@@ -20,7 +20,7 @@ pub struct AppState {
     /// Postgres pool (challenges, refresh tokens).
     pub pool: PgPool,
     /// People Chain read client.
-    pub chain: ChainClient,
+    pub chain: PeopleChain,
     /// JWT issuer (Ed25519).
     pub jwt: Arc<Jwt>,
     pub config: Arc<Config>,
@@ -44,7 +44,7 @@ impl http_common::HasJwtVerifier for AppState {
 }
 
 impl AppState {
-    pub fn new(pool: PgPool, chain: ChainClient, jwt: Jwt, config: Config) -> Self {
+    pub fn new(pool: PgPool, chain: PeopleChain, jwt: Jwt, config: Config) -> Self {
         let limiter = RateLimiter::new(config.auth_rate_limit, config.auth_rate_window);
         let crl = CrlCache::new(
             config.android_crl_url.clone(),

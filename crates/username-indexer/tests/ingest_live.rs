@@ -4,11 +4,11 @@
 use std::sync::Arc;
 
 use sqlx::Row as _;
-use username_indexer::chain::ChainClient;
+use username_indexer::chain::PeopleChain;
 use username_indexer::projection::PROJECTION_LOCK_ID;
 use username_indexer::{bootstrap, incremental, sync};
 
-async fn dead_chain_client() -> ChainClient {
+async fn dead_chain_client() -> PeopleChain {
     use subxt_rpcs::client::mock_rpc_client::Json;
     use subxt_rpcs::client::{MockRpcClient, RpcClient};
 
@@ -21,7 +21,7 @@ async fn dead_chain_client() -> ChainClient {
     let client = subxt::OnlineClient::<chain_types::PeopleConfig>::from_backend(Arc::new(backend))
         .await
         .expect("offline client from mock backend");
-    ChainClient::from_online(client)
+    PeopleChain::from_online(client)
 }
 
 async fn set_checkpoint(pool: &sqlx::PgPool, number: i64, indexed: i64, failures: i64) {

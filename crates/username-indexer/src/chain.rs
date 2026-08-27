@@ -29,11 +29,11 @@ pub enum ChainError {
 
 /// Connected People Chain client using a reconnecting legacy backend.
 #[derive(Clone)]
-pub struct ChainClient {
+pub struct PeopleChain {
     client: OnlineClient<PeopleConfig>,
 }
 
-impl ChainClient {
+impl PeopleChain {
     /// Connect and configure bounded legacy storage paging.
     pub async fn connect(url: &str, storage_page_size: u32) -> Result<Self, ChainError> {
         let reconnecting = ReconnectingRpcClient::builder()

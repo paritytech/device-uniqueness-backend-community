@@ -14,7 +14,7 @@ pub mod payment;
 pub mod queue;
 pub mod usernames;
 
-pub use chain::ChainClient;
+pub use chain::PeopleChain;
 pub use config::Config;
 pub use http::routes;
 pub use http::state::AppState;

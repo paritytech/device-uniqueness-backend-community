@@ -22,10 +22,10 @@ use time::OffsetDateTime;
 
 use chain_client::{batch_item_results, settle_batch_size, WriterSigner};
 
-use super::asset_hub::{AssetHubClient, ValidityWindow};
-use super::client::ChainClient;
+use super::asset_hub::{AssetHub, ValidityWindow};
 use super::lease;
 use super::outbox::{self, Guard, Reservation};
+use super::people::PeopleChain;
 use crate::dotns;
 
 /// The claim size a writer uses when `CHAIN_WRITER_BATCH_SIZE` is unset or
@@ -180,7 +180,7 @@ pub async fn run(config: WriterConfig) -> anyhow::Result<()> {
         "starting device-attestation-chain-writer"
     );
     let pool = crate::db::connect(config.database_url.expose_secret()).await?;
-    let chain = ChainClient::connect(&config.people_rpc_url).await?;
+    let chain = PeopleChain::connect(&config.people_rpc_url).await?;
     let signer = WriterSigner::from_secret(config.signer_suri.expose_secret())?;
     let signer_account = AccountId32(signer.public_bytes());
     let proxy_for = signer
@@ -244,7 +244,7 @@ pub async fn run(config: WriterConfig) -> anyhow::Result<()> {
 
 struct Writer {
     pool: PgPool,
-    chain: ChainClient,
+    chain: PeopleChain,
     dotns_lane: DotnsLane,
     signer: WriterSigner,
     signer_account: AccountId32,
@@ -363,7 +363,7 @@ enum DotnsLane {
     Disabled,
     Enabled {
         rpc_url: String,
-        connected: Option<(AssetHubClient, ValidityWindow)>,
+        connected: Option<(AssetHub, ValidityWindow)>,
         last_error: Option<String>,
         retry_at: Option<Instant>,
     },
@@ -405,7 +405,7 @@ impl DotnsLane {
         is_new
     }
 
-    fn record_dial_success(&mut self, up: (AssetHubClient, ValidityWindow)) {
+    fn record_dial_success(&mut self, up: (AssetHub, ValidityWindow)) {
         if let DotnsLane::Enabled {
             connected,
             last_error,
@@ -420,8 +420,8 @@ impl DotnsLane {
     }
 }
 
-async fn connect_asset_hub(url: &str) -> anyhow::Result<(AssetHubClient, ValidityWindow)> {
-    let client = AssetHubClient::connect(url).await?;
+async fn connect_asset_hub(url: &str) -> anyhow::Result<(AssetHub, ValidityWindow)> {
+    let client = AssetHub::connect(url).await?;
     let window = client.validity_window().await?;
     Ok((client, window))
 }
@@ -1214,7 +1214,7 @@ impl Writer {
         Ok(n)
     }
 
-    async fn nonce_ah(&mut self, asset_hub: &AssetHubClient) -> anyhow::Result<u64> {
+    async fn nonce_ah(&mut self, asset_hub: &AssetHub) -> anyhow::Result<u64> {
         if let Some(n) = self.next_nonce_ah {
             return Ok(n);
         }
@@ -1228,7 +1228,7 @@ impl Writer {
         Ok(n)
     }
 
-    async fn dotns_client(&mut self) -> Option<(AssetHubClient, ValidityWindow)> {
+    async fn dotns_client(&mut self) -> Option<(AssetHub, ValidityWindow)> {
         let now = Instant::now();
         match self.dotns_lane.dial_state(now) {
             DotnsDial::Skip => return None,
@@ -1314,7 +1314,7 @@ impl Writer {
     async fn triage_dotns<'r>(
         &mut self,
         guard: &Guard,
-        asset_hub: &AssetHubClient,
+        asset_hub: &AssetHub,
         window: ValidityWindow,
         due: &'r [Reservation],
     ) -> anyhow::Result<Vec<(&'r Reservation, [u8; 32])>> {
@@ -1437,7 +1437,7 @@ impl Writer {
     async fn process_dotns_one(
         &mut self,
         guard: &Guard,
-        asset_hub: &AssetHubClient,
+        asset_hub: &AssetHub,
         r: &Reservation,
         candidate: [u8; 32],
     ) -> anyhow::Result<()> {
@@ -1495,7 +1495,7 @@ impl Writer {
     async fn process_dotns_batch(
         &mut self,
         guard: &Guard,
-        asset_hub: &AssetHubClient,
+        asset_hub: &AssetHub,
         rows: &[(&Reservation, [u8; 32])],
     ) -> anyhow::Result<()> {
         let payload = build_reserve_name_batch_tx(rows, self.proxy_for.as_ref());
@@ -1599,7 +1599,7 @@ impl Writer {
     async fn apply_dotns_items(
         &mut self,
         guard: &Guard,
-        asset_hub: &AssetHubClient,
+        asset_hub: &AssetHub,
         rows: &[(&Reservation, [u8; 32])],
         items: Vec<Result<(), String>>,
     ) -> anyhow::Result<()> {
@@ -1664,7 +1664,7 @@ impl Writer {
     async fn reconcile_dotns_batch(
         &mut self,
         guard: &Guard,
-        asset_hub: &AssetHubClient,
+        asset_hub: &AssetHub,
         rows: &[(&Reservation, [u8; 32])],
         reason: &str,
     ) -> anyhow::Result<()> {
@@ -1703,7 +1703,7 @@ impl Writer {
     async fn submit_dotns_batch(
         &self,
         guard: &Guard,
-        asset_hub: &AssetHubClient,
+        asset_hub: &AssetHub,
         rows: &[(&Reservation, [u8; 32])],
         payload: &DynamicPayload<Vec<Value>>,
         nonce: u64,
@@ -1748,7 +1748,7 @@ impl Writer {
     async fn submit_dotns(
         &self,
         guard: &Guard,
-        asset_hub: &AssetHubClient,
+        asset_hub: &AssetHub,
         r: &Reservation,
         payload: &DynamicPayload<Vec<Value>>,
         nonce: u64,
@@ -2234,7 +2234,7 @@ fn force_batch_call(calls: Value) -> Value {
 /// Optionally wrapped in `Proxy.proxy(real = attester authority, …)`.
 ///
 /// Argument order is asserted against the connected runtime's metadata at
-/// startup ([`AssetHubClient::connect`]). A chain running the older
+/// startup ([`AssetHub::connect`]). A chain running the older
 /// proof-of-ownership variant never reaches this function.
 fn build_reserve_name_tx(
     r: &Reservation,
