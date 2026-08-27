@@ -262,11 +262,12 @@ pub struct Reservation {
     pub dotns_signature: Option<Vec<u8>>,
     pub dotns_signed_at: Option<i64>,
     pub dotns_attempt: i32,
+    pub created_at: OffsetDateTime,
 }
 
 const SELECT_COLS: &str = "id, full_username, candidate_account_id, candidate_signature, \
      ring_vrf_key, proof_of_ownership, consumer_registration_signature, identifier_key, \
-     reserved_username, attempt, dotns_signature, dotns_signed_at, dotns_attempt";
+     reserved_username, attempt, dotns_signature, dotns_signed_at, dotns_attempt, created_at";
 
 fn row_to_reservation(row: &sqlx::postgres::PgRow) -> Result<Reservation, sqlx::Error> {
     Ok(Reservation {
@@ -283,6 +284,7 @@ fn row_to_reservation(row: &sqlx::postgres::PgRow) -> Result<Reservation, sqlx::
         dotns_signature: row.try_get("dotns_signature")?,
         dotns_signed_at: row.try_get("dotns_signed_at")?,
         dotns_attempt: row.try_get("dotns_attempt")?,
+        created_at: row.try_get("created_at")?,
     })
 }
 

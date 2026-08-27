@@ -34,19 +34,32 @@ pub async fn connect(url: &str) -> Result<OnlineClient<PeopleConfig>, ConnectErr
 pub async fn connect_with_rpc(
     url: &str,
 ) -> Result<(OnlineClient<PeopleConfig>, RpcClient), ConnectError> {
-    let rpc = reconnecting_rpc_client(url, "People Chain").await?;
-    let client = OnlineClient::<PeopleConfig>::from_rpc_client(rpc.clone())
-        .await
-        .map_err(|source| ConnectError::Client {
-            chain: "People Chain",
-            url: url.to_string(),
-            source,
-        })?;
-    Ok((client, rpc))
+    connect_as_with_rpc::<PeopleConfig>(url, "People Chain").await
 }
 
 pub async fn connect_asset_hub(url: &str) -> Result<OnlineClient<AssetHubConfig>, ConnectError> {
     connect_as::<AssetHubConfig>(url, "Asset Hub").await
+}
+
+pub async fn connect_asset_hub_with_rpc(
+    url: &str,
+) -> Result<(OnlineClient<AssetHubConfig>, RpcClient), ConnectError> {
+    connect_as_with_rpc::<AssetHubConfig>(url, "Asset Hub").await
+}
+
+async fn connect_as_with_rpc<T: subxt::Config + Default>(
+    url: &str,
+    chain: &'static str,
+) -> Result<(OnlineClient<T>, RpcClient), ConnectError> {
+    let rpc = reconnecting_rpc_client(url, chain).await?;
+    let client = OnlineClient::<T>::from_rpc_client(rpc.clone())
+        .await
+        .map_err(|source| ConnectError::Client {
+            chain,
+            url: url.to_string(),
+            source,
+        })?;
+    Ok((client, rpc))
 }
 
 async fn connect_as<T: subxt::Config + Default>(
@@ -150,20 +163,30 @@ impl subxt::tx::Signer<AssetHubConfig> for WriterSigner {
     }
 }
 
-pub fn batch_item_outcomes<P, E>(events: impl IntoIterator<Item = (P, E)>) -> Vec<bool>
-where
-    P: AsRef<str>,
-    E: AsRef<str>,
-{
+pub fn batch_item_results<T>(
+    events: impl IntoIterator<Item = T>,
+    names: impl Fn(&T) -> (&str, &str),
+) -> Vec<Result<(), T>> {
     events
         .into_iter()
-        .filter(|(pallet, _)| pallet.as_ref() == "Utility")
-        .filter_map(|(_, event)| match event.as_ref() {
-            "ItemCompleted" => Some(true),
-            "ItemFailed" => Some(false),
-            _ => None,
+        .filter_map(|event| {
+            // Decided before the item can move into `Err`: `names` borrows it.
+            let completed = match names(&event) {
+                ("Utility", "ItemCompleted") => true,
+                ("Utility", "ItemFailed") => false,
+                _ => return None,
+            };
+            Some(if completed { Ok(()) } else { Err(event) })
         })
         .collect()
+}
+
+pub fn settle_batch_size(current: u16, max: u16, succeeded: bool) -> u16 {
+    if succeeded {
+        current.saturating_add(1).min(max)
+    } else {
+        (current / 2).max(1)
+    }
 }
 
 #[cfg(test)]
@@ -177,6 +200,12 @@ mod tests {
     use subxt_rpcs::rpc_params;
 
     use super::*;
+
+    type Event = (&'static str, &'static str);
+
+    fn names(event: &Event) -> (&str, &str) {
+        (event.0, event.1)
+    }
 
     #[tokio::test]
     async fn reconnecting_rpc_client_recovers_after_server_restart() -> anyhow::Result<()> {
@@ -285,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_item_outcomes_keeps_order_and_ignores_foreign_events() {
+    fn batch_item_results_keep_order_and_ignore_foreign_events() {
         let events = [
             ("System", "ExtrinsicSuccess"),
             ("Utility", "ItemCompleted"),
@@ -294,7 +323,49 @@ mod tests {
             ("Utility", "BatchCompletedWithErrors"),
             ("Utility", "ItemCompleted"),
         ];
-        assert_eq!(batch_item_outcomes(events), vec![true, false, true]);
-        assert!(batch_item_outcomes(Vec::<(&str, &str)>::new()).is_empty());
+        assert_eq!(
+            batch_item_results(events, names),
+            vec![Ok(()), Err(("Utility", "ItemFailed")), Ok(())]
+        );
+        assert!(batch_item_results(Vec::<Event>::new(), names).is_empty());
+    }
+
+    #[test]
+    fn only_failed_items_are_asked_for_a_reason() {
+        let events = [
+            ("System", "ExtrinsicSuccess"),
+            ("Utility", "ItemCompleted"),
+            ("Game", "ItemFailed"), // same name, wrong pallet
+            ("Utility", "ItemFailed"),
+            ("Utility", "ItemCompleted"),
+        ];
+        let mut decoded = 0;
+        let reasons: Vec<Result<(), String>> = batch_item_results(events, names)
+            .into_iter()
+            .map(|item| {
+                item.map_err(|(pallet, event)| {
+                    decoded += 1;
+                    format!("{pallet}::{event}")
+                })
+            })
+            .collect();
+
+        assert_eq!(
+            reasons,
+            vec![Ok(()), Err("Utility::ItemFailed".to_string()), Ok(())]
+        );
+        assert_eq!(decoded, 1, "a reason was decoded for a non-failed item");
+    }
+
+    #[test]
+    fn batch_size_grows_by_one_and_halves_on_failure() {
+        assert_eq!(settle_batch_size(50, 100, true), 51);
+        assert_eq!(settle_batch_size(99, 100, true), 100);
+        assert_eq!(settle_batch_size(100, 100, true), 100);
+
+        assert_eq!(settle_batch_size(100, 100, false), 50);
+        assert_eq!(settle_batch_size(3, 100, false), 1);
+        assert_eq!(settle_batch_size(1, 100, false), 1);
+        assert_eq!(settle_batch_size(u16::MAX, u16::MAX, true), u16::MAX);
     }
 }

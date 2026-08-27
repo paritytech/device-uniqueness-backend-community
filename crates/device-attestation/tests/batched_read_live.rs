@@ -143,6 +143,63 @@ async fn batched_read_matches_per_key_read() {
     }
 }
 
+#[tokio::test]
+#[ignore = "requires a live People Chain RPC; set PEOPLE_RPC_URL and run with --ignored"]
+async fn batched_owner_read_matches_per_name_read() {
+    let chain = step("connect", ChainClient::connect(&rpc_url()))
+        .await
+        .expect("connect");
+    let at = step("selecting a block", chain.online().at_current_block())
+        .await
+        .expect("current block");
+
+    let (owned_base, owned_discriminator) =
+        step("scanning usernames", some_registered_lite_username(&at))
+            .await
+            .expect("iterate usernames")
+            .expect(
+                "no registered {base}.{NN} username on this chain: the comparison would only \
+                 prove two empty maps agree — point PEOPLE_RPC_URL at a chain with registrations",
+            );
+    let owned = format!("{owned_base}.{owned_discriminator:02}");
+    let free = format!("dubprobe{}.42", std::process::id());
+    let names = [owned.as_str(), free.as_str()];
+
+    let batched = step(
+        "batched owner read (1 request)",
+        chain.username_owners(&names),
+    )
+    .await
+    .expect("batched owner read");
+
+    for name in names {
+        let per_name = step("per-name owner read", chain.username_owner(name))
+            .await
+            .expect("per-name owner read");
+        assert_eq!(
+            batched.get(name).copied(),
+            per_name,
+            "batched owner read disagreed with the per-name read for {name}"
+        );
+    }
+    assert!(
+        batched.contains_key(&owned),
+        "expected {owned} to read as owned; the comparison proved nothing"
+    );
+    assert!(
+        !batched.contains_key(&free),
+        "unregistered probe name {free} read as owned"
+    );
+
+    // An empty set costs no request at all, and is not an error.
+    assert!(chain
+        .username_owners(&[])
+        .await
+        .expect("empty read")
+        .is_empty());
+}
+
+/// `min / p50 / p95 / max` of a set of per-request durations, in ms.
 fn percentiles(mut samples: Vec<u128>) -> (u128, u128, u128, u128) {
     samples.sort_unstable();
     let pick = |q: f64| samples[((samples.len() - 1) as f64 * q).round() as usize];

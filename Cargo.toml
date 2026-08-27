@@ -19,9 +19,9 @@ chain-client = { path = "crates/chain-client" }
 jwt-verify = { path = "crates/jwt-verify" }
 http-common = { path = "crates/http-common" }
 
-subxt = { version = "0.50", default-features = false, features = ["native", "reconnecting-rpc-client"] }
-subxt-rpcs = { version = "0.50", default-features = false, features = ["native", "reconnecting-rpc-client"] }
-subxt-signer = { version = "0.50", default-features = false, features = ["sr25519", "std"] }
+subxt = { version = "0.50.3", default-features = false, features = ["native", "reconnecting-rpc-client"] }
+subxt-rpcs = { version = "0.50.3", default-features = false, features = ["native", "reconnecting-rpc-client"] }
+subxt-signer = { version = "0.50.3", default-features = false, features = ["sr25519", "std"] }
 
 # Ring-VRF personhood-proof verification. Pinned to the revision the People
 # Chain runtime pins (the 288-byte `MembersCommitment` encoding); verify-only

@@ -375,3 +375,76 @@ async fn oldest_age_measures_time_in_status_not_row_age() {
 
     cleanup(&pool, &base, "unused").await;
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres; set DEVICE_ATTESTATION_TEST_DATABASE_URL and run with --ignored"]
+async fn a_whole_batch_retry_gives_back_the_attempt_it_did_not_spend() {
+    let pool = test_pool().await;
+    let base = format!("outboxbatch{}", std::process::id());
+    let lease_name = format!("{base}-lease");
+    let epoch = lease::try_acquire(&pool, &lease_name, "holder-a", Duration::from_secs(60))
+        .await
+        .expect("acquire")
+        .expect("lease free");
+    let guard = Guard {
+        lease_name: lease_name.clone(),
+        holder_id: "holder-a".to_string(),
+        epoch,
+    };
+
+    let ids: Vec<i64> = {
+        let mut ids = Vec::new();
+        for digits in ["41", "42"] {
+            ids.push(
+                outbox::insert(&pool, &reservation(&base, digits))
+                    .await
+                    .expect("insert"),
+            );
+        }
+        ids
+    };
+    let claimed = outbox::claim_due(&pool, 10)
+        .await
+        .expect("claim")
+        .into_iter()
+        .filter(|r| ids.contains(&r.id))
+        .collect::<Vec<_>>();
+    assert_eq!(claimed.len(), 2, "both rows are due");
+
+    for r in &claimed {
+        assert_eq!(r.attempt, 0, "a fresh row has spent no attempt");
+        assert!(
+            outbox::mark_submitting(&pool, &guard, r.id, "0xbatch", 7, r.attempt + 1)
+                .await
+                .expect("mark submitting"),
+            "every row is SUBMITTING before the batch is awaited"
+        );
+    }
+    assert_eq!(attempt_of(&pool, claimed[0].id).await, 1);
+
+    let not_before = time::OffsetDateTime::now_utc() + time::Duration::seconds(2);
+    for r in &claimed {
+        assert!(
+            outbox::mark_retry(&pool, &guard, r.id, not_before, r.attempt, "tx dropped")
+                .await
+                .expect("mark retry"),
+            "the live holder re-queues the set"
+        );
+        assert_eq!(status_of(&pool, r.id).await, "RETRY_AFTER");
+        assert_eq!(
+            attempt_of(&pool, r.id).await,
+            0,
+            "a whole-batch failure must leave the attempt where it was"
+        );
+    }
+
+    cleanup(&pool, &base, &lease_name).await;
+}
+
+async fn attempt_of(pool: &sqlx::PgPool, id: i64) -> i32 {
+    sqlx::query_scalar("SELECT attempt FROM username_reservations WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("read attempt")
+}
