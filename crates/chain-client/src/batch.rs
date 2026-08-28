@@ -8,7 +8,6 @@ pub fn batch_item_results<T>(
     events
         .into_iter()
         .filter_map(|event| {
-            // Decided before the item can move into `Err`: `names` borrows it.
             let completed = match names(&event) {
                 ("Utility", "ItemCompleted") => true,
                 ("Utility", "ItemFailed") => false,

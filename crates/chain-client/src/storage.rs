@@ -151,8 +151,6 @@ mod tests {
         }]
     }
 
-    /// The shape the existence reads take, so the cases below read the way they
-    /// did when this logic lived next to its one caller.
     fn taken_from_changes(
         keys: &[Vec<u8>],
         want_block: &u8,
@@ -286,8 +284,6 @@ mod tests {
         ));
     }
 
-    /// The pairing is by set order, not by the caller's argument order, and an
-    /// absent key yields no entry rather than an empty one.
     #[test]
     fn names_pair_with_values_in_set_order() {
         let names = BTreeSet::from(["b.02", "a.01", "c.03"]);

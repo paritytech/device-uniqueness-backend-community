@@ -48,7 +48,6 @@ pub async fn connect_asset_hub(url: &str) -> Result<OnlineClient<AssetHubConfig>
     connect_as::<AssetHubConfig>(url, "Asset Hub").await
 }
 
-/// [`connect_asset_hub`], also handing back the RPC client.
 pub async fn connect_asset_hub_with_rpc(
     url: &str,
 ) -> Result<(OnlineClient<AssetHubConfig>, RpcClient), ConnectError> {

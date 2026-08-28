@@ -11,12 +11,10 @@ use subxt::config::RpcConfigFor;
 use subxt::OnlineClient;
 use subxt_rpcs::{LegacyRpcMethods, RpcClient};
 
-/// How many `base.NN` discriminators one base name can allocate.
 const DISCRIMINATORS: u8 = 100;
 
 const HEALTH_PROBE_USERNAME: &str = "readyz-probe.00";
 
-/// Key a username into `Resources::UsernameOwnerOf`.
 fn owner_key(
     username: impl AsRef<[u8]>,
 ) -> people::runtime_types::bounded_collections::bounded_vec::BoundedVec<u8> {
@@ -26,7 +24,6 @@ fn owner_key(
 #[derive(Clone)]
 pub struct PeopleChain {
     client: OnlineClient<PeopleConfig>,
-    /// Raw RPC over the same connection, for the multi-key storage reads.
     rpc: LegacyRpcMethods<RpcConfigFor<PeopleConfig>>,
 }
 
@@ -129,7 +126,6 @@ impl PeopleChain {
         let taken = storage::fetch_present(&self.rpc, &keys, block_hash)
             .await
             .context("reading username owners")?;
-        // The keys were built from `0..DISCRIMINATORS`, so every index is a u8.
         Ok(taken.into_iter().map(|i| i as u8).collect())
     }
 

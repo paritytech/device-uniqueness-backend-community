@@ -36,7 +36,6 @@ impl WriterSigner {
         Ok(Self::Uri(keypair))
     }
 
-    /// This key's own public account bytes.
     pub fn public_bytes(&self) -> [u8; 32] {
         match self {
             Self::Uri(k) => k.public_key().0,
@@ -44,8 +43,6 @@ impl WriterSigner {
         }
     }
 
-    /// The account this key must proxy for, or `None` when it *is* that
-    /// account.
     pub fn proxy_for(&self, primary: AccountId32) -> Option<AccountId32> {
         (primary.0 != self.public_bytes()).then_some(primary)
     }

@@ -25,7 +25,6 @@ pub struct ValidityWindow {
 #[derive(Clone)]
 pub struct AssetHub {
     client: OnlineClient<AssetHubConfig>,
-    /// Raw RPC over the same connection, for the multi-key storage read.
     rpc: LegacyRpcMethods<RpcConfigFor<AssetHubConfig>>,
 }
 
