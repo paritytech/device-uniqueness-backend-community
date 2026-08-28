@@ -2036,6 +2036,12 @@ impl Writer {
         if !outbox::mark_assigned(&self.pool, guard, r.id).await? {
             anyhow::bail!("lease lost while assigning");
         }
+        // The claim landed on-chain, so the device's free slot is spent for
+        // good. Best-effort: a failure leaves the record PENDING, which still
+        // holds the slot — never a double grant.
+        if let Err(e) = crate::widevine::store::consume_for_reservation(&self.pool, r.id).await {
+            tracing::warn!(id = r.id, error = %e, "widevine device consume failed (record stays PENDING)");
+        }
         record_submit_outcome("people", "ok");
         let waited = (OffsetDateTime::now_utc() - r.created_at).as_seconds_f64();
         if submitted {
@@ -2058,6 +2064,21 @@ impl Writer {
     async fn fail(&self, guard: &Guard, r: &Reservation, reason: &str) -> anyhow::Result<()> {
         if !outbox::mark_failed(&self.pool, guard, r.id, reason).await? {
             anyhow::bail!("lease lost while failing");
+        }
+        // A terminal claim failure releases the device's PENDING record so
+        // the physical device can claim again. Best-effort: a failure keeps
+        // the slot held (fails safe), and support can release it by hand.
+        match crate::widevine::store::release_for_reservation(&self.pool, r.id).await {
+            Ok(released) if released > 0 => {
+                tracing::info!(
+                    id = r.id,
+                    "widevine device record released with the failed claim"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(id = r.id, error = %e, "widevine device release failed (record stays PENDING)");
+            }
         }
         record_submit_outcome("people", "terminal");
         tracing::warn!(id = r.id, username = %r.full_username, reason, "registration failed terminally");

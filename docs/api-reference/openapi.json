@@ -458,7 +458,7 @@
             }
           },
           "400": {
-            "description": "Validation failed (with per-field `fields`), malformed JSON, or a `lifetimePoUDVoucher` that is unknown, already used, or expired (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright).",
+            "description": "Validation failed (with per-field `fields`), malformed JSON, a `lifetimePoUDVoucher` that is unknown, already used, or expired (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, size bounds, non-canonical CBOR, unknown domain/version).",
             "content": {
               "application/json": {
                 "schema": {},
@@ -479,6 +479,18 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "403": {
+            "description": "Device evidence failed verification under `WIDEVINE_DEDUP_ENFORCE`: chain policy, envelope signature, challenge spent/mismatch, candidate mismatch, or expiry. Retryable once with a fresh challenge; repeated failure surfaces as the paid lane.",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "error": "DEVICE_EVIDENCE_INVALID",
+                  "message": "envelope expired"
+                }
               }
             }
           },
@@ -524,7 +536,7 @@
             }
           },
           "503": {
-            "description": "The DeviceCheck free slot could not be marked used at Apple after a successful gate (upstream write failure; retryable).",
+            "description": "The DeviceCheck free slot could not be marked used at Apple after a successful gate (upstream write failure; retryable), or the enforced Widevine dedup gate could not fetch the attestation revocation list (`DEVICE_EVIDENCE_UNAVAILABLE`; retryable).",
             "content": {
               "application/json": {
                 "schema": {},
@@ -1435,6 +1447,36 @@
             ],
             "description": "Optional single-use registration voucher (the INSTANT lane): bypasses\nthe PoUD gate and the registration queue. Ignored unless\n`REGISTRATION_VOUCHERS_ENABLED`.",
             "example": "base64url-voucher-key"
+          },
+          "attestationChain": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional Android device-uniqueness evidence (Widevine PoUD): leaf-first\nbase64 DER attestation chain, 2-10 entries. All three evidence fields\nare present together or not at all; ignored unless\n`WIDEVINE_DEDUP_ENABLED`.",
+            "example": [
+              "base64-der-leaf",
+              "base64-der-root"
+            ]
+          },
+          "deviceEnvelope": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Base64 of the canonical CBOR device envelope (challenge, candidate,\nwidevineId, level, expiry) signed by the attested key.",
+            "example": "base64-cbor-envelope"
+          },
+          "envelopeSignature": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Base64 DER ECDSA signature over the exact envelope bytes, made by the\nattestation chain's leaf key.",
+            "example": "base64-der-signature"
           },
           "dotns": {
             "oneOf": [
