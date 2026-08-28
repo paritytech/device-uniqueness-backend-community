@@ -176,15 +176,11 @@ mod tests {
         let kid = "issuer-kid";
         let verifier = Verifier::from_jwks(&jwks_for(&seed, kid)).unwrap();
 
-        let token = issue(
-            &seed,
-            Some(kid),
-            "EdDSA",
-            jsonwebtoken::get_current_timestamp() + 3600,
-        );
+        let exp = jsonwebtoken::get_current_timestamp() + 3600;
+        let token = issue(&seed, Some(kid), "EdDSA", exp);
         let claims = verifier.verify(&token).unwrap();
         assert_eq!(claims.account_id, "0xabcdef");
-        assert_eq!(claims.exp, jsonwebtoken::get_current_timestamp() + 3600);
+        assert_eq!(claims.exp, exp);
         assert_eq!(claims.platform, None);
         assert_eq!(claims.app_from_official_store, None);
     }
