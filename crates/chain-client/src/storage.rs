@@ -23,6 +23,8 @@ pub enum BatchReadError {
     MissingKeys(usize),
     #[error("storage answered with a value that is not an AccountId32")]
     UndecodableValue,
+    #[error("storage answered with {values} values for {names} names")]
+    ValueCount { names: usize, values: usize },
 }
 
 pub async fn fetch_many<C>(
@@ -104,6 +106,13 @@ pub fn owners_by_name(
     names: &BTreeSet<&str>,
     values: Vec<Option<Vec<u8>>>,
 ) -> Result<HashMap<String, [u8; 32]>, BatchReadError> {
+    if names.len() != values.len() {
+        return Err(BatchReadError::ValueCount {
+            names: names.len(),
+            values: values.len(),
+        });
+    }
+
     let mut owners = HashMap::with_capacity(names.len());
     for (name, value) in names.iter().zip(values) {
         if let Some(bytes) = value {
@@ -295,5 +304,22 @@ mod tests {
         assert_eq!(owners.get("a.01"), Some(&[1u8; 32]));
         assert_eq!(owners.get("c.03"), Some(&[3u8; 32]));
         assert!(!owners.contains_key("b.02"), "an absent key has no owner");
+    }
+
+    #[test]
+    fn fewer_values_than_names_is_an_error() {
+        let names = BTreeSet::from(["b.02", "a.01", "c.03"]);
+        let error = owners_by_name(&names, vec![Some(vec![1u8; 32]), None])
+            .expect_err("one value short of the names");
+        assert!(
+            matches!(
+                error,
+                BatchReadError::ValueCount {
+                    names: 3,
+                    values: 2
+                }
+            ),
+            "{error:?}"
+        );
     }
 }
