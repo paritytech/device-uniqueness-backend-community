@@ -56,11 +56,15 @@ pub(crate) fn decode_header_fixed<const N: usize>(
         .map_err(|_| AppError::bad_request(format!("header {name} must decode to {N} bytes")))
 }
 
-/// Derive the platform claim from the optional package headers.
+/// Derive the platform claim from the package headers or key-attestation type.
 pub(crate) fn detect_platform(headers: &HeaderMap) -> Option<&'static str> {
     if headers.contains_key("auth-ios-package") {
         Some("ios")
-    } else if headers.contains_key("auth-android-package") {
+    } else if headers.contains_key("auth-android-package")
+        || headers
+            .get("auth-attestation-type")
+            .is_some_and(|value| value == "key-attestation")
+    {
         Some("android")
     } else {
         None
@@ -112,5 +116,12 @@ mod tests {
         assert_eq!(detect_platform(&android), Some("android"));
         assert_eq!(android["auth-attestation-type"], "play-integrity");
         assert_eq!(android["auth-payload"], "integrity-token");
+
+        let mut hardware = HeaderMap::new();
+        hardware.insert(
+            "auth-attestation-type",
+            HeaderValue::from_static("key-attestation"),
+        );
+        assert_eq!(detect_platform(&hardware), Some("android"));
     }
 }

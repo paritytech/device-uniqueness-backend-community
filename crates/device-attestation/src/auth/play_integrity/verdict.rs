@@ -167,7 +167,15 @@ pub fn validate(
         return Err(PlayIntegrityError::Rejected(codes));
     }
 
-    Ok(token_digests
-        .iter()
-        .any(|d| d == params.playstore_digest.as_slice()))
+    // appFromOfficialStore: the Play signing digest only identifies our app —
+    // a sideloaded APK carries the same certificate. Play's own verdicts are
+    // the part that establishes Play distributed this install, and the relaxed
+    // modes admit an unrecognized or unlicensed app, so both are required
+    // here. Strict already demands both, so its verdict is unchanged.
+    let play_distributed =
+        app_recognition == Some("PLAY_RECOGNIZED") && licensing == Some("LICENSED");
+    Ok(play_distributed
+        && token_digests
+            .iter()
+            .any(|d| d == params.playstore_digest.as_slice()))
 }

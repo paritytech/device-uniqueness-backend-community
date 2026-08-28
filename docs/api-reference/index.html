@@ -1283,7 +1283,7 @@ credential key (no-op <code>202 {}</code> while <code>AUTH_ENABLED=false</code>)
                 <tr><td class="name">Auth-Payload</td><td class="type">string</td><td class="req">no</td><td class="desc">Base64 App Attest assertion (iOS) or the raw classic Play Integrity token (Android play-integrity), verified when attestation is enabled.</td></tr>
                 <tr><td class="name">Auth-iOS-KeyId</td><td class="type">string</td><td class="req">no</td><td class="desc">Base64 App Attest key id registered via /auth/app-attest/attestations.</td></tr>
                 <tr><td class="name">Auth-Android-Package</td><td class="type">string</td><td class="req">no</td><td class="desc">Android package name; required for play-integrity and sets the JWT platform claim for Android clients.</td></tr>
-                <tr><td class="name">Auth-Attestation-Type</td><td class="type">string</td><td class="req">no</td><td class="desc">Android attestation dispatch: <code>key-attestation</code> verifies the <code>attestationChain</code> field in the JSON body (base64 DER, leaf first); <code>play-integrity</code> verifies the token in Auth-Payload with self-managed response keys.</td></tr>
+                <tr><td class="name">Auth-Attestation-Type</td><td class="type">string</td><td class="req">no</td><td class="desc">Android attestation dispatch: <code>key-attestation</code> verifies the <code>attestationChain</code> field in the JSON body (base64 DER, leaf first), and also sets the Android platform claim when Auth-Android-Package is absent; <code>play-integrity</code> verifies the token in Auth-Payload with self-managed response keys.</td></tr>
               </tbody>
             </table>
           </div>

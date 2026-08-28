@@ -146,7 +146,7 @@ pub enum KeyAttestError {
 pub fn verify_chain(
     chain_der: &[Vec<u8>],
     params: &VerifyParams<'_>,
-) -> Result<bool, KeyAttestError> {
+) -> Result<(), KeyAttestError> {
     if chain_der.len() < 2 || chain_der.len() > MAX_CHAIN_LENGTH {
         return Err(KeyAttestError::Malformed(format!(
             "chain length {} outside 2..={MAX_CHAIN_LENGTH}",
@@ -213,7 +213,10 @@ pub fn verify_chain(
 fn check_policy(
     description: &KeyDescription,
     params: &VerifyParams<'_>,
-) -> Result<bool, KeyAttestError> {
+) -> Result<(), KeyAttestError> {
+    // Both the attestation statement and the attested key must originate in
+    // TEE (1) or StrongBox (2); Software (0) and any unknown level (3+) are
+    // rejected.
     let level_ok = |level: u64| level == 1 || level == 2;
     if !level_ok(description.attestation_security_level)
         || !level_ok(description.key_security_level)
@@ -266,18 +269,20 @@ fn check_policy(
         }
     }
 
-    let first = description
-        .signing_digests
-        .first()
-        .ok_or_else(|| KeyAttestError::SigningDigest("none attested".to_string()))?;
-    if first.as_slice() == params.playstore_digest {
-        Ok(true)
-    } else if first.as_slice() == params.website_digest {
-        Ok(false)
+    let [signing_digest] = description.signing_digests.as_slice() else {
+        return Err(KeyAttestError::SigningDigest(format!(
+            "expected one attested digest, got {}",
+            description.signing_digests.len()
+        )));
+    };
+    if signing_digest.as_slice() == params.playstore_digest
+        || signing_digest.as_slice() == params.website_digest
+    {
+        Ok(())
     } else {
         Err(KeyAttestError::SigningDigest(format!(
             "unknown digest {}",
-            hex::encode(first)
+            hex::encode(signing_digest)
         )))
     }
 }
@@ -419,29 +424,26 @@ mod tests {
     fn google_pixel_capture_verifies_as_website_channel() {
         let fixture = google_pixel();
         let input = ParamsInput::new();
-        let from_store =
-            verify_chain(&fixture.chain, &input.params(&fixture)).expect("valid chain");
-        assert!(!from_store);
+        verify_chain(&fixture.chain, &input.params(&fixture)).expect("valid chain");
     }
 
     #[test]
     fn grapheneos_capture_verifies_via_trusted_verified_boot_key() {
         let fixture = grapheneos();
         let input = ParamsInput::new();
-        let from_store =
-            verify_chain(&fixture.chain, &input.params(&fixture)).expect("valid chain");
-        assert!(!from_store);
+        verify_chain(&fixture.chain, &input.params(&fixture)).expect("valid chain");
     }
 
     #[test]
-    fn playstore_digest_maps_to_official_store() {
+    fn playstore_digest_is_accepted_without_claiming_store_installation() {
+        // Swap the digest roles so the attested digest matches the configured
+        // Play identity. Hardware attestation accepts it but cannot prove the
+        // app's installation source.
         let fixture = google_pixel();
         let mut input = ParamsInput::new();
         input.playstore = digest(DEBUG_NIGHTLY_DIGEST);
         input.website = digest(PLAY_STORE_DIGEST);
-        let from_store =
-            verify_chain(&fixture.chain, &input.params(&fixture)).expect("valid chain");
-        assert!(from_store);
+        verify_chain(&fixture.chain, &input.params(&fixture)).expect("valid chain");
     }
 
     #[test]
@@ -613,7 +615,26 @@ mod tests {
 
         assert!(matches!(
             check_policy(&make(1, 1, true, 0), &params),
-            Ok(true)
+            Ok(())
+        ));
+        let mut no_digest = make(1, 1, true, 0);
+        no_digest.signing_digests.clear();
+        assert!(matches!(
+            check_policy(&no_digest, &params),
+            Err(KeyAttestError::SigningDigest(ref reason))
+                if reason == "expected one attested digest, got 0"
+        ));
+        let mut mixed_known = make(1, 1, true, 0);
+        mixed_known.signing_digests.push(input.website.to_vec());
+        assert!(matches!(
+            check_policy(&mixed_known, &params),
+            Err(KeyAttestError::SigningDigest(_))
+        ));
+        let mut mixed_unknown = make(1, 1, true, 0);
+        mixed_unknown.signing_digests.push(vec![0x77; 32]);
+        assert!(matches!(
+            check_policy(&mixed_unknown, &params),
+            Err(KeyAttestError::SigningDigest(_))
         ));
         assert!(matches!(
             check_policy(&make(0, 1, true, 0), &params),
@@ -625,7 +646,7 @@ mod tests {
         ));
         assert!(matches!(
             check_policy(&make(2, 2, true, 0), &params),
-            Ok(true)
+            Ok(())
         ));
         assert!(matches!(
             check_policy(&make(3, 1, true, 0), &params),
