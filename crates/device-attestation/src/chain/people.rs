@@ -56,7 +56,7 @@ impl PeopleChain {
             .context("People Chain does not serve state_queryStorageAt")?;
         Ok(())
     }
-    
+
     pub fn online(&self) -> &OnlineClient<PeopleConfig> {
         &self.client
     }
