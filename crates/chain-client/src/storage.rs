@@ -14,10 +14,7 @@ pub enum BatchReadError {
     #[error("expected one storage change set for one block, got {0}")]
     ChangeSetCount(usize),
     #[error("storage answered for block {got}, not the requested {want}")]
-    BlockMismatch {
-        want: String,
-        got: String,
-    },
+    BlockMismatch { want: String, got: String },
     #[error("storage answered with a key that was not requested")]
     UnknownKey,
     #[error("storage answered twice for the same key")]
