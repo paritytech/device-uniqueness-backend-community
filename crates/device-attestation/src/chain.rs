@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 pub mod asset_hub;
-pub mod client;
 pub mod lease;
 pub mod outbox;
+pub mod people;
 pub mod writer;
 
-pub use client::ChainClient;
+pub use people::PeopleChain;

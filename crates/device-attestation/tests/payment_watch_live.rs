@@ -6,7 +6,7 @@ use std::time::Duration;
 use device_attestation::chain::outbox::{self, NewReservation};
 use device_attestation::config::PaymentConfig;
 use device_attestation::payment::{self, ClaimPayload, ConfirmOutcome};
-use device_attestation::ChainClient;
+use device_attestation::PeopleChain;
 use sqlx::Row as _;
 
 fn reservation(base: &str, digits: &str, subject: &str) -> NewReservation {
@@ -43,10 +43,10 @@ async fn connect() -> sqlx::PgPool {
         .expect("connect and migrate")
 }
 
-async fn chain() -> ChainClient {
+async fn chain() -> PeopleChain {
     let rpc_url = std::env::var("PEOPLE_RPC_URL")
         .unwrap_or_else(|_| "wss://paseo-people-next-system-rpc.polkadot.io".to_string());
-    ChainClient::connect(&rpc_url).await.expect("live RPC")
+    PeopleChain::connect(&rpc_url).await.expect("live RPC")
 }
 
 async fn request_id(pool: &sqlx::PgPool, subject: &str) -> i64 {

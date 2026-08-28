@@ -42,7 +42,7 @@ async fn livez() -> Json<Status> {
 /// then the People Chain RPC.
 pub async fn probe(
     pool: sqlx::PgPool,
-    chain: crate::ChainClient,
+    chain: crate::PeopleChain,
 ) -> http_common::health::Readiness {
     if let Err(error) = sqlx::query("SELECT 1").execute(&pool).await {
         tracing::warn!(error = ?error, dependency = "postgres", "readiness check failed");

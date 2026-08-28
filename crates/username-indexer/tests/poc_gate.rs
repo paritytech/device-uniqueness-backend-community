@@ -15,7 +15,7 @@ use username_indexer::http::middleware::RateLimiter;
 use username_indexer::poc::puzzle::{checksum_hex, derive_secret};
 use username_indexer::poc::solution::{leading_zero_bits, mine};
 use username_indexer::poc::{now_millis, Poc, Solution};
-use username_indexer::{AppState, ChainClient, Freshness};
+use username_indexer::{AppState, Freshness, PeopleChain};
 use uuid::Uuid;
 
 const IKM: &str = "test-poc-ikm";
@@ -24,7 +24,7 @@ const VALIDITY_WINDOW_SECS: i64 = 90;
 const JWT_SEED: [u8; 32] = [7u8; 32];
 const SUBJECT: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 
-async fn dead_chain_client() -> ChainClient {
+async fn dead_chain_client() -> PeopleChain {
     use subxt_rpcs::client::mock_rpc_client::Json;
     use subxt_rpcs::client::{MockRpcClient, RpcClient};
 
@@ -37,7 +37,7 @@ async fn dead_chain_client() -> ChainClient {
     let client = subxt::OnlineClient::<chain_types::PeopleConfig>::from_backend(Arc::new(backend))
         .await
         .expect("offline client from mock backend");
-    ChainClient::from_online(client)
+    PeopleChain::from_online(client)
 }
 
 async fn app(gate: bool) -> axum::Router {

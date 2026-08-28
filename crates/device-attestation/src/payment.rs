@@ -285,7 +285,7 @@ pub async fn expire_pending(pool: &PgPool) -> Result<u64, sqlx::Error> {
 /// balance ≥ required** (the plan's recorded divergence from exact-transfer
 /// matching); an unreadable balance skips the row — never confirms, never
 /// errors the pass (fail closed on money).
-pub async fn watch_pass(pool: &PgPool, chain: &crate::ChainClient) -> anyhow::Result<WatchStats> {
+pub async fn watch_pass(pool: &PgPool, chain: &crate::PeopleChain) -> anyhow::Result<WatchStats> {
     use std::str::FromStr as _;
 
     let mut stats = WatchStats {
@@ -371,7 +371,7 @@ pub enum ConfirmOutcome {
 /// makes a stale-payload flip lose cleanly.
 async fn confirm_request(
     pool: &PgPool,
-    chain: &crate::ChainClient,
+    chain: &crate::PeopleChain,
     row: &PendingRequest,
 ) -> anyhow::Result<ConfirmOutcome> {
     use rand::seq::SliceRandom as _;
@@ -462,7 +462,7 @@ async fn confirm_request(
 /// is not a PENDING request.
 pub async fn confirm_by_id(
     pool: &PgPool,
-    chain: &crate::ChainClient,
+    chain: &crate::PeopleChain,
     id: i64,
 ) -> anyhow::Result<Option<ConfirmOutcome>> {
     let Some(row) = fetch_pending(pool)

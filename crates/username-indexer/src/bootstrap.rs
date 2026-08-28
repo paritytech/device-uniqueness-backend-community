@@ -6,7 +6,7 @@ use chain_types::people::runtime_types::indiv_pallet_resources::types::ConsumerI
 use sqlx::{PgPool, Row as _};
 use subxt::utils::AccountId32;
 
-use crate::chain::{BoxError, ChainClient, ChainError};
+use crate::chain::{BoxError, ChainError, PeopleChain};
 use crate::projection::{self, AssignedUsername, PROJECTION_LOCK_ID};
 use crate::ss58::Ss58Error;
 
@@ -74,7 +74,7 @@ enum CheckpointState {
 /// [`reconcile_chain_identity`].
 pub async fn ensure_seeded(
     pool: &PgPool,
-    chain: &ChainClient,
+    chain: &PeopleChain,
     page_size: u32,
 ) -> Result<Option<BootstrapReport>, BootstrapError> {
     let mut lock_connection = pool.acquire().await?;
@@ -106,7 +106,7 @@ pub async fn ensure_seeded(
 /// treated as a mismatch. Both writes share one transaction.
 async fn reconcile_chain_identity(
     pool: &PgPool,
-    chain: &ChainClient,
+    chain: &PeopleChain,
 ) -> Result<CheckpointState, BootstrapError> {
     let live_genesis = chain.online().genesis_hash().0;
 
@@ -155,7 +155,7 @@ async fn reconcile_chain_identity(
 
 async fn bootstrap_locked(
     pool: &PgPool,
-    chain: &ChainClient,
+    chain: &PeopleChain,
     page_size: u32,
     trigger: BootstrapTrigger,
 ) -> Result<BootstrapReport, BootstrapError> {

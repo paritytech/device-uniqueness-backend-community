@@ -11,7 +11,7 @@ use serde::Serialize;
 use sqlx::{PgPool, Row as _};
 use utoipa::ToSchema;
 
-use crate::chain::{lease, ChainClient};
+use crate::chain::{lease, PeopleChain};
 use crate::http::state::AppState;
 use crate::usernames::error::{UsernamesError, UsernamesResult};
 
@@ -40,7 +40,7 @@ const INTAKE_BALANCE_TIMEOUT: Duration = Duration::from_secs(5);
 /// through [`group_for_balance`]. Fails open to group 1 — a chain hiccup,
 /// timeout, or malformed subject must never block intake, only deprioritise
 /// it (the next advancer refresh corrects the group).
-pub async fn intake_group(chain: &ChainClient, subject: &str) -> u8 {
+pub async fn intake_group(chain: &PeopleChain, subject: &str) -> u8 {
     let Some(account) = parse_subject(subject) else {
         tracing::warn!(subject, "queue intake: unparseable subject; using group 1");
         return 1;
@@ -149,7 +149,7 @@ const BALANCE_READ_CONCURRENCY: usize = 16;
 ///
 /// A failed balance read **keeps the current group**: unlike intake there is a
 /// known-good value, and failing open to 1 would demote the whole queue.
-pub async fn refresh_groups(pool: &PgPool, chain: &ChainClient) -> Result<(), sqlx::Error> {
+pub async fn refresh_groups(pool: &PgPool, chain: &PeopleChain) -> Result<(), sqlx::Error> {
     use futures::StreamExt as _;
 
     let rows = sqlx::query(
@@ -382,7 +382,7 @@ pub async fn fallback_drain(pool: &PgPool, grace: Duration) -> Result<u64, sqlx:
 /// Per-iteration errors are logged and the loop continues; a lost lease drops
 /// back to acquisition. If the process dies, claims park as `QUEUED` behind the
 /// throttle and the chain-writer raises the stranded-queue warning.
-pub async fn run_advancer(pool: PgPool, chain: ChainClient, config: AdvancerConfig) {
+pub async fn run_advancer(pool: PgPool, chain: PeopleChain, config: AdvancerConfig) {
     tracing::info!(
         interval_secs = config.interval.as_secs(),
         holder = %config.holder_id,

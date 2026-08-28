@@ -9,7 +9,7 @@ use axum::body::Body;
 use axum::http::Request;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
-use device_attestation::{AppState, ChainClient, Config, Jwt};
+use device_attestation::{AppState, Config, Jwt, PeopleChain};
 use http_body_util::BodyExt as _;
 use sha2::{Digest as _, Sha256};
 use subxt_signer::sr25519::Keypair;
@@ -26,7 +26,7 @@ async fn test_pool() -> sqlx::PgPool {
         .expect("connect and migrate")
 }
 
-async fn dead_chain_client() -> ChainClient {
+async fn dead_chain_client() -> PeopleChain {
     use subxt_rpcs::client::mock_rpc_client::Json;
     use subxt_rpcs::client::{MockRpcClient, RpcClient};
 
@@ -40,7 +40,7 @@ async fn dead_chain_client() -> ChainClient {
     let client = subxt::OnlineClient::<chain_types::PeopleConfig>::from_backend(Arc::new(backend))
         .await
         .expect("offline client from mock backend");
-    ChainClient::from_parts(client, rpc)
+    PeopleChain::from_parts(client, rpc)
 }
 
 async fn app(pool: sqlx::PgPool, configure: impl FnOnce(&mut Config)) -> axum::Router {

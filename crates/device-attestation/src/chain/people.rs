@@ -104,12 +104,12 @@ pub(super) fn decode_owner(bytes: &[u8]) -> Result<[u8; 32], BatchReadError> {
 }
 
 #[derive(Clone)]
-pub struct ChainClient {
+pub struct PeopleChain {
     client: OnlineClient<PeopleConfig>,
     rpc: LegacyRpcMethods<RpcConfigFor<PeopleConfig>>,
 }
 
-impl ChainClient {
+impl PeopleChain {
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
         let (client, rpc) = chain_client::connect_with_rpc(url).await?;
         Ok(Self::from_parts(client, rpc))

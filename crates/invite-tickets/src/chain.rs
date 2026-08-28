@@ -17,11 +17,11 @@ use crate::tickets::Dim;
 
 /// Connected People Chain client (cheap to clone; shares one connection).
 #[derive(Clone)]
-pub struct ChainClient {
+pub struct PeopleChain {
     client: OnlineClient<PeopleConfig>,
 }
 
-impl ChainClient {
+impl PeopleChain {
     /// Connect to the People Chain RPC (auto-reconnecting) and load its metadata.
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
         Ok(Self {

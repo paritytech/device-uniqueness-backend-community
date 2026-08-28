@@ -4,7 +4,7 @@
 use anyhow::Context as _;
 use secrecy::ExposeSecret as _;
 
-use device_attestation::{db, routes, AppState, ChainClient, Config, Jwt};
+use device_attestation::{db, routes, AppState, Config, Jwt, PeopleChain};
 
 pub async fn run() -> anyhow::Result<()> {
     http_common::telemetry::init("device-attestation-api");
@@ -21,7 +21,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     let jwt = Jwt::new(config.jwt_secret.expose_secret(), config.jwt_issuer.clone());
     let pool = db::connect(config.database_url.expose_secret()).await?;
-    let chain = ChainClient::connect(&config.people_rpc_url).await?;
+    let chain = PeopleChain::connect(&config.people_rpc_url).await?;
     tracing::info!("connected to People Chain");
 
     let bind_addr = config.bind_addr;

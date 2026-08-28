@@ -8,7 +8,7 @@ use chain_client::WriterSigner;
 use sqlx::PgPool;
 use subxt::utils::AccountId32;
 
-use crate::chain::ChainClient;
+use crate::chain::PeopleChain;
 use crate::sign::{self, TicketKeypair};
 use crate::tickets::{self, Dim, Network};
 
@@ -79,7 +79,7 @@ pub struct InviterIdentity {
 /// the only DB writes are the post-finalization inserts.
 pub async fn tick_pool(
     pool: &PgPool,
-    chain: &ChainClient,
+    chain: &PeopleChain,
     identity: &InviterIdentity,
     dim: Dim,
     network: Network,
@@ -179,7 +179,7 @@ pub async fn tick_pool(
 /// by the advisory lock.
 pub async fn run_loop(
     pool: PgPool,
-    chain: ChainClient,
+    chain: PeopleChain,
     identity: InviterIdentity,
     dims: Vec<Dim>,
     network: Network,
@@ -259,7 +259,7 @@ fn zero_init_submit_outcomes() {
 /// Sample the fee-paying account's balance once per tick, on the family the
 /// device-attestation writer also reports to — `role` is what separates the budgets.
 /// Best-effort: a failed read must not stop the pool.
-async fn record_inviter_balance(chain: &ChainClient, identity: &InviterIdentity) {
+async fn record_inviter_balance(chain: &PeopleChain, identity: &InviterIdentity) {
     let account = AccountId32(identity.signer.public_bytes());
     match chain.free_balance(&account).await {
         Ok(balance) => {
@@ -408,7 +408,7 @@ impl MaintainerConfig {
 
 /// The maintainer's dependency probe, published as readiness gauges. Wider than
 /// `invite-tickets-api`'s: registering ticket keys needs the People Chain too.
-async fn readiness(pool: PgPool, chain: ChainClient) -> http_common::health::Readiness {
+async fn readiness(pool: PgPool, chain: PeopleChain) -> http_common::health::Readiness {
     if let Err(error) = sqlx::query("SELECT 1").execute(&pool).await {
         tracing::warn!(error = ?error, "readiness check failed: database unavailable");
         return Err("db");
@@ -435,7 +435,7 @@ pub async fn run(config: MaintainerConfig) -> anyhow::Result<()> {
     };
 
     let pool = crate::db::connect(&config.database_url).await?;
-    let chain = ChainClient::connect(&config.people_rpc_url).await?;
+    let chain = PeopleChain::connect(&config.people_rpc_url).await?;
     tracing::info!(
         people_rpc = %config.people_rpc_url,
         network = config.network.as_str(),
