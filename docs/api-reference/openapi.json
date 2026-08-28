@@ -223,7 +223,7 @@
           {
             "name": "Auth-Attestation-Type",
             "in": "header",
-            "description": "Android attestation dispatch: `key-attestation` verifies the `attestationChain` field in the JSON body (base64 DER, leaf first); `play-integrity` verifies the token in Auth-Payload with self-managed response keys.",
+            "description": "Android attestation dispatch: `key-attestation` verifies the `attestationChain` field in the JSON body (base64 DER, leaf first), and also sets the Android platform claim when Auth-Android-Package is absent; `play-integrity` verifies the token in Auth-Payload with self-managed response keys.",
             "required": false,
             "schema": {
               "type": [

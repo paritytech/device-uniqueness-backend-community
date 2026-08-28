@@ -50,7 +50,7 @@ impl TokenResponse {
         ("Auth-Payload" = Option<String>, Header, description = "Base64 App Attest assertion (iOS) or the raw classic Play Integrity token (Android play-integrity), verified when attestation is enabled."),
         ("Auth-iOS-KeyId" = Option<String>, Header, description = "Base64 App Attest key id registered via /auth/app-attest/attestations."),
         ("Auth-Android-Package" = Option<String>, Header, description = "Android package name; required for play-integrity and sets the JWT platform claim for Android clients."),
-        ("Auth-Attestation-Type" = Option<String>, Header, description = "Android attestation dispatch: `key-attestation` verifies the `attestationChain` field in the JSON body (base64 DER, leaf first); `play-integrity` verifies the token in Auth-Payload with self-managed response keys.")
+        ("Auth-Attestation-Type" = Option<String>, Header, description = "Android attestation dispatch: `key-attestation` verifies the `attestationChain` field in the JSON body (base64 DER, leaf first), and also sets the Android platform claim when Auth-Android-Package is absent; `play-integrity` verifies the token in Auth-Payload with self-managed response keys.")
     ),
     request_body(content = serde_json::Value, description = "Raw body covered by the proof; may be empty {}. \
         Android key-attestation requests carry the certificate chain here as `attestationChain` \
@@ -267,7 +267,9 @@ async fn key_attestation_verdict(
         revoked_serials: &revoked_serials,
         now_unix: time::OffsetDateTime::now_utc().unix_timestamp(),
     };
-    Ok(key_attest::verify::verify_chain(&chain, &params).map_err(|e| e.to_string()))
+    Ok(key_attest::verify::verify_chain(&chain, &params)
+        .map(|()| false)
+        .map_err(|e| e.to_string()))
 }
 
 async fn ios_attestation_verdict(

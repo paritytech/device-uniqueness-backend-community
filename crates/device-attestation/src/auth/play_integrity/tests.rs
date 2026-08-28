@@ -291,6 +291,33 @@ fn relaxed_all_tolerates_sideloaded_unevaluated_tokens() {
 }
 
 #[test]
+fn play_signed_sideload_is_not_a_store_install_under_relaxed_all() {
+    let keys = TestKeys::new();
+    let packages = allow_listed();
+    // The Play signing certificate on an install Play does not recognize or
+    // license: the digest alone must not promote it to a store install.
+    let play_signed_sideload = serde_json::json!({
+        "requestDetails": { "nonce": B64URL.encode(EXPECTED_NONCE) },
+        "appIntegrity": {
+            "appRecognitionVerdict": "UNEVALUATED",
+            "packageName": PACKAGE,
+            "certificateSha256Digest": [B64URL.encode(PLAYSTORE_DIGEST)]
+        },
+        "deviceIntegrity": { "deviceRecognitionVerdict": ["MEETS_DEVICE_INTEGRITY"] },
+        "accountDetails": { "appLicensingVerdict": "UNLICENSED" }
+    })
+    .to_string();
+    let token = keys.mint(&play_signed_sideload);
+
+    let from_store = verify_token(
+        &token,
+        &params_with_packages(&keys, PlayIntegrityMode::RelaxedAll, &packages),
+    )
+    .expect("relaxed_all accepts");
+    assert!(!from_store);
+}
+
+#[test]
 fn present_but_mismatching_fields_reject_in_every_mode() {
     let keys = TestKeys::new();
     let packages = allow_listed();
