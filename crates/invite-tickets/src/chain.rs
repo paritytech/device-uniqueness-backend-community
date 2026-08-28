@@ -101,7 +101,7 @@ impl PeopleChain {
             .collect();
         // Nonce comes from the chain at sign time: this maintainer submits
         // one extrinsic at a time, so there is no in-flight lane to track.
-        let params = PeopleExtrinsicParamsBuilder::<PeopleConfig>::new().build();
+        let params = PeopleExtrinsicParamsBuilder::new().build();
         let mut tx_client = self.client.tx().await?;
 
         // The proxy wrap changes the payload's static type, so sign per branch.
