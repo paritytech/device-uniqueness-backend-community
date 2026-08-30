@@ -1565,13 +1565,16 @@ credential key (no-op <code>202 {}</code> while <code>AUTH_ENABLED=false</code>)
 the PoUD gate and the registration queue. Ignored unless
 <code>REGISTRATION_VOUCHERS_ENABLED</code>.</td></tr>
                 <tr><td class="name">attestationChain</td><td class="type">string[]</td><td class="req">no</td><td class="desc">Optional Android device-uniqueness evidence (Widevine PoUD): leaf-first
-base64 DER attestation chain, 2-10 entries. All three evidence fields
-are present together or not at all; ignored unless
-<code>WIDEVINE_DEDUP_ENABLED</code>.</td></tr>
-                <tr><td class="name">deviceEnvelope</td><td class="type">string</td><td class="req">no</td><td class="desc">Base64 of the canonical CBOR device envelope (challenge, candidate,
-widevineId, level, expiry) signed by the attested key.</td></tr>
-                <tr><td class="name">envelopeSignature</td><td class="type">string</td><td class="req">no</td><td class="desc">Base64 DER ECDSA signature over the exact envelope bytes, made by the
-attestation chain's leaf key.</td></tr>
+base64 DER attestation chain, 2-10 entries, whose leaf key was created
+with <code>attestationChallenge = SHA-256(domain ‖ deviceChallenge ‖
+accountKey ‖ deviceId)</code>. All three evidence fields are present
+together or not at all; ignored unless <code>WIDEVINE_DEDUP_ENABLED</code>.
+Sent only when the app measured Widevine L1.</td></tr>
+                <tr><td class="name">deviceChallenge</td><td class="type">string</td><td class="req">no</td><td class="desc">Base64 32-byte single-use challenge from <code>/auth/challenges</code>, bound
+into the leaf key's attestation challenge.</td></tr>
+                <tr><td class="name">deviceId</td><td class="type">string</td><td class="req">no</td><td class="desc">Base64 32-byte device pseudonym:
+<code>SHA-256(&quot;dub/poud/widevine-id/v1&quot; ‖ rawWidevineId)</code>, computed on the
+device — the raw id never leaves it.</td></tr>
                 <tr><td class="name">dotns</td><td class="type">object</td><td class="req">no</td><td class="desc"></td></tr>
               </tbody>
             </table>
@@ -1607,8 +1610,8 @@ attestation chain's leaf key.</td></tr>
     <span class="s">"base64-der-leaf"</span><span class="p">,</span>
     <span class="s">"base64-der-root"</span>
   <span class="p">]</span><span class="p">,</span>
-  <span class="s">"deviceEnvelope"</span><span class="p">:</span> <span class="s">"base64-cbor-envelope"</span><span class="p">,</span>
-  <span class="s">"envelopeSignature"</span><span class="p">:</span> <span class="s">"base64-der-signature"</span><span class="p">,</span>
+  <span class="s">"deviceChallenge"</span><span class="p">:</span> <span class="s">"base64-32-byte-challenge"</span><span class="p">,</span>
+  <span class="s">"deviceId"</span><span class="p">:</span> <span class="s">"base64-32-byte-device-id"</span><span class="p">,</span>
   <span class="s">"dotns"</span><span class="p">:</span> <span class="p">{</span>
     <span class="s">"signature"</span><span class="p">:</span> <span class="s">"0x...64 bytes..."</span><span class="p">,</span>
     <span class="s">"signedAt"</span><span class="p">:</span> <span class="n">1780000000</span><span class="p">,</span>
@@ -1660,7 +1663,7 @@ attestation chain's leaf key.</td></tr>
             </div>
 <pre><span class="p">{</span>
   <span class="s">"error"</span><span class="p">:</span> <span class="s">"DEVICE_EVIDENCE_INVALID"</span><span class="p">,</span>
-  <span class="s">"message"</span><span class="p">:</span> <span class="s">"envelope expired"</span>
+  <span class="s">"message"</span><span class="p">:</span> <span class="s">"attestation chain rejected"</span>
 <span class="p">}</span></pre>
           </div>
           <div class="code-block">
@@ -1719,7 +1722,7 @@ attestation chain's leaf key.</td></tr>
                 <span class="sc-code c400">400</span>
                 <span class="sc-label">The request body contains invalid values.</span>
               </div>
-              <div class="sc-desc">Validation failed (with per-field <code>fields</code>), malformed JSON, a <code>lifetimePoUDVoucher</code> that is unknown, already used, or expired (<code>{&quot;error&quot;: &quot;Voucher already used&quot;}</code> — a voucher failure rejects the claim outright), or — with <code>WIDEVINE_DEDUP_ENFORCE</code> — structurally malformed device evidence (<code>{&quot;error&quot;: &quot;DEVICE_EVIDENCE_MALFORMED&quot;}</code>: partial fields, bad base64, size bounds, non-canonical CBOR, unknown domain/version).</div>
+              <div class="sc-desc">Validation failed (with per-field <code>fields</code>), malformed JSON, a <code>lifetimePoUDVoucher</code> that is unknown, already used, or expired (<code>{&quot;error&quot;: &quot;Voucher already used&quot;}</code> — a voucher failure rejects the claim outright), or — with <code>WIDEVINE_DEDUP_ENFORCE</code> — structurally malformed device evidence (<code>{&quot;error&quot;: &quot;DEVICE_EVIDENCE_MALFORMED&quot;}</code>: partial fields, bad base64, wrong field sizes, a level that is not 1 or 3).</div>
             </div>
             <div class="status-card">
               <div class="sc-head">
@@ -1733,7 +1736,7 @@ attestation chain's leaf key.</td></tr>
                 <span class="sc-code c403">403</span>
                 <span class="sc-label">DEVICE_EVIDENCE_INVALID</span>
               </div>
-              <div class="sc-desc">Device evidence failed verification under <code>WIDEVINE_DEDUP_ENFORCE</code>: chain policy, envelope signature, challenge spent/mismatch, candidate mismatch, or expiry. Retryable once with a fresh challenge; repeated failure surfaces as the paid lane.</div>
+              <div class="sc-desc">Device evidence failed verification under <code>WIDEVINE_DEDUP_ENFORCE</code>: chain policy, the cert-bound evidence hash (challenge / account / deviceId), or a spent challenge. Retryable once with a fresh challenge; repeated failure surfaces as the paid lane.</div>
             </div>
             <div class="status-card">
               <div class="sc-head">

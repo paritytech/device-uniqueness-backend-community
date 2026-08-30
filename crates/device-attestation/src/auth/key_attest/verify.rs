@@ -143,22 +143,10 @@ pub enum KeyAttestError {
     SigningDigest(String),
 }
 
-/// What a passing chain additionally proves, for callers that verify
-/// signatures made by the attested key (the Widevine device-envelope path).
-#[derive(Debug)]
-pub struct VerifiedChain {
-    /// DER SubjectPublicKeyInfo of the attested (leaf) key.
-    pub leaf_spki_der: Vec<u8>,
-    /// `true` when the verified-boot state was `SelfSigned` pinned to a
-    /// trusted GrapheneOS key — i.e. an official locked GrapheneOS build.
-    /// `false` means stock `Verified` boot.
-    pub grapheneos_verified_boot: bool,
-}
-
 pub fn verify_chain(
     chain_der: &[Vec<u8>],
     params: &VerifyParams<'_>,
-) -> Result<VerifiedChain, KeyAttestError> {
+) -> Result<(), KeyAttestError> {
     if chain_der.len() < 2 || chain_der.len() > MAX_CHAIN_LENGTH {
         return Err(KeyAttestError::Malformed(format!(
             "chain length {} outside 2..={MAX_CHAIN_LENGTH}",
@@ -221,16 +209,7 @@ pub fn verify_chain(
 
     check_policy(&description, params)?;
 
-    // Policy passed, so a `SelfSigned` state is already pinned to a trusted
-    // GrapheneOS verified-boot key; anything else here is stock `Verified`.
-    let grapheneos_verified_boot = description
-        .root_of_trust
-        .as_ref()
-        .is_some_and(|rot| rot.verified_boot_state == BOOT_STATE_SELF_SIGNED);
-    Ok(VerifiedChain {
-        leaf_spki_der: certs[0].public_key().raw.to_vec(),
-        grapheneos_verified_boot,
-    })
+    Ok(())
 }
 
 fn check_policy(
@@ -447,18 +426,14 @@ mod tests {
     fn google_pixel_capture_verifies_as_website_channel() {
         let fixture = google_pixel();
         let input = ParamsInput::new();
-        let verified = verify_chain(&fixture.chain, &input.params(&fixture)).expect("valid chain");
-        // Stock `Verified` boot, and the leaf SPKI parses as a public key.
-        assert!(!verified.grapheneos_verified_boot);
-        assert!(!verified.leaf_spki_der.is_empty());
+        verify_chain(&fixture.chain, &input.params(&fixture)).expect("valid chain");
     }
 
     #[test]
     fn grapheneos_capture_verifies_via_trusted_verified_boot_key() {
         let fixture = grapheneos();
         let input = ParamsInput::new();
-        let verified = verify_chain(&fixture.chain, &input.params(&fixture)).expect("valid chain");
-        assert!(verified.grapheneos_verified_boot);
+        verify_chain(&fixture.chain, &input.params(&fixture)).expect("valid chain");
     }
 
     #[test]

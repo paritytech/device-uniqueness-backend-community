@@ -73,22 +73,25 @@ pub struct RegisterRequest {
     #[schema(rename = "lifetimePoUDVoucher", example = "base64url-voucher-key")]
     lifetime_poud_voucher: Option<String>,
     /// Optional Android device-uniqueness evidence (Widevine PoUD): leaf-first
-    /// base64 DER attestation chain, 2-10 entries. All three evidence fields
-    /// are present together or not at all; ignored unless
-    /// `WIDEVINE_DEDUP_ENABLED`.
+    /// base64 DER attestation chain, 2-10 entries, whose leaf key was created
+    /// with `attestationChallenge = SHA-256(domain ‖ deviceChallenge ‖
+    /// accountKey ‖ deviceId)`. All three evidence fields are present
+    /// together or not at all; ignored unless `WIDEVINE_DEDUP_ENABLED`.
+    /// Sent only when the app measured Widevine L1.
     #[serde(rename = "attestationChain")]
     #[schema(rename = "attestationChain", example = json!(["base64-der-leaf", "base64-der-root"]))]
     attestation_chain: Option<Vec<String>>,
-    /// Base64 of the canonical CBOR device envelope (challenge, candidate,
-    /// widevineId, level, expiry) signed by the attested key.
-    #[serde(rename = "deviceEnvelope")]
-    #[schema(rename = "deviceEnvelope", example = "base64-cbor-envelope")]
-    device_envelope: Option<String>,
-    /// Base64 DER ECDSA signature over the exact envelope bytes, made by the
-    /// attestation chain's leaf key.
-    #[serde(rename = "envelopeSignature")]
-    #[schema(rename = "envelopeSignature", example = "base64-der-signature")]
-    envelope_signature: Option<String>,
+    /// Base64 32-byte single-use challenge from `/auth/challenges`, bound
+    /// into the leaf key's attestation challenge.
+    #[serde(rename = "deviceChallenge")]
+    #[schema(rename = "deviceChallenge", example = "base64-32-byte-challenge")]
+    device_challenge: Option<String>,
+    /// Base64 32-byte device pseudonym:
+    /// `SHA-256("dub/poud/widevine-id/v1" ‖ rawWidevineId)`, computed on the
+    /// device — the raw id never leaves it.
+    #[serde(rename = "deviceId")]
+    #[schema(rename = "deviceId", example = "base64-32-byte-device-id")]
+    device_id: Option<String>,
     /// Optional DotNS reservation block.
     dotns: Option<Dotns>,
 }
@@ -192,8 +195,8 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
             a `lifetimePoUDVoucher` that is unknown, already used, or expired \
             (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), \
             or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence \
-            (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, size bounds, \
-            non-canonical CBOR, unknown domain/version).",
+            (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, wrong field \
+            sizes, a level that is not 1 or 3).",
          body = serde_json::Value,
          example = json!({
              "error": "The request body contains invalid values.",
@@ -205,11 +208,11 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
             PAYMENT_REQUIRED outcome instead).",
          body = serde_json::Value),
         (status = 403, description = "Device evidence failed verification under \
-            `WIDEVINE_DEDUP_ENFORCE`: chain policy, envelope signature, challenge spent/mismatch, \
-            candidate mismatch, or expiry. Retryable once with a fresh challenge; repeated failure \
-            surfaces as the paid lane.",
+            `WIDEVINE_DEDUP_ENFORCE`: chain policy, the cert-bound evidence hash (challenge / \
+            account / deviceId), or a spent challenge. Retryable once \
+            with a fresh challenge; repeated failure surfaces as the paid lane.",
          body = serde_json::Value,
-         example = json!({ "error": "DEVICE_EVIDENCE_INVALID", "message": "envelope expired" })),
+         example = json!({ "error": "DEVICE_EVIDENCE_INVALID", "message": "attestation chain rejected" })),
         (status = 409, description = "Preferred digits taken, no digits available, or username taken.",
          body = serde_json::Value,
          example = json!({ "error": "Preferred digits 07 already taken for username tallesx" })),
@@ -494,10 +497,17 @@ enum WidevineGate {
 /// Gate off (`WIDEVINE_DEDUP_ENABLED=false`): the evidence fields are ignored
 /// entirely. Soft mode (enforce off): every evidence problem and the would-be
 /// dedup outcome are logged as verdicts, routing never changes, and no device
-/// record is written — but the envelope challenge is still consumed
-/// (single-use). Enforced: malformed evidence is a 400, invalid evidence a
-/// 403, a seen device or an evidence-less Android claim the payment outcome,
+/// record is written. Enforced: malformed evidence is a 400, invalid evidence
+/// a 403, a seen device or an evidence-less Android claim the payment outcome,
 /// and an unseen device proceeds carrying its `PENDING` record.
+///
+/// The challenge is consumed (single-use) only once evidence has fully
+/// verified in an enabled lane — deliberately after the cryptography, so
+/// malformed evidence cannot burn a challenge and a CRL outage stays
+/// retryable. Every earlier return (no evidence, malformed, CRL unavailable,
+/// bad subject, verification failure) leaves the
+/// challenge unspent. That is the freshness boundary for the whole gate: the
+/// evidence itself carries no lifetime.
 async fn widevine_gate(
     state: &AppState,
     auth: &AuthSubject,
@@ -546,8 +556,9 @@ async fn widevine_gate(
         }
     };
 
-    // The JWT subject is this issuer's `0x`-hex sr25519 account key — the
-    // envelope's `candidate` must be the same 32 bytes.
+    // The JWT subject is this issuer's `0x`-hex sr25519 account key — it is
+    // folded into the cert-bound evidence hash as the candidate, so evidence
+    // can never be relayed under another account's token.
     let subject_pubkey: Option<[u8; 32]> = auth
         .subject
         .strip_prefix("0x")
@@ -571,18 +582,7 @@ async fn widevine_gate(
         now_unix: time::OffsetDateTime::now_utc().unix_timestamp(),
     };
     let verified = match widevine::verify(&raw, &params) {
-        Ok(Some(verified)) => verified,
-        // Structurally valid L3 evidence while the GrapheneOS lane is off:
-        // routed as evidence-absent, never an error.
-        Ok(None) => {
-            tracing::info!(
-                "widevine level 3 evidence not accepted (lane off); treated as evidence-absent"
-            );
-            if enforce {
-                return Ok(WidevineGate::PaymentRequired);
-            }
-            return Ok(WidevineGate::Proceed(None));
-        }
+        Ok(verified) => verified,
         Err(verdict) => {
             if enforce {
                 return Err(verdict.into());
@@ -591,11 +591,11 @@ async fn widevine_gate(
         }
     };
 
-    // Single-use: the envelope challenge is consumed in soft mode too, so a
-    // replayed envelope already logs (and later enforces) as spent.
+    // Single-use: the evidence challenge is consumed in soft mode too, so a
+    // replayed claim already logs (and later enforces) as spent.
     if !crate::auth::challenge::consume(&state.pool, &verified.challenge).await? {
         let verdict = widevine::EvidenceError::Invalid(
-            "envelope challenge is unknown, spent, or expired".to_string(),
+            "evidence challenge is unknown, spent, or expired".to_string(),
         );
         if enforce {
             return Err(verdict.into());
@@ -603,14 +603,10 @@ async fn widevine_gate(
         return soft_reject(&verdict);
     }
 
-    // Dedup lookup across every configured key epoch (dual lookup during
-    // rotation).
-    let seen = widevine::store::seen(&state.pool, verified.namespace, &verified.hmacs).await?;
+    let seen = widevine::store::seen(&state.pool, &verified.hmac).await?;
 
     if !enforce {
         tracing::info!(
-            namespace = verified.namespace,
-            level = verified.level,
             seen,
             "widevine dedup verdict (soft mode, routing unchanged)"
         );
@@ -619,16 +615,9 @@ async fn widevine_gate(
     if seen {
         return Ok(WidevineGate::PaymentRequired);
     }
-    let active = verified
-        .hmacs
-        .into_iter()
-        .next()
-        .expect("config requires at least one epoch key");
     Ok(WidevineGate::Proceed(Some(
         crate::widevine::store::PendingDevice {
-            namespace: verified.namespace,
-            epoch: active.epoch,
-            hmac: active.hmac,
+            hmac: verified.hmac,
         },
     )))
 }
@@ -647,7 +636,7 @@ enum ReserveOutcome {
 ///
 /// With a `widevine_device` (an enforced-mode fresh Android device) the device
 /// record is reserved `PENDING` in the same transaction as the claim: the
-/// unique `(namespace, hmac)` key is the race arbiter, so a concurrent claim
+/// unique `device_hmac` key is the race arbiter, so a concurrent claim
 /// for the same physical device yields `DeviceAlreadyClaimed` (mapped to a 200
 /// PAYMENT_REQUIRED) instead of a second free registration.
 ///

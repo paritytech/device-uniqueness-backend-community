@@ -65,13 +65,12 @@ pub enum UsernamesError {
     #[error("device registration failed")]
     DeviceRegistrationFailed,
     /// Widevine device evidence failed structural validation — partial
-    /// fields, bad base64, size bounds, non-canonical CBOR, unknown
-    /// domain/version (enforced dedup mode; 400).
+    /// fields, bad base64, wrong field sizes (enforced dedup mode; 400).
     #[error("device evidence malformed")]
     DeviceEvidenceMalformed(String),
-    /// Widevine device evidence failed verification — chain policy,
-    /// signature, challenge binding, candidate mismatch, expiry (enforced
-    /// dedup mode; 403). Retryable once with a fresh challenge.
+    /// Widevine device evidence failed verification — chain policy, the
+    /// cert-bound evidence hash, or a spent challenge (enforced dedup
+    /// mode; 403). Retryable once with a fresh challenge.
     #[error("device evidence invalid")]
     DeviceEvidenceInvalid(String),
     /// The Widevine dedup gate could not be evaluated (attestation CRL

@@ -94,7 +94,7 @@ pub struct Config {
     /// return a deposit address + amount and store the claim for the watcher.
     pub payment: Option<PaymentConfig>,
     /// Widevine dedup gate (Android device uniqueness at username claim).
-    /// `None` while `WIDEVINE_DEDUP_ENABLED=false` — the three evidence
+    /// `None` while `WIDEVINE_DEDUP_ENABLED=false` — the four evidence
     /// fields on `POST /api/v1/usernames` are ignored entirely; enabled,
     /// evidence is verified and the device HMAC computed, with routing
     /// enforced only when [`WidevineConfig::enforce`] is also set.
@@ -109,23 +109,9 @@ pub struct WidevineConfig {
     /// routing; `true` makes the dedup routing live (seen device / missing
     /// evidence → the payment lane, evidence failures → 400/403).
     pub enforce: bool,
-    /// `WIDEVINE_L3_GRAPHENEOS_ENABLED`: accept `level = 3` envelopes from
-    /// official locked GrapheneOS builds into the isolated `widevine_l3`
-    /// namespace. Off, such evidence routes as evidence-absent.
-    pub l3_grapheneos_enabled: bool,
-    /// Epoch-labelled HMAC-SHA256 keys (`WIDEVINE_DEDUP_HMAC_KEYS`), active
-    /// epoch first: the first key computes new device records, every epoch is
-    /// looked up so rotation never double-grants a device.
-    pub hmac_keys: Vec<WidevineHmacKey>,
-}
-
-/// One epoch of the Widevine dedup HMAC secret.
-#[derive(Debug)]
-pub struct WidevineHmacKey {
-    /// Epoch label stored with each device record (e.g. `v1`).
-    pub epoch: String,
-    /// 32-byte HMAC-SHA256 key.
-    pub key: SecretBox<[u8; 32]>,
+    /// 32-byte HMAC-SHA256 key (`WIDEVINE_DEDUP_HMAC_KEY`) pseudonymizing
+    /// the client-hashed device id before storage.
+    pub hmac_key: SecretBox<[u8; 32]>,
 }
 
 /// Payment-lane parameters (all required when `PAYMENT_LANE_ENABLED=true`).
@@ -580,67 +566,39 @@ fn decode_payment_amount(raw: &str) -> Result<u64, ConfigError> {
 }
 
 /// Parse the Widevine dedup block: `None` while `WIDEVINE_DEDUP_ENABLED` is
-/// false; enabled, the epoch-labelled HMAC keys are required and validated
-/// (fail-fast — a missing key would make every device record uncomputable).
+/// false; enabled, the HMAC key is required and validated (fail-fast — a
+/// missing key would make every device record uncomputable).
 fn parse_widevine() -> Result<Option<WidevineConfig>, ConfigError> {
     if !env_bool("WIDEVINE_DEDUP_ENABLED", false)? {
         return Ok(None);
     }
-    let raw = std::env::var("WIDEVINE_DEDUP_HMAC_KEYS")
+    let raw = std::env::var("WIDEVINE_DEDUP_HMAC_KEY")
         .map(|v| v.trim().to_string())
         .ok()
         .filter(|v| !v.is_empty())
-        .ok_or(ConfigError::Missing("WIDEVINE_DEDUP_HMAC_KEYS"))?;
+        .ok_or(ConfigError::Missing("WIDEVINE_DEDUP_HMAC_KEY"))?;
     Ok(Some(WidevineConfig {
         enforce: env_bool("WIDEVINE_DEDUP_ENFORCE", false)?,
-        l3_grapheneos_enabled: env_bool("WIDEVINE_L3_GRAPHENEOS_ENABLED", false)?,
-        hmac_keys: decode_widevine_hmac_keys(&raw)?,
+        hmac_key: decode_widevine_hmac_key(&raw)?,
     }))
 }
 
-/// Decode `WIDEVINE_DEDUP_HMAC_KEYS`: comma-separated `<epoch>:<key>` entries,
-/// active epoch first; each key is 32 bytes as hex (optional `0x`) or base64.
-fn decode_widevine_hmac_keys(raw: &str) -> Result<Vec<WidevineHmacKey>, ConfigError> {
+/// Decode `WIDEVINE_DEDUP_HMAC_KEY`: one 32-byte key as hex (optional `0x`)
+/// or base64.
+fn decode_widevine_hmac_key(raw: &str) -> Result<SecretBox<[u8; 32]>, ConfigError> {
     use base64::Engine as _;
 
-    const KEY: &str = "WIDEVINE_DEDUP_HMAC_KEYS";
+    const KEY: &str = "WIDEVINE_DEDUP_HMAC_KEY";
     let invalid = |reason: String| ConfigError::Invalid { key: KEY, reason };
 
-    let mut keys: Vec<WidevineHmacKey> = Vec::new();
-    for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        let (epoch, value) = entry
-            .split_once(':')
-            .ok_or_else(|| invalid(format!("expected <epoch>:<key> entries, got {entry:?}")))?;
-        let epoch = epoch.trim();
-        if epoch.is_empty() {
-            return Err(invalid("epoch label must not be empty".to_string()));
-        }
-        if keys.iter().any(|k| k.epoch == epoch) {
-            return Err(invalid(format!("duplicate epoch {epoch:?}")));
-        }
-        let trimmed = value.trim();
-        let bytes = hex::decode(trimmed.strip_prefix("0x").unwrap_or(trimmed))
-            .ok()
-            .or_else(|| {
-                base64::engine::general_purpose::STANDARD
-                    .decode(trimmed)
-                    .ok()
-            })
-            .ok_or_else(|| invalid(format!("epoch {epoch:?}: expected hex or base64")))?;
-        let key: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| invalid(format!("epoch {epoch:?}: key must be exactly 32 bytes")))?;
-        keys.push(WidevineHmacKey {
-            epoch: epoch.to_string(),
-            key: SecretBox::new(Box::new(key)),
-        });
-    }
-    if keys.is_empty() {
-        return Err(invalid(
-            "at least one <epoch>:<key> entry required".to_string(),
-        ));
-    }
-    Ok(keys)
+    let bytes = hex::decode(raw.strip_prefix("0x").unwrap_or(raw))
+        .ok()
+        .or_else(|| base64::engine::general_purpose::STANDARD.decode(raw).ok())
+        .ok_or_else(|| invalid("expected hex or base64".to_string()))?;
+    let key: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| invalid("key must be exactly 32 bytes".to_string()))?;
+    Ok(SecretBox::new(Box::new(key)))
 }
 
 /// Parse an env var into `T`, falling back to `default` when unset.
@@ -880,27 +838,28 @@ mod tests {
     }
 
     #[test]
-    fn widevine_hmac_keys_decode_epoch_labelled_32_byte_keys() {
+    fn widevine_hmac_key_decodes_a_32_byte_key() {
         use base64::Engine as _;
         use secrecy::ExposeSecret as _;
 
         let hex_key = hex::encode([1u8; 32]);
         let b64_key = base64::engine::general_purpose::STANDARD.encode([2u8; 32]);
-        let keys =
-            decode_widevine_hmac_keys(&format!("v2:{b64_key}, v1:0x{hex_key}")).expect("valid");
-        assert_eq!(keys.len(), 2);
-        // Active epoch first, order preserved.
-        assert_eq!(keys[0].epoch, "v2");
-        assert_eq!(*keys[0].key.expose_secret(), [2u8; 32]);
-        assert_eq!(keys[1].epoch, "v1");
-        assert_eq!(*keys[1].key.expose_secret(), [1u8; 32]);
+        assert_eq!(
+            *decode_widevine_hmac_key(&format!("0x{hex_key}"))
+                .expect("hex")
+                .expose_secret(),
+            [1u8; 32]
+        );
+        assert_eq!(
+            *decode_widevine_hmac_key(&b64_key)
+                .expect("base64")
+                .expose_secret(),
+            [2u8; 32]
+        );
 
-        // No entry, missing separator, duplicate epoch, wrong length.
-        assert!(decode_widevine_hmac_keys(" , ").is_err());
-        assert!(decode_widevine_hmac_keys(&hex_key).is_err());
-        assert!(decode_widevine_hmac_keys(&format!("v1:{hex_key},v1:{hex_key}")).is_err());
-        assert!(decode_widevine_hmac_keys(&format!("v1:{}", hex::encode([1u8; 16]))).is_err());
-        assert!(decode_widevine_hmac_keys("v1:not-a-key!").is_err());
+        // Wrong length, not a key at all.
+        assert!(decode_widevine_hmac_key(&hex::encode([1u8; 16])).is_err());
+        assert!(decode_widevine_hmac_key("not-a-key!").is_err());
     }
 
     #[test]

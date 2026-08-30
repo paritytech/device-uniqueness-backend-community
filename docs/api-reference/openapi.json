@@ -458,7 +458,7 @@
             }
           },
           "400": {
-            "description": "Validation failed (with per-field `fields`), malformed JSON, a `lifetimePoUDVoucher` that is unknown, already used, or expired (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, size bounds, non-canonical CBOR, unknown domain/version).",
+            "description": "Validation failed (with per-field `fields`), malformed JSON, a `lifetimePoUDVoucher` that is unknown, already used, or expired (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, wrong field sizes, a level that is not 1 or 3).",
             "content": {
               "application/json": {
                 "schema": {},
@@ -483,13 +483,13 @@
             }
           },
           "403": {
-            "description": "Device evidence failed verification under `WIDEVINE_DEDUP_ENFORCE`: chain policy, envelope signature, challenge spent/mismatch, candidate mismatch, or expiry. Retryable once with a fresh challenge; repeated failure surfaces as the paid lane.",
+            "description": "Device evidence failed verification under `WIDEVINE_DEDUP_ENFORCE`: chain policy, the cert-bound evidence hash (challenge / account / deviceId), or a spent challenge. Retryable once with a fresh challenge; repeated failure surfaces as the paid lane.",
             "content": {
               "application/json": {
                 "schema": {},
                 "example": {
                   "error": "DEVICE_EVIDENCE_INVALID",
-                  "message": "envelope expired"
+                  "message": "attestation chain rejected"
                 }
               }
             }
@@ -1456,27 +1456,27 @@
             "items": {
               "type": "string"
             },
-            "description": "Optional Android device-uniqueness evidence (Widevine PoUD): leaf-first\nbase64 DER attestation chain, 2-10 entries. All three evidence fields\nare present together or not at all; ignored unless\n`WIDEVINE_DEDUP_ENABLED`.",
+            "description": "Optional Android device-uniqueness evidence (Widevine PoUD): leaf-first\nbase64 DER attestation chain, 2-10 entries, whose leaf key was created\nwith `attestationChallenge = SHA-256(domain ‖ deviceChallenge ‖\naccountKey ‖ deviceId)`. All three evidence fields are present\ntogether or not at all; ignored unless `WIDEVINE_DEDUP_ENABLED`.\nSent only when the app measured Widevine L1.",
             "example": [
               "base64-der-leaf",
               "base64-der-root"
             ]
           },
-          "deviceEnvelope": {
+          "deviceChallenge": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Base64 of the canonical CBOR device envelope (challenge, candidate,\nwidevineId, level, expiry) signed by the attested key.",
-            "example": "base64-cbor-envelope"
+            "description": "Base64 32-byte single-use challenge from `/auth/challenges`, bound\ninto the leaf key's attestation challenge.",
+            "example": "base64-32-byte-challenge"
           },
-          "envelopeSignature": {
+          "deviceId": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Base64 DER ECDSA signature over the exact envelope bytes, made by the\nattestation chain's leaf key.",
-            "example": "base64-der-signature"
+            "description": "Base64 32-byte device pseudonym:\n`SHA-256(\"dub/poud/widevine-id/v1\" ‖ rawWidevineId)`, computed on the\ndevice — the raw id never leaves it.",
+            "example": "base64-32-byte-device-id"
           },
           "dotns": {
             "oneOf": [

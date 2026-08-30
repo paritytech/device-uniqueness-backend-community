@@ -3,53 +3,65 @@
 
 //! Widevine device-uniqueness evidence on `POST /api/v1/usernames` (PoUD).
 //!
-//! Binds a Widevine device identifier to a specific username claim, signed by
-//! a hardware-attested key, so the backend can enforce one free registration
-//! per physical Android device. Wire contract: three optional body fields —
-//! `attestationChain`, `deviceEnvelope`, `envelopeSignature` — present
-//! together or not at all; the envelope is canonical CBOR ([`envelope`])
-//! signed by the leaf key of the attestation chain, which is verified by the
-//! existing key-attestation policy (`auth::key_attest::verify`).
+//! Binds a Widevine device identifier to a specific username claim through
+//! the attestation certificate itself, so the backend can enforce one free
+//! registration per physical Android device. Wire contract (evidence wire
+//! spec v1): three optional body fields — `attestationChain`,
+//! `deviceChallenge`, `deviceId` — present together or not at
+//! all. The client creates its hardware-attested key with
 //!
-//! Privacy invariant: the raw `widevineId` is never stored, logged, or traced
-//! — only `HMAC-SHA256(k_epoch, "poud:v1" ‖ namespace ‖ widevineId)` reaches
-//! the database ([`store`]). L1 and GrapheneOS-L3 devices live in separate
-//! namespaces that are never merged.
+//! ```text
+//! attestationChallenge = SHA-256(domain ‖ challenge ‖ candidate ‖ deviceId)
+//! ```
+//!
+//! and the backend recomputes that hash from the JWT subject and the request
+//! fields, then verifies the chain against it with the existing
+//! key-attestation policy (`auth::key_attest::verify`). The TEE-signed
+//! certificate is the binding signature — there is no envelope and no
+//! user-space signature to verify, and every preimage field is fixed-width.
+//!
+//! `deviceId` is already a pseudonym: the client derives it as
+//! `SHA-256("dub/poud/widevine-id/v1" ‖ rawId)` from the raw
+//! `PROPERTY_DEVICE_UNIQUE_ID`, which never leaves the device. That
+//! derivation is frozen — changing it re-identifies the whole fleet.
+//!
+//! **Measured L1 is a protocol invariant, not a wire field.** Evidence under
+//! this domain string means the app measured Widevine L1 (an `HW_SECURE_ALL`
+//! session) before building it; without L1 the app sends no evidence and the
+//! claim routes to the paid lane. The server cannot verify the DRM level —
+//! it trusts the measurement the same way it trusts `deviceId`: key
+//! attestation proves the app is genuine and unmodified on a verified-boot
+//! device (stock, or GrapheneOS via its pinned boot keys — GrapheneOS keeps
+//! the Pixel TEE and reports L1).
+//!
+//! Privacy invariant: `deviceId` is never stored — only
+//! `HMAC-SHA256(k, "poud:v1" ‖ deviceId)` reaches the database ([`store`]),
+//! so a database dump cannot be tested against candidate device ids without
+//! the server-side key. One device pool: dedup is on the identifier alone.
 //!
 //! Gating: `WIDEVINE_DEDUP_ENABLED` recognises the fields (soft mode —
 //! verify and log the would-be outcome, routing unchanged);
-//! `WIDEVINE_DEDUP_ENFORCE` makes the dedup routing live;
-//! `WIDEVINE_L3_GRAPHENEOS_ENABLED` opens the isolated L3 lane. All decided
-//! in the route ([`crate::usernames::register`]); this module is IO-free
-//! except [`store`].
+//! `WIDEVINE_DEDUP_ENFORCE` makes the dedup routing live. All decided in the
+//! route ([`crate::usernames::register`]); this module is IO-free except [`store`].
 
-pub mod envelope;
 pub mod store;
 
 use std::collections::HashSet;
 
 use base64::Engine as _;
 use hmac::Mac as _;
-use p256::ecdsa::signature::Verifier as _;
-use p256::pkcs8::DecodePublicKey as _;
 use secrecy::ExposeSecret as _;
 use serde_json::Value;
+use sha2::Digest as _;
 
 use crate::auth::key_attest;
 use crate::config::{Config, WidevineConfig};
 
-/// Dedup namespace for measured Widevine L1 devices.
-pub const NAMESPACE_L1: &str = "widevine_l1";
-/// Dedup namespace for the GrapheneOS L3 lane.
-pub const NAMESPACE_L3: &str = "widevine_l3";
+/// Domain tag of the attestation-challenge preimage.
+pub const DOMAIN: &str = "dub/poud/android/v1";
 
 /// HMAC domain-separation context.
 const HMAC_CONTEXT: &[u8] = b"poud:v1";
-
-/// Maximum decoded envelope size on the wire.
-const MAX_ENVELOPE_BYTES: usize = 512;
-/// Maximum future window for the envelope `expiry` (unix seconds).
-const MAX_EXPIRY_WINDOW_SECS: i64 = 600;
 
 /// `attestationChain` bounds — the same limits as the `/auth/token` contract.
 const MIN_CHAIN_ENTRIES: usize = 2;
@@ -61,12 +73,11 @@ const MAX_ENTRY_CHARS: usize = 8192;
 /// `DEVICE_EVIDENCE_INVALID` (403); in soft mode both are logged verdicts.
 #[derive(Debug, thiserror::Error)]
 pub enum EvidenceError {
-    /// Structural failure: partial fields, bad base64, size bounds,
-    /// non-canonical CBOR, unknown domain/version, invalid level.
+    /// Structural failure: partial fields, bad base64, wrong field sizes.
     #[error("malformed device evidence: {0}")]
     Malformed(String),
-    /// Verification failure: chain policy, signature, challenge binding,
-    /// candidate mismatch, expiry.
+    /// Verification failure: chain policy, or the cert-bound evidence hash
+    /// (challenge / account / deviceId).
     #[error("invalid device evidence: {0}")]
     Invalid(String),
 }
@@ -75,10 +86,10 @@ pub enum EvidenceError {
 pub struct RawEvidence {
     /// Leaf-first DER chain from `attestationChain`.
     pub chain_der: Vec<Vec<u8>>,
-    /// Exact envelope bytes as transmitted (the signature covers these).
-    pub envelope: Vec<u8>,
-    /// ASN.1/DER ECDSA signature over the envelope bytes.
-    pub signature_der: Vec<u8>,
+    /// The `/auth/challenges` value from `deviceChallenge`.
+    pub challenge: [u8; 32],
+    /// The client-hashed device pseudonym from `deviceId`.
+    pub device_id: [u8; 32],
 }
 
 /// Extract the evidence fields from the (already parsed) request body.
@@ -86,15 +97,15 @@ pub struct RawEvidence {
 /// [`EvidenceError::Malformed`].
 pub fn extract(body: &Value) -> Result<Option<RawEvidence>, EvidenceError> {
     let chain = body.get("attestationChain");
-    let envelope = body.get("deviceEnvelope");
-    let signature = body.get("envelopeSignature");
-    let (chain, envelope, signature) = match (chain, envelope, signature) {
+    let challenge = body.get("deviceChallenge");
+    let device_id = body.get("deviceId");
+    let (chain, challenge, device_id) = match (chain, challenge, device_id) {
         (None, None, None) => return Ok(None),
-        (Some(c), Some(e), Some(s)) => (c, e, s),
+        (Some(c), Some(ch), Some(d)) => (c, ch, d),
         _ => {
             return Err(EvidenceError::Malformed(
-                "attestationChain, deviceEnvelope and envelopeSignature must be \
-                 present together"
+                "attestationChain, deviceChallenge and deviceId \
+                 must be present together"
                     .to_string(),
             ))
         }
@@ -129,55 +140,34 @@ pub fn extract(body: &Value) -> Result<Option<RawEvidence>, EvidenceError> {
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let envelope = envelope
-        .as_str()
-        .ok_or_else(|| malformed("deviceEnvelope must be a string".to_string()))
-        .and_then(|raw| {
-            b64.decode(raw.trim())
-                .map_err(|_| malformed("deviceEnvelope is not valid base64".to_string()))
-        })?;
-    if envelope.is_empty() || envelope.len() > MAX_ENVELOPE_BYTES {
-        return Err(malformed(format!(
-            "deviceEnvelope is {} bytes, expected 1..={MAX_ENVELOPE_BYTES}",
-            envelope.len()
-        )));
-    }
-
-    let signature_der = signature
-        .as_str()
-        .ok_or_else(|| malformed("envelopeSignature must be a string".to_string()))
-        .and_then(|raw| {
-            b64.decode(raw.trim())
-                .map_err(|_| malformed("envelopeSignature is not valid base64".to_string()))
-        })?;
+    let decode32 = |field: &'static str, value: &Value| -> Result<[u8; 32], EvidenceError> {
+        value
+            .as_str()
+            .ok_or_else(|| malformed(format!("{field} must be a string")))
+            .and_then(|raw| {
+                b64.decode(raw.trim())
+                    .map_err(|_| malformed(format!("{field} is not valid base64")))
+            })?
+            .try_into()
+            .map_err(|_| malformed(format!("{field} must be exactly 32 bytes")))
+    };
+    let challenge = decode32("deviceChallenge", challenge)?;
+    let device_id = decode32("deviceId", device_id)?;
 
     Ok(Some(RawEvidence {
         chain_der,
-        envelope,
-        signature_der,
+        challenge,
+        device_id,
     }))
-}
-
-/// One epoch's device HMAC.
-pub struct DeviceHmac {
-    /// Epoch label (e.g. `v1`).
-    pub epoch: String,
-    /// `HMAC-SHA256(k_epoch, "poud:v1" ‖ namespace ‖ widevineId)`.
-    pub hmac: [u8; 32],
 }
 
 /// Fully verified device evidence, ready for the dedup gate.
 pub struct VerifiedEvidence {
-    /// Dedup namespace the device belongs to.
-    pub namespace: &'static str,
-    /// Measured level (`1` or `3`).
-    pub level: u64,
-    /// Envelope challenge — the caller consumes it (single-use) from the
+    /// Evidence challenge — the caller consumes it (single-use) from the
     /// challenge store before acting on the evidence.
     pub challenge: [u8; 32],
-    /// HMACs per configured epoch, active epoch first. Every entry is looked
-    /// up; only the first is written with a new record.
-    pub hmacs: Vec<DeviceHmac>,
+    /// The stored pseudonym: `HMAC-SHA256(k, "poud:v1" ‖ deviceId)`.
+    pub hmac: [u8; 32],
 }
 
 /// Everything [`verify`] needs besides the evidence itself. No IO — the
@@ -185,7 +175,7 @@ pub struct VerifiedEvidence {
 pub struct VerifyParams<'a> {
     /// Service config (package allow-list + signing digests).
     pub config: &'a Config,
-    /// The enabled Widevine block (HMAC keys + L3 gate).
+    /// The enabled Widevine block (HMAC key + L3 gate).
     pub widevine: &'a WidevineConfig,
     /// Revoked serials from the attestation CRL.
     pub revoked_serials: &'a HashSet<String>,
@@ -195,36 +185,29 @@ pub struct VerifyParams<'a> {
     pub now_unix: i64,
 }
 
-/// Verify the evidence end to end: canonical envelope decode, candidate and
-/// expiry binding, attestation-chain policy (which binds the leaf key to the
-/// envelope challenge), envelope signature by the attested leaf key, and the
-/// level policy. `Ok(None)` = structurally valid L3 evidence while the
-/// GrapheneOS lane is off — routed as evidence-absent, not an error.
+/// Verify the evidence end to end: recompute the cert-bound evidence hash
+/// from the authenticated subject and the request fields, then verify the
+/// attestation chain against it (chain policy + challenge binding in one
+/// step).
+///
+/// Evidence freshness is the challenge's job: the route consumes it
+/// single-use from the challenge store, which enforces its own TTL.
 ///
 /// Deliberately does **not** consume the challenge or touch the dedup store;
 /// the route owns those side effects.
 pub fn verify(
     evidence: &RawEvidence,
     params: &VerifyParams<'_>,
-) -> Result<Option<VerifiedEvidence>, EvidenceError> {
-    let env = envelope::decode(&evidence.envelope).map_err(EvidenceError::Malformed)?;
-
-    if env.candidate != *params.subject_pubkey {
-        return Err(EvidenceError::Invalid(
-            "envelope candidate does not match the authenticated account".to_string(),
-        ));
-    }
-
-    let expiry = i64::try_from(env.expiry)
-        .map_err(|_| EvidenceError::Invalid("envelope expiry out of range".to_string()))?;
-    if expiry < params.now_unix {
-        return Err(EvidenceError::Invalid("envelope expired".to_string()));
-    }
-    if expiry > params.now_unix + MAX_EXPIRY_WINDOW_SECS {
-        return Err(EvidenceError::Invalid(
-            "envelope expiry too far in the future".to_string(),
-        ));
-    }
+) -> Result<VerifiedEvidence, EvidenceError> {
+    // Every field is fixed-width, so the concatenation is unambiguous.
+    let expected_challenge: [u8; 32] = {
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(DOMAIN.as_bytes());
+        hasher.update(evidence.challenge);
+        hasher.update(params.subject_pubkey);
+        hasher.update(evidence.device_id);
+        hasher.finalize().into()
+    };
 
     let (Some(playstore_digest), Some(website_digest)) = (
         params.config.android_signing_digest_playstore.as_ref(),
@@ -235,9 +218,10 @@ pub fn verify(
         ));
     };
     let chain_params = key_attest::verify::VerifyParams {
-        // The leaf's attestationChallenge must equal envelope key 2 — the
-        // key and the envelope were created for the same session.
-        challenge: &env.challenge,
+        // The leaf's attestationChallenge must equal the recomputed evidence
+        // hash — the TEE-signed certificate is what binds the challenge,
+        // account, and deviceId to this claim.
+        challenge: &expected_challenge,
         package_names: &params.config.android_package_names,
         playstore_digest,
         website_digest,
@@ -246,65 +230,24 @@ pub fn verify(
         revoked_serials: params.revoked_serials,
         now_unix: params.now_unix,
     };
-    let verified_chain = key_attest::verify::verify_chain(&evidence.chain_der, &chain_params)
+    key_attest::verify::verify_chain(&evidence.chain_der, &chain_params)
         .map_err(|e| EvidenceError::Invalid(e.to_string()))?;
 
-    // The signature covers the exact envelope bytes as transmitted, verified
-    // against the attested leaf key (SHA256withECDSA, ASN.1/DER).
-    let leaf_key = p256::ecdsa::VerifyingKey::from_public_key_der(&verified_chain.leaf_spki_der)
-        .map_err(|_| EvidenceError::Invalid("attested leaf key is not EC P-256".to_string()))?;
-    let signature = p256::ecdsa::Signature::from_der(&evidence.signature_der).map_err(|_| {
-        EvidenceError::Malformed("envelopeSignature is not a DER ECDSA signature".to_string())
-    })?;
-    leaf_key
-        .verify(&evidence.envelope, &signature)
-        .map_err(|_| EvidenceError::Invalid("envelope signature does not verify".to_string()))?;
-
-    let namespace = match env.level {
-        1 => NAMESPACE_L1,
-        3 => {
-            if !verified_chain.grapheneos_verified_boot {
-                return Err(EvidenceError::Invalid(
-                    "level 3 requires an official GrapheneOS verified boot".to_string(),
-                ));
-            }
-            if !params.widevine.l3_grapheneos_enabled {
-                return Ok(None);
-            }
-            NAMESPACE_L3
-        }
-        // The decoder only admits 1 or 3.
-        other => {
-            return Err(EvidenceError::Malformed(format!(
-                "level {other} is not 1 or 3"
-            )))
-        }
-    };
-
-    let hmacs = params
-        .widevine
-        .hmac_keys
-        .iter()
-        .map(|k| DeviceHmac {
-            epoch: k.epoch.clone(),
-            hmac: device_hmac(k.key.expose_secret(), namespace, &env.widevine_id),
-        })
-        .collect();
-
-    Ok(Some(VerifiedEvidence {
-        namespace,
-        level: env.level,
-        challenge: env.challenge,
-        hmacs,
-    }))
+    Ok(VerifiedEvidence {
+        challenge: evidence.challenge,
+        hmac: device_hmac(
+            params.widevine.hmac_key.expose_secret(),
+            &evidence.device_id,
+        ),
+    })
 }
 
-/// `HMAC-SHA256(key, "poud:v1" ‖ namespace ‖ widevineId)`.
-fn device_hmac(key: &[u8; 32], namespace: &str, widevine_id: &[u8]) -> [u8; 32] {
+/// `HMAC-SHA256(key, "poud:v1" ‖ deviceId)` — the stored pseudonym. The
+/// preimage is fixed-width, so there is nothing to frame.
+fn device_hmac(key: &[u8; 32], device_id: &[u8; 32]) -> [u8; 32] {
     let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).expect("HMAC takes any length");
     mac.update(HMAC_CONTEXT);
-    mac.update(namespace.as_bytes());
-    mac.update(widevine_id);
+    mac.update(device_id);
     mac.finalize().into_bytes().into()
 }
 
@@ -316,8 +259,8 @@ mod tests {
     fn full_body() -> Value {
         json!({
             "attestationChain": ["AQID", "BAUG"],
-            "deviceEnvelope": "oQA=",
-            "envelopeSignature": "AQID"
+            "deviceChallenge": base64::engine::general_purpose::STANDARD.encode([0x11u8; 32]),
+            "deviceId": base64::engine::general_purpose::STANDARD.encode([0x22u8; 32])
         })
     }
 
@@ -327,11 +270,11 @@ mod tests {
 
         let raw = extract(&full_body()).expect("valid").expect("present");
         assert_eq!(raw.chain_der, vec![vec![1, 2, 3], vec![4, 5, 6]]);
-        assert_eq!(raw.envelope, vec![0xA1, 0x00]);
-        assert_eq!(raw.signature_der, vec![1, 2, 3]);
+        assert_eq!(raw.challenge, [0x11; 32]);
+        assert_eq!(raw.device_id, [0x22; 32]);
 
         // Every partial combination is malformed.
-        for missing in ["attestationChain", "deviceEnvelope", "envelopeSignature"] {
+        for missing in ["attestationChain", "deviceChallenge", "deviceId"] {
             let mut body = full_body();
             body.as_object_mut().unwrap().remove(missing);
             assert!(
@@ -343,8 +286,6 @@ mod tests {
 
     #[test]
     fn extract_enforces_the_wire_bounds() {
-        use base64::Engine as _;
-
         // Chain too short.
         let mut body = full_body();
         body["attestationChain"] = json!(["AQID"]);
@@ -355,29 +296,23 @@ mod tests {
         body["attestationChain"] = json!(["AQID", 7]);
         assert!(matches!(extract(&body), Err(EvidenceError::Malformed(_))));
 
-        // Envelope over the 512-byte cap.
+        // Challenge not 32 bytes.
         let mut body = full_body();
-        body["deviceEnvelope"] = json!(
-            base64::engine::general_purpose::STANDARD.encode(vec![0u8; MAX_ENVELOPE_BYTES + 1])
-        );
+        body["deviceChallenge"] = json!("AQID");
         assert!(matches!(extract(&body), Err(EvidenceError::Malformed(_))));
 
-        // Bad base64 signature.
+        // Bad base64 device id.
         let mut body = full_body();
-        body["envelopeSignature"] = json!("!!!");
+        body["deviceId"] = json!("!!!");
         assert!(matches!(extract(&body), Err(EvidenceError::Malformed(_))));
     }
 
     #[test]
-    fn device_hmac_separates_namespaces_and_keys() {
-        let id = [9u8; 32];
-        let l1 = device_hmac(&[1u8; 32], NAMESPACE_L1, &id);
-        let l3 = device_hmac(&[1u8; 32], NAMESPACE_L3, &id);
-        let other_key = device_hmac(&[2u8; 32], NAMESPACE_L1, &id);
-        // The same physical id never matches across namespaces or epochs.
-        assert_ne!(l1, l3);
-        assert_ne!(l1, other_key);
+    fn device_hmac_separates_keys_and_ids() {
+        let hmac = device_hmac(&[1u8; 32], &[9u8; 32]);
+        assert_ne!(hmac, device_hmac(&[2u8; 32], &[9u8; 32]));
+        assert_ne!(hmac, device_hmac(&[1u8; 32], &[8u8; 32]));
         // Deterministic for the same inputs.
-        assert_eq!(l1, device_hmac(&[1u8; 32], NAMESPACE_L1, &id));
+        assert_eq!(hmac, device_hmac(&[1u8; 32], &[9u8; 32]));
     }
 }
