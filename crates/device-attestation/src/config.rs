@@ -204,6 +204,24 @@ impl Config {
             return Err(ConfigError::Missing("ANDROID_SIGNING_DIGEST_WEBSITE"));
         }
 
+        let enforce_auth = env_bool("ENFORCE_AUTH", false)?;
+        let widevine = parse_widevine()?;
+        // Enforced dedup without hard attestation only routes honest clients:
+        // nothing verifies that the evidence a client omits or forges would
+        // have been rejected, so the gate is telemetry, not security. Loud at
+        // startup rather than fatal — a soft-auth telemetry rollout is a
+        // deliberate stage.
+        if widevine.as_ref().is_some_and(|w| w.enforce) && !(auth_enabled && enforce_auth) {
+            tracing::warn!(
+                auth_enabled,
+                enforce_auth,
+                "WIDEVINE_DEDUP_ENFORCE is set without hard attestation \
+                 (AUTH_ENABLED + ENFORCE_AUTH); the dedup gate only \
+                 deduplicates honest clients and provides telemetry, not \
+                 effective security"
+            );
+        }
+
         Ok(Self {
             bind_addr,
             database_url: SecretString::from(database_url),
@@ -218,7 +236,7 @@ impl Config {
             auth_rate_limit: parse_var("AUTH_RATE_LIMIT", "30")?,
             auth_rate_window: Duration::from_secs(parse_var("AUTH_RATE_WINDOW_SECS", "60")?),
             auth_enabled,
-            enforce_auth: env_bool("ENFORCE_AUTH", false)?,
+            enforce_auth,
             queue_enabled: env_bool("QUEUE_ENABLED", false)?,
             registration_vouchers_enabled: env_bool("REGISTRATION_VOUCHERS_ENABLED", false)?,
             // Defaults off in code while `.env.example` and `docker-compose.yml` ship it
