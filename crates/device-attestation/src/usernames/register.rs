@@ -195,8 +195,8 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
             a `lifetimePoUDVoucher` that is unknown, already used, or expired \
             (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), \
             or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence \
-            (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, wrong field \
-            sizes, a level that is not 1 or 3).",
+            (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, or wrong \
+            field sizes).",
          body = serde_json::Value,
          example = json!({
              "error": "The request body contains invalid values.",

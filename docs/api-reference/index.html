@@ -1722,7 +1722,7 @@ device — the raw id never leaves it.</td></tr>
                 <span class="sc-code c400">400</span>
                 <span class="sc-label">The request body contains invalid values.</span>
               </div>
-              <div class="sc-desc">Validation failed (with per-field <code>fields</code>), malformed JSON, a <code>lifetimePoUDVoucher</code> that is unknown, already used, or expired (<code>{&quot;error&quot;: &quot;Voucher already used&quot;}</code> — a voucher failure rejects the claim outright), or — with <code>WIDEVINE_DEDUP_ENFORCE</code> — structurally malformed device evidence (<code>{&quot;error&quot;: &quot;DEVICE_EVIDENCE_MALFORMED&quot;}</code>: partial fields, bad base64, wrong field sizes, a level that is not 1 or 3).</div>
+              <div class="sc-desc">Validation failed (with per-field <code>fields</code>), malformed JSON, a <code>lifetimePoUDVoucher</code> that is unknown, already used, or expired (<code>{&quot;error&quot;: &quot;Voucher already used&quot;}</code> — a voucher failure rejects the claim outright), or — with <code>WIDEVINE_DEDUP_ENFORCE</code> — structurally malformed device evidence (<code>{&quot;error&quot;: &quot;DEVICE_EVIDENCE_MALFORMED&quot;}</code>: partial fields, bad base64, or wrong field sizes).</div>
             </div>
             <div class="status-card">
               <div class="sc-head">
