@@ -175,7 +175,7 @@ pub struct VerifiedEvidence {
 pub struct VerifyParams<'a> {
     /// Service config (package allow-list + signing digests).
     pub config: &'a Config,
-    /// The enabled Widevine block (HMAC key + L3 gate).
+    /// The enabled Widevine block (HMAC key + enforcement flag).
     pub widevine: &'a WidevineConfig,
     /// Revoked serials from the attestation CRL.
     pub revoked_serials: &'a HashSet<String>,
