@@ -66,13 +66,15 @@ pub enum UsernamesError {
     DeviceRegistrationFailed,
     /// Widevine device evidence failed structural validation — partial
     /// fields, bad base64, wrong field sizes (enforced dedup mode; 400).
+    /// The reason is logged at the reject site, never returned.
     #[error("device evidence malformed")]
-    DeviceEvidenceMalformed(String),
+    DeviceEvidenceMalformed,
     /// Widevine device evidence failed verification — chain policy, the
     /// cert-bound evidence hash, or a spent challenge (enforced dedup
-    /// mode; 403). Retryable once with a fresh challenge.
+    /// mode; 403). Retryable once with a fresh challenge. The reason is
+    /// logged at the reject site, never returned.
     #[error("device evidence invalid")]
-    DeviceEvidenceInvalid(String),
+    DeviceEvidenceInvalid,
     /// The Widevine dedup gate could not be evaluated (attestation CRL
     /// unavailable). Infrastructure, not a device failure — a 503 the
     /// client retries.
@@ -159,14 +161,20 @@ impl IntoResponse for UsernamesError {
                 })),
             )
                 .into_response(),
-            UsernamesError::DeviceEvidenceMalformed(reason) => (
+            UsernamesError::DeviceEvidenceMalformed => (
                 StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "DEVICE_EVIDENCE_MALFORMED", "message": reason })),
+                Json(json!({
+                    "error": "DEVICE_EVIDENCE_MALFORMED",
+                    "message": "device evidence malformed"
+                })),
             )
                 .into_response(),
-            UsernamesError::DeviceEvidenceInvalid(reason) => (
+            UsernamesError::DeviceEvidenceInvalid => (
                 StatusCode::FORBIDDEN,
-                Json(json!({ "error": "DEVICE_EVIDENCE_INVALID", "message": reason })),
+                Json(json!({
+                    "error": "DEVICE_EVIDENCE_INVALID",
+                    "message": "device evidence invalid"
+                })),
             )
                 .into_response(),
             UsernamesError::DeviceEvidenceUnavailable => (
@@ -195,8 +203,8 @@ impl From<crate::widevine::EvidenceError> for UsernamesError {
     fn from(err: crate::widevine::EvidenceError) -> Self {
         use crate::widevine::EvidenceError;
         match err {
-            EvidenceError::Malformed(reason) => UsernamesError::DeviceEvidenceMalformed(reason),
-            EvidenceError::Invalid(reason) => UsernamesError::DeviceEvidenceInvalid(reason),
+            EvidenceError::Malformed(_) => UsernamesError::DeviceEvidenceMalformed,
+            EvidenceError::Invalid(_) => UsernamesError::DeviceEvidenceInvalid,
         }
     }
 }

@@ -2062,12 +2062,11 @@ impl Writer {
     }
 
     async fn fail(&self, guard: &Guard, r: &Reservation, reason: &str) -> anyhow::Result<()> {
-        if !outbox::mark_failed(&self.pool, guard, r.id, reason).await? {
-            anyhow::bail!("lease lost while failing");
-        }
-        // A terminal claim failure releases the device's PENDING record so
-        // the physical device can claim again. Best-effort: a failure keeps
-        // the slot held (fails safe), and support can release it by hand.
+        // Released before the outbox write: a lost lease (or any error below)
+        // must not leave the device's PENDING record stranded, which would
+        // block that physical device from ever claiming again. Releasing a
+        // claim that then fails to be marked failed is safe — the row is
+        // re-driven and reserves the device again.
         match crate::widevine::store::release_for_reservation(&self.pool, r.id).await {
             Ok(released) if released > 0 => {
                 tracing::info!(
@@ -2079,6 +2078,9 @@ impl Writer {
             Err(e) => {
                 tracing::warn!(id = r.id, error = %e, "widevine device release failed (record stays PENDING)");
             }
+        }
+        if !outbox::mark_failed(&self.pool, guard, r.id, reason).await? {
+            anyhow::bail!("lease lost while failing");
         }
         record_submit_outcome("people", "terminal");
         tracing::warn!(id = r.id, username = %r.full_username, reason, "registration failed terminally");
