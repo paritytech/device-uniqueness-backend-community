@@ -4,6 +4,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use anyhow::Context as _;
+use chain_client::storage;
 use chain_types::AssetHubConfig;
 use subxt::config::RpcConfigFor;
 use subxt::dynamic::{At as _, Value};
@@ -11,7 +12,6 @@ use subxt::utils::AccountId32;
 use subxt::OnlineClient;
 use subxt_rpcs::{LegacyRpcMethods, RpcClient};
 
-use super::people::{decode_owner, values_from_changes};
 use crate::dotns;
 
 const PALLET: &str = "DotnsGateway";
@@ -25,7 +25,6 @@ pub struct ValidityWindow {
 #[derive(Clone)]
 pub struct AssetHub {
     client: OnlineClient<AssetHubConfig>,
-    /// Raw RPC over the same connection, for the multi-key storage read.
     rpc: LegacyRpcMethods<RpcConfigFor<AssetHubConfig>>,
 }
 
@@ -112,20 +111,10 @@ impl AssetHub {
             .map(|label| entry.fetch_key((label_key(label),)))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let changes = self
-            .rpc
-            .state_query_storage_at(keys.iter().map(Vec::as_slice), Some(block_hash))
+        let values = storage::fetch_many(&self.rpc, &keys, block_hash)
             .await
             .context("reading dotNS lite label owners")?;
-
-        let values = values_from_changes(&keys, &block_hash, changes)?;
-        let mut owners = HashMap::with_capacity(unique.len());
-        for (label, value) in unique.iter().zip(values) {
-            if let Some(bytes) = value {
-                owners.insert((*label).to_string(), decode_owner(&bytes)?);
-            }
-        }
-        Ok(owners)
+        Ok(storage::owners_by_name(&unique, values)?)
     }
 
     pub async fn attestation_allowance(&self, account: [u8; 32]) -> anyhow::Result<u32> {
