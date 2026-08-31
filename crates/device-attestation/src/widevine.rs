@@ -17,9 +17,8 @@
 //! whole fleet. Only `HMAC-SHA256(k, "poud:v1" ‖ deviceId)` is stored
 //! ([`store`]), so a dump cannot be tested against candidate ids.
 //!
-//! Measured L1 is a protocol invariant, not a wire field: the app sends no
-//! evidence without an `HW_SECURE_ALL` session, and the server cannot verify
-//! the DRM level itself.
+//! Measured L1 is a protocol invariant, not a wire field: the attested app
+//! builds evidence only from an `HW_SECURE_ALL` session.
 //!
 //! `WIDEVINE_DEDUP_ENABLED` recognises the fields (soft mode: verify and log
 //! only); `WIDEVINE_DEDUP_ENFORCE` makes the routing live.

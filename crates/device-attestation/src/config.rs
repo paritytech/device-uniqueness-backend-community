@@ -201,15 +201,14 @@ impl Config {
 
         let enforce_auth = env_bool("ENFORCE_AUTH", false)?;
         let widevine = parse_widevine()?;
-        // Warn, not fatal: a telemetry-only rollout stage is deliberate.
+        // Warn, not fatal: an advisory rollout stage is deliberate.
         if widevine.as_ref().is_some_and(|w| w.enforce) && !(auth_enabled && enforce_auth) {
             tracing::warn!(
                 auth_enabled,
                 enforce_auth,
                 "WIDEVINE_DEDUP_ENFORCE is set without hard attestation \
-                 (AUTH_ENABLED + ENFORCE_AUTH); the dedup gate only \
-                 deduplicates honest clients and provides telemetry, not \
-                 effective security"
+                 (AUTH_ENABLED + ENFORCE_AUTH); the dedup gate is advisory \
+                 in this configuration"
             );
         }
 
