@@ -515,9 +515,7 @@ const UNFUNDED_SIGNER: &str = "Inability to pay some fees";
 
 const UNFUNDED_PARK_BACKOFF_SECS: i64 = 300;
 
-const DETERMINISTIC_REJECTIONS: &[&str] = &[
-    "Resources::UsernameReservationTaken",
-];
+const DETERMINISTIC_REJECTIONS: &[&str] = &["Resources::UsernameReservationTaken"];
 
 fn is_deterministic_rejection(reason: &str) -> bool {
     DETERMINISTIC_REJECTIONS
