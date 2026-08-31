@@ -1,48 +1,28 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Widevine device-uniqueness evidence on `POST /api/v1/usernames` (PoUD).
+//! Widevine device-uniqueness evidence on `POST /api/v1/usernames` (PoUD):
+//! one free registration per physical Android device.
 //!
-//! Binds a Widevine device identifier to a specific username claim through
-//! the attestation certificate itself, so the backend can enforce one free
-//! registration per physical Android device. Wire contract (evidence wire
-//! spec v1): three optional body fields — `attestationChain`,
-//! `deviceChallenge`, `deviceId` — present together or not at
-//! all. The client creates its hardware-attested key with
+//! Wire spec v1 — `attestationChain`, `deviceChallenge`, `deviceId`, present
+//! together or not at all. The client attests a key whose
+//! `attestationChallenge` is
+//! `SHA-256(domain ‖ challenge ‖ candidate ‖ deviceId)`; the backend
+//! recomputes that hash from the JWT subject and the request fields and
+//! verifies the chain against it, so the TEE-signed certificate is the
+//! binding signature.
 //!
-//! ```text
-//! attestationChallenge = SHA-256(domain ‖ challenge ‖ candidate ‖ deviceId)
-//! ```
+//! `deviceId` is `SHA-256("dub/poud/widevine-id/v1" ‖ rawId)`, computed on
+//! the device. That derivation is frozen — changing it re-identifies the
+//! whole fleet. Only `HMAC-SHA256(k, "poud:v1" ‖ deviceId)` is stored
+//! ([`store`]), so a dump cannot be tested against candidate ids.
 //!
-//! and the backend recomputes that hash from the JWT subject and the request
-//! fields, then verifies the chain against it with the existing
-//! key-attestation policy (`auth::key_attest::verify`). The TEE-signed
-//! certificate is the binding signature — there is no envelope and no
-//! user-space signature to verify, and every preimage field is fixed-width.
+//! Measured L1 is a protocol invariant, not a wire field: the app sends no
+//! evidence without an `HW_SECURE_ALL` session, and the server cannot verify
+//! the DRM level itself.
 //!
-//! `deviceId` is already a pseudonym: the client derives it as
-//! `SHA-256("dub/poud/widevine-id/v1" ‖ rawId)` from the raw
-//! `PROPERTY_DEVICE_UNIQUE_ID`, which never leaves the device. That
-//! derivation is frozen — changing it re-identifies the whole fleet.
-//!
-//! **Measured L1 is a protocol invariant, not a wire field.** Evidence under
-//! this domain string means the app measured Widevine L1 (an `HW_SECURE_ALL`
-//! session) before building it; without L1 the app sends no evidence and the
-//! claim routes to the paid lane. The server cannot verify the DRM level —
-//! it trusts the measurement the same way it trusts `deviceId`: key
-//! attestation proves the app is genuine and unmodified on a verified-boot
-//! device (stock, or GrapheneOS via its pinned boot keys — GrapheneOS keeps
-//! the Pixel TEE and reports L1).
-//!
-//! Privacy invariant: `deviceId` is never stored — only
-//! `HMAC-SHA256(k, "poud:v1" ‖ deviceId)` reaches the database ([`store`]),
-//! so a database dump cannot be tested against candidate device ids without
-//! the server-side key. One device pool: dedup is on the identifier alone.
-//!
-//! Gating: `WIDEVINE_DEDUP_ENABLED` recognises the fields (soft mode —
-//! verify and log the would-be outcome, routing unchanged);
-//! `WIDEVINE_DEDUP_ENFORCE` makes the dedup routing live. All decided in the
-//! route ([`crate::usernames::register`]); this module is IO-free except [`store`].
+//! `WIDEVINE_DEDUP_ENABLED` recognises the fields (soft mode: verify and log
+//! only); `WIDEVINE_DEDUP_ENFORCE` makes the routing live.
 
 pub mod store;
 
@@ -185,16 +165,10 @@ pub struct VerifyParams<'a> {
     pub now_unix: i64,
 }
 
-/// Verify the evidence end to end: recompute the cert-bound evidence hash
-/// from the authenticated subject and the request fields, then verify the
-/// attestation chain against it (chain policy + challenge binding in one
-/// step).
-///
-/// Evidence freshness is the challenge's job: the route consumes it
-/// single-use from the challenge store, which enforces its own TTL.
-///
-/// Deliberately does **not** consume the challenge or touch the dedup store;
-/// the route owns those side effects.
+/// Verify the evidence: recompute the cert-bound hash from the authenticated
+/// subject and the request fields, then verify the attestation chain against
+/// it. Does not consume the challenge or touch the dedup store — the route
+/// owns those side effects, and the challenge is what makes evidence fresh.
 pub fn verify(
     evidence: &RawEvidence,
     params: &VerifyParams<'_>,

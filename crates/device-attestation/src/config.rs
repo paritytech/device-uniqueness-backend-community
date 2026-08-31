@@ -93,21 +93,16 @@ pub struct Config {
     /// frozen bare `PAYMENT_REQUIRED` body (a dead end); enabled, blocks
     /// return a deposit address + amount and store the claim for the watcher.
     pub payment: Option<PaymentConfig>,
-    /// Widevine dedup gate (Android device uniqueness at username claim).
-    /// `None` while `WIDEVINE_DEDUP_ENABLED=false` — the four evidence
-    /// fields on `POST /api/v1/usernames` are ignored entirely; enabled,
-    /// evidence is verified and the device HMAC computed, with routing
-    /// enforced only when [`WidevineConfig::enforce`] is also set.
+    /// Widevine dedup gate; `None` while `WIDEVINE_DEDUP_ENABLED=false`, in
+    /// which case the evidence fields are ignored entirely.
     pub widevine: Option<WidevineConfig>,
 }
 
 /// Widevine dedup parameters (all under `WIDEVINE_DEDUP_ENABLED=true`).
 #[derive(Debug)]
 pub struct WidevineConfig {
-    /// `WIDEVINE_DEDUP_ENFORCE`: `false` (soft mode) verifies evidence,
-    /// computes the HMAC, and logs the would-be outcome without changing
-    /// routing; `true` makes the dedup routing live (seen device / missing
-    /// evidence → the payment lane, evidence failures → 400/403).
+    /// `WIDEVINE_DEDUP_ENFORCE`: soft mode verifies and logs only; `true`
+    /// makes the dedup routing live.
     pub enforce: bool,
     /// 32-byte HMAC-SHA256 key (`WIDEVINE_DEDUP_HMAC_KEY`) pseudonymizing
     /// the client-hashed device id before storage.
@@ -206,11 +201,7 @@ impl Config {
 
         let enforce_auth = env_bool("ENFORCE_AUTH", false)?;
         let widevine = parse_widevine()?;
-        // Enforced dedup without hard attestation only routes honest clients:
-        // nothing verifies that the evidence a client omits or forges would
-        // have been rejected, so the gate is telemetry, not security. Loud at
-        // startup rather than fatal — a soft-auth telemetry rollout is a
-        // deliberate stage.
+        // Warn, not fatal: a telemetry-only rollout stage is deliberate.
         if widevine.as_ref().is_some_and(|w| w.enforce) && !(auth_enabled && enforce_auth) {
             tracing::warn!(
                 auth_enabled,

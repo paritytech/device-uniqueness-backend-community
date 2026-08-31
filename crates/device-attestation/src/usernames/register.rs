@@ -314,12 +314,7 @@ pub async fn register(
         return payment_required(&state, &auth, &new, preferred_digits.as_deref()).await;
     }
 
-    // Widevine PoUD dedup — the Android device-uniqueness twin of the iOS
-    // DeviceCheck gate below. Recognised only with `WIDEVINE_DEDUP_ENABLED`;
-    // soft mode (enforce off) verifies + logs the would-be outcome without
-    // touching routing, enforced mode routes seen/evidence-less Android
-    // claims to the payment outcome and reserves fresh devices atomically
-    // with the claim (see `reserve`).
+    // The Android twin of the iOS DeviceCheck gate below.
     let widevine_device = match widevine_gate(&state, &auth, &value).await? {
         WidevineGate::Proceed(device) => device,
         WidevineGate::PaymentRequired => {
@@ -426,10 +421,8 @@ pub async fn register(
             )
                 .into_response())
         }
-        // Lost the serialized claim race: a concurrent request already took
-        // this device's free slot (the DeviceCheck lock, or the Widevine
-        // device-record unique key). Same outcome as a `Blocked` verdict —
-        // a 200 PAYMENT_REQUIRED, never an error.
+        // Lost the claim race: a concurrent request took this device's free
+        // slot. Same outcome as `Blocked` — a 200, never an error.
         ReserveOutcome::DeviceAlreadyClaimed => {
             payment_required(&state, &auth, &new, preferred_digits.as_deref()).await
         }
@@ -495,20 +488,14 @@ enum WidevineGate {
 
 /// Evaluate the Widevine device evidence for this claim (wire spec v1).
 ///
-/// Gate off (`WIDEVINE_DEDUP_ENABLED=false`): the evidence fields are ignored
-/// entirely. Soft mode (enforce off): every evidence problem and the would-be
-/// dedup outcome are logged as verdicts, routing never changes, and no device
-/// record is written. Enforced: malformed evidence is a 400, invalid evidence
-/// a 403, a seen device or an evidence-less Android claim the payment outcome,
-/// and an unseen device proceeds carrying its `PENDING` record.
+/// Gate off: the evidence fields are ignored. Soft mode: verdicts are logged
+/// and routing never changes. Enforced: malformed evidence is a 400, invalid
+/// evidence a 403, a seen device or an evidence-less Android claim the payment
+/// outcome, and an unseen device proceeds carrying its `PENDING` record.
 ///
-/// The challenge is consumed (single-use) only once evidence has fully
-/// verified in an enabled lane — deliberately after the cryptography, so
-/// malformed evidence cannot burn a challenge and a CRL outage stays
-/// retryable. Every earlier return (no evidence, malformed, CRL unavailable,
-/// bad subject, verification failure) leaves the
-/// challenge unspent. That is the freshness boundary for the whole gate: the
-/// evidence itself carries no lifetime.
+/// The challenge is consumed only after evidence fully verifies, so malformed
+/// evidence cannot burn one and a CRL outage stays retryable. The challenge is
+/// the whole gate's freshness boundary — the evidence carries no lifetime.
 async fn widevine_gate(
     state: &AppState,
     auth: &AuthSubject,

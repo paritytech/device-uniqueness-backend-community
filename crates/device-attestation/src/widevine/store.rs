@@ -3,14 +3,11 @@
 
 //! Postgres store for Widevine device dedup records.
 //!
-//! One row per pseudonymized physical device — `UNIQUE (device_hmac)`, one
-//! pool. `deviceId` never reaches this table (privacy invariant: HMAC
-//! only). Lifecycle: `PENDING` is reserved atomically with the username
-//! reservation (same transaction) and holds `reservation_id`; the
-//! chain-writer marks it `CONSUMED` on on-chain success and **clears
-//! `reservation_id`**, so the permanent record keeps no device→username
-//! link; a terminal claim failure releases the reservation by deleting the
-//! `PENDING` row so the device can claim again.
+//! One row per pseudonymized physical device, `UNIQUE (device_hmac)`; the raw
+//! `deviceId` never reaches this table. `PENDING` is reserved in the same
+//! transaction as the username reservation, becomes `CONSUMED` on on-chain
+//! success (clearing `reservation_id`, so no permanent device→username link),
+//! and is deleted on terminal failure so the device can claim again.
 
 use sqlx::PgPool;
 

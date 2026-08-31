@@ -2036,9 +2036,8 @@ impl Writer {
         if !outbox::mark_assigned(&self.pool, guard, r.id).await? {
             anyhow::bail!("lease lost while assigning");
         }
-        // The claim landed on-chain, so the device's free slot is spent for
-        // good. Best-effort: a failure leaves the record PENDING, which still
-        // holds the slot — never a double grant.
+        // Best-effort: on failure the record stays PENDING, which still holds
+        // the slot — never a double grant.
         if let Err(e) = crate::widevine::store::consume_for_reservation(&self.pool, r.id).await {
             tracing::warn!(id = r.id, error = %e, "widevine device consume failed (record stays PENDING)");
         }
@@ -2062,11 +2061,9 @@ impl Writer {
     }
 
     async fn fail(&self, guard: &Guard, r: &Reservation, reason: &str) -> anyhow::Result<()> {
-        // Released before the outbox write: a lost lease (or any error below)
-        // must not leave the device's PENDING record stranded, which would
-        // block that physical device from ever claiming again. Releasing a
-        // claim that then fails to be marked failed is safe — the row is
-        // re-driven and reserves the device again.
+        // Released before the outbox write: a lost lease must not strand the
+        // device's PENDING record and lock that phone out for good. Safe in
+        // reverse too — a re-driven claim reserves the device again.
         match crate::widevine::store::release_for_reservation(&self.pool, r.id).await {
             Ok(released) if released > 0 => {
                 tracing::info!(
