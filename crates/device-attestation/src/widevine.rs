@@ -111,14 +111,13 @@ pub fn extract(body: &Value) -> Result<Option<RawEvidence>, EvidenceError> {
         }
     };
 
-    let malformed = EvidenceError::Malformed;
     let b64 = base64::engine::general_purpose::STANDARD;
 
-    let entries = chain
-        .as_array()
-        .ok_or_else(|| malformed("attestationChain must be an array of strings".to_string()))?;
+    let entries = chain.as_array().ok_or_else(|| {
+        EvidenceError::Malformed("attestationChain must be an array of strings".to_string())
+    })?;
     if entries.len() < MIN_CHAIN_ENTRIES || entries.len() > MAX_CHAIN_ENTRIES {
-        return Err(malformed(format!(
+        return Err(EvidenceError::Malformed(format!(
             "attestationChain has {} entries, expected {MIN_CHAIN_ENTRIES}..={MAX_CHAIN_ENTRIES}",
             entries.len()
         )));
@@ -127,29 +126,30 @@ pub fn extract(body: &Value) -> Result<Option<RawEvidence>, EvidenceError> {
         .iter()
         .enumerate()
         .map(|(i, entry)| {
-            let raw = entry
-                .as_str()
-                .ok_or_else(|| malformed(format!("attestationChain[{i}] must be a string")))?;
+            let raw = entry.as_str().ok_or_else(|| {
+                EvidenceError::Malformed(format!("attestationChain[{i}] must be a string"))
+            })?;
             if raw.len() > MAX_ENTRY_CHARS {
-                return Err(malformed(format!(
+                return Err(EvidenceError::Malformed(format!(
                     "attestationChain[{i}] exceeds {MAX_ENTRY_CHARS} chars"
                 )));
             }
-            b64.decode(raw.trim())
-                .map_err(|_| malformed(format!("attestationChain[{i}] is not valid base64")))
+            b64.decode(raw.trim()).map_err(|_| {
+                EvidenceError::Malformed(format!("attestationChain[{i}] is not valid base64"))
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
 
     let decode32 = |field: &'static str, value: &Value| -> Result<[u8; 32], EvidenceError> {
         value
             .as_str()
-            .ok_or_else(|| malformed(format!("{field} must be a string")))
+            .ok_or_else(|| EvidenceError::Malformed(format!("{field} must be a string")))
             .and_then(|raw| {
                 b64.decode(raw.trim())
-                    .map_err(|_| malformed(format!("{field} is not valid base64")))
+                    .map_err(|_| EvidenceError::Malformed(format!("{field} is not valid base64")))
             })?
             .try_into()
-            .map_err(|_| malformed(format!("{field} must be exactly 32 bytes")))
+            .map_err(|_| EvidenceError::Malformed(format!("{field} must be exactly 32 bytes")))
     };
     let challenge = decode32("deviceChallenge", challenge)?;
     let device_id = decode32("deviceId", device_id)?;

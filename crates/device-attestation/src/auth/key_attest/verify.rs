@@ -223,9 +223,7 @@ pub fn verify_chain(
     })?;
     let description = extension::parse(ext_value).map_err(KeyAttestError::Extension)?;
 
-    check_policy(&description, params)?;
-
-    Ok(())
+    check_policy(&description, params)
 }
 
 fn check_policy(

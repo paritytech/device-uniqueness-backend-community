@@ -196,7 +196,7 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
             (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), \
             or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence \
             (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, or wrong \
-            field sizes).",
+            field sizes — the specific reason is logged server-side, never returned).",
          body = serde_json::Value,
          example = json!({
              "error": "The request body contains invalid values.",
@@ -209,10 +209,11 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
          body = serde_json::Value),
         (status = 403, description = "Device evidence failed verification under \
             `WIDEVINE_DEDUP_ENFORCE`: chain policy, the cert-bound evidence hash (challenge / \
-            account / deviceId), or a spent challenge. Retryable once \
+            account / deviceId), or a spent challenge. The specific reason is logged \
+            server-side, never returned. Retryable once \
             with a fresh challenge; repeated failure surfaces as the paid lane.",
          body = serde_json::Value,
-         example = json!({ "error": "DEVICE_EVIDENCE_INVALID", "message": "attestation chain rejected" })),
+         example = json!({ "error": "DEVICE_EVIDENCE_INVALID", "message": "device evidence invalid" })),
         (status = 409, description = "Preferred digits taken, no digits available, or username taken.",
          body = serde_json::Value,
          example = json!({ "error": "Preferred digits 07 already taken for username tallesx" })),
@@ -519,19 +520,19 @@ async fn widevine_gate(
         return Ok(WidevineGate::Proceed(None));
     };
     let enforce = cfg.enforce;
-    let soft_reject = |verdict: &widevine::EvidenceError| {
-        tracing::warn!(verdict = %verdict, "widevine evidence rejected (soft mode, request allowed)");
+    // Every reject logs its verdict in both modes. The response carries only
+    // the error code, so this log is the one place the reason survives.
+    let reject = |verdict: widevine::EvidenceError| -> UsernamesResult<WidevineGate> {
+        tracing::warn!(verdict = %verdict, enforced = enforce, "widevine evidence rejected");
+        if enforce {
+            return Err(verdict.into());
+        }
         Ok(WidevineGate::Proceed(None))
     };
 
     let raw = match widevine::extract(body) {
         Ok(raw) => raw,
-        Err(verdict) => {
-            if enforce {
-                return Err(verdict.into());
-            }
-            return soft_reject(&verdict);
-        }
+        Err(verdict) => return reject(verdict),
     };
     let Some(raw) = raw else {
         // No evidence. Enforced mode routes Android claims to the paid lane;
@@ -565,13 +566,9 @@ async fn widevine_gate(
         .and_then(|raw| hex::decode(raw).ok())
         .and_then(|bytes| bytes.try_into().ok());
     let Some(subject_pubkey) = subject_pubkey else {
-        let verdict = widevine::EvidenceError::Invalid(
+        return reject(widevine::EvidenceError::Invalid(
             "JWT subject is not a 32-byte account key".to_string(),
-        );
-        if enforce {
-            return Err(verdict.into());
-        }
-        return soft_reject(&verdict);
+        ));
     };
 
     let params = widevine::VerifyParams {
@@ -583,24 +580,15 @@ async fn widevine_gate(
     };
     let verified = match widevine::verify(&raw, &params) {
         Ok(verified) => verified,
-        Err(verdict) => {
-            if enforce {
-                return Err(verdict.into());
-            }
-            return soft_reject(&verdict);
-        }
+        Err(verdict) => return reject(verdict),
     };
 
     // Single-use: the evidence challenge is consumed in soft mode too, so a
     // replayed claim already logs (and later enforces) as spent.
     if !crate::auth::challenge::consume(&state.pool, &verified.challenge).await? {
-        let verdict = widevine::EvidenceError::Invalid(
+        return reject(widevine::EvidenceError::Invalid(
             "evidence challenge is unknown, spent, or expired".to_string(),
-        );
-        if enforce {
-            return Err(verdict.into());
-        }
-        return soft_reject(&verdict);
+        ));
     }
 
     let seen = widevine::store::seen(&state.pool, &verified.hmac).await?;

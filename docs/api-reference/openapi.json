@@ -458,7 +458,7 @@
             }
           },
           "400": {
-            "description": "Validation failed (with per-field `fields`), malformed JSON, a `lifetimePoUDVoucher` that is unknown, already used, or expired (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, or wrong field sizes).",
+            "description": "Validation failed (with per-field `fields`), malformed JSON, a `lifetimePoUDVoucher` that is unknown, already used, or expired (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, or wrong field sizes — the specific reason is logged server-side, never returned).",
             "content": {
               "application/json": {
                 "schema": {},
@@ -483,13 +483,13 @@
             }
           },
           "403": {
-            "description": "Device evidence failed verification under `WIDEVINE_DEDUP_ENFORCE`: chain policy, the cert-bound evidence hash (challenge / account / deviceId), or a spent challenge. Retryable once with a fresh challenge; repeated failure surfaces as the paid lane.",
+            "description": "Device evidence failed verification under `WIDEVINE_DEDUP_ENFORCE`: chain policy, the cert-bound evidence hash (challenge / account / deviceId), or a spent challenge. The specific reason is logged server-side, never returned. Retryable once with a fresh challenge; repeated failure surfaces as the paid lane.",
             "content": {
               "application/json": {
                 "schema": {},
                 "example": {
                   "error": "DEVICE_EVIDENCE_INVALID",
-                  "message": "attestation chain rejected"
+                  "message": "device evidence invalid"
                 }
               }
             }

@@ -1663,7 +1663,7 @@ device — the raw id never leaves it.</td></tr>
             </div>
 <pre><span class="p">{</span>
   <span class="s">"error"</span><span class="p">:</span> <span class="s">"DEVICE_EVIDENCE_INVALID"</span><span class="p">,</span>
-  <span class="s">"message"</span><span class="p">:</span> <span class="s">"attestation chain rejected"</span>
+  <span class="s">"message"</span><span class="p">:</span> <span class="s">"device evidence invalid"</span>
 <span class="p">}</span></pre>
           </div>
           <div class="code-block">
@@ -1722,7 +1722,7 @@ device — the raw id never leaves it.</td></tr>
                 <span class="sc-code c400">400</span>
                 <span class="sc-label">The request body contains invalid values.</span>
               </div>
-              <div class="sc-desc">Validation failed (with per-field <code>fields</code>), malformed JSON, a <code>lifetimePoUDVoucher</code> that is unknown, already used, or expired (<code>{&quot;error&quot;: &quot;Voucher already used&quot;}</code> — a voucher failure rejects the claim outright), or — with <code>WIDEVINE_DEDUP_ENFORCE</code> — structurally malformed device evidence (<code>{&quot;error&quot;: &quot;DEVICE_EVIDENCE_MALFORMED&quot;}</code>: partial fields, bad base64, or wrong field sizes).</div>
+              <div class="sc-desc">Validation failed (with per-field <code>fields</code>), malformed JSON, a <code>lifetimePoUDVoucher</code> that is unknown, already used, or expired (<code>{&quot;error&quot;: &quot;Voucher already used&quot;}</code> — a voucher failure rejects the claim outright), or — with <code>WIDEVINE_DEDUP_ENFORCE</code> — structurally malformed device evidence (<code>{&quot;error&quot;: &quot;DEVICE_EVIDENCE_MALFORMED&quot;}</code>: partial fields, bad base64, or wrong field sizes — the specific reason is logged server-side, never returned).</div>
             </div>
             <div class="status-card">
               <div class="sc-head">
@@ -1736,7 +1736,7 @@ device — the raw id never leaves it.</td></tr>
                 <span class="sc-code c403">403</span>
                 <span class="sc-label">DEVICE_EVIDENCE_INVALID</span>
               </div>
-              <div class="sc-desc">Device evidence failed verification under <code>WIDEVINE_DEDUP_ENFORCE</code>: chain policy, the cert-bound evidence hash (challenge / account / deviceId), or a spent challenge. Retryable once with a fresh challenge; repeated failure surfaces as the paid lane.</div>
+              <div class="sc-desc">Device evidence failed verification under <code>WIDEVINE_DEDUP_ENFORCE</code>: chain policy, the cert-bound evidence hash (challenge / account / deviceId), or a spent challenge. The specific reason is logged server-side, never returned. Retryable once with a fresh challenge; repeated failure surfaces as the paid lane.</div>
             </div>
             <div class="status-card">
               <div class="sc-head">
