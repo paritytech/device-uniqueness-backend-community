@@ -8,6 +8,32 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An unfundable signer no longer fails registrations terminally.** A
+  transaction rejected with `Inability to pay some fees`
+  (`InvalidTransaction::Payment`) never enters a block, spends nothing and says
+  nothing about the row, so it now **parks** the row — re-queued at an
+  *unchanged* `attempt` behind a 5-minute `not_before` — instead of spending one
+  of `CHAIN_WRITER_MAX_ATTEMPTS`. Previously a drained signer walked a row
+  through its whole budget in about three minutes (`2^attempt` backoff, clamped
+  at 6) and wrote `FAILED_TERMINAL`. On the dotNS lane that was unrecoverable:
+  the client's reservation stays valid for `MaxValiditySeconds` (three days) and
+  only the client holds the key that can re-sign it, so a funding gap an
+  operator had not noticed yet destroyed claims that had days of validity left.
+  Parked rows resume on their own once the signer is topped up; the existing
+  `chain-writer signer balance below floor` warning and
+  `dub_account_free_balance_planck` gauge remain how the outage is seen, now
+  joined by `dub_chain_submit_total{outcome="parked"}`.
+- **A rejection that cannot change is no longer retried.** A dispatch error
+  named in `DETERMINISTIC_REJECTIONS` — currently
+  `Resources::UsernameReservationTaken` — is terminal on the first pass. Such a
+  call reached a block and paid its fee, and is byte-identical on every retry,
+  so the previous behaviour paid the same fee eight times to be told the same
+  thing, draining the very signer whose exhaustion then parks the lane.
+  `last_error` now distinguishes the two terminal routes: `rejected
+  deterministically, not retried: …` versus `max attempts reached: …`.
+
 ### Changed
 
 - **`device-attestation-chain-writer` submits a whole pass as one extrinsic.** A

@@ -310,7 +310,15 @@ Operational invariants an agent must respect when touching the code.
   guard. The backend **cannot re-sign**; only the client holds the candidate key. An aged-out row
   is `EXPIRED`: terminal, never retried. A future-dated one is *deferred* behind
   `dotns_not_before` without spending an attempt — the clock resolves it, so failing it would kill
-  a row that was always going to succeed.
+  a row that was always going to succeed. **A signer that cannot pay is deferred on the same
+  reasoning**: `Inability to pay some fees` is rejected at validation, so it enters no block, spends
+  no fee and says nothing about the row. It *parks* — re-queued at an unchanged attempt, never
+  counted toward `CHAIN_WRITER_MAX_ATTEMPTS`, never terminal however long the outage runs. The
+  budget exists to stop a bad row retrying forever; a funding gap is not a bad row, and burning
+  eight attempts in three minutes against a three-day signature would discard a claim only the
+  client can re-sign. The mirror of that rule is the other direction: a rejection that cannot come
+  out differently for the same call (`DETERMINISTIC_REJECTIONS`) is terminal on the *first* pass
+  rather than paying its fee eight times over.
 - **A dotNS problem parks the dotNS lane; it never stops the writer.** Only one dotNS condition is
   a startup abort: `DOTNS_GATEWAY_ENABLED` on with no `ASSET_HUB_RPC_URL`, a config error knowable
   before any row is claimed. Everything else is runtime. Asset Hub is connected lazily on the
