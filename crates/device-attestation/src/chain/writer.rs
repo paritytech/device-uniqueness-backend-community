@@ -427,6 +427,7 @@ async fn connect_asset_hub(url: &str) -> anyhow::Result<(AssetHub, ValidityWindo
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SubmitFailureAction {
     Assign,
+    Park,
     Retry,
     Fail,
 }
@@ -510,6 +511,26 @@ fn check_dotns_submittable(
 /// to the candidate, so the row is on chain and belongs in `ASSIGNED`.
 const ALREADY_REGISTERED: &str = "PeopleLite::AlreadyRegistered";
 
+const UNFUNDED_SIGNER: &str = "Inability to pay some fees";
+
+const UNFUNDED_PARK_BACKOFF_SECS: i64 = 300;
+
+const DETERMINISTIC_REJECTIONS: &[&str] = &["Resources::UsernameReservationTaken"];
+
+fn is_deterministic_rejection(reason: &str) -> bool {
+    DETERMINISTIC_REJECTIONS
+        .iter()
+        .any(|rejection| reason.contains(rejection))
+}
+
+fn terminal_reason(reason: &str) -> String {
+    if is_deterministic_rejection(reason) {
+        format!("rejected deterministically, not retried: {reason}")
+    } else {
+        format!("max attempts reached: {reason}")
+    }
+}
+
 fn classify_submit_failure(
     reason: &str,
     observed_owner: Option<[u8; 32]>,
@@ -519,7 +540,9 @@ fn classify_submit_failure(
 ) -> SubmitFailureAction {
     if observed_owner == Some(candidate) || reason.contains(ALREADY_REGISTERED) {
         SubmitFailureAction::Assign
-    } else if completed_attempts >= max_attempts {
+    } else if reason.contains(UNFUNDED_SIGNER) {
+        SubmitFailureAction::Park
+    } else if is_deterministic_rejection(reason) || completed_attempts >= max_attempts {
         SubmitFailureAction::Fail
     } else {
         SubmitFailureAction::Retry
@@ -773,10 +796,10 @@ impl Writer {
                     self.config.max_attempts,
                 ) {
                     SubmitFailureAction::Assign => self.assign(guard, r).await,
+                    SubmitFailureAction::Park => self.park(guard, r, &reason).await,
                     SubmitFailureAction::Retry => self.retry(guard, r, &reason).await,
                     SubmitFailureAction::Fail => {
-                        self.fail(guard, r, &format!("max attempts reached: {reason}"))
-                            .await
+                        self.fail(guard, r, &terminal_reason(&reason)).await
                     }
                 }
             }
@@ -959,11 +982,9 @@ impl Writer {
                 self.config.max_attempts,
             ) {
                 SubmitFailureAction::Assign => self.assign(guard, r).await?,
+                SubmitFailureAction::Park => self.park(guard, r, &reason).await?,
                 SubmitFailureAction::Retry => self.retry(guard, r, &reason).await?,
-                SubmitFailureAction::Fail => {
-                    self.fail(guard, r, &format!("max attempts reached: {reason}"))
-                        .await?
-                }
+                SubmitFailureAction::Fail => self.fail(guard, r, &terminal_reason(&reason)).await?,
             }
         }
         Ok(())
@@ -1470,10 +1491,10 @@ impl Writer {
                     self.config.max_attempts,
                 ) {
                     SubmitFailureAction::Assign => self.dotns_reserve(guard, r).await,
+                    SubmitFailureAction::Park => self.dotns_park(guard, r, &reason).await,
                     SubmitFailureAction::Retry => self.dotns_retry(guard, r, &reason).await,
                     SubmitFailureAction::Fail => {
-                        self.dotns_fail(guard, r, &format!("max attempts reached: {reason}"))
-                            .await
+                        self.dotns_fail(guard, r, &terminal_reason(&reason)).await
                     }
                 }
             }
@@ -1643,10 +1664,10 @@ impl Writer {
                 self.config.max_attempts,
             ) {
                 SubmitFailureAction::Assign => self.dotns_reserve(guard, r).await?,
+                SubmitFailureAction::Park => self.dotns_park(guard, r, &reason).await?,
                 SubmitFailureAction::Retry => self.dotns_retry(guard, r, &reason).await?,
                 SubmitFailureAction::Fail => {
-                    self.dotns_fail(guard, r, &format!("max attempts reached: {reason}"))
-                        .await?
+                    self.dotns_fail(guard, r, &terminal_reason(&reason)).await?
                 }
             }
         }
@@ -1855,6 +1876,26 @@ impl Writer {
         Ok(())
     }
 
+    async fn dotns_park(&self, guard: &Guard, r: &Reservation, reason: &str) -> anyhow::Result<()> {
+        let not_before =
+            OffsetDateTime::now_utc() + time::Duration::seconds(UNFUNDED_PARK_BACKOFF_SECS);
+        if !outbox::mark_dotns_retry(&self.pool, guard, r.id, not_before, r.dotns_attempt, reason)
+            .await?
+        {
+            anyhow::bail!("lease lost while parking a dotns reservation");
+        }
+        record_submit_outcome("dotns", "parked");
+        tracing::warn!(
+            id = r.id,
+            username = %r.full_username,
+            attempt = r.dotns_attempt,
+            backoff_secs = UNFUNDED_PARK_BACKOFF_SECS,
+            reason,
+            "dotns reservation parked without spending an attempt; the signer cannot pay fees"
+        );
+        Ok(())
+    }
+
     async fn dotns_retry(
         &self,
         guard: &Guard,
@@ -2020,6 +2061,24 @@ impl Writer {
         }
         record_submit_outcome("people", "terminal");
         tracing::warn!(id = r.id, username = %r.full_username, reason, "registration failed terminally");
+        Ok(())
+    }
+
+    async fn park(&self, guard: &Guard, r: &Reservation, reason: &str) -> anyhow::Result<()> {
+        let not_before =
+            OffsetDateTime::now_utc() + time::Duration::seconds(UNFUNDED_PARK_BACKOFF_SECS);
+        if !outbox::mark_retry(&self.pool, guard, r.id, not_before, r.attempt, reason).await? {
+            anyhow::bail!("lease lost while parking a registration");
+        }
+        record_submit_outcome("people", "parked");
+        tracing::warn!(
+            id = r.id,
+            username = %r.full_username,
+            attempt = r.attempt,
+            backoff_secs = UNFUNDED_PARK_BACKOFF_SECS,
+            reason,
+            "registration parked without spending an attempt; the signer cannot pay fees"
+        );
         Ok(())
     }
 
@@ -2575,6 +2634,60 @@ mod tests {
             classify_submit_failure(reason, None, candidate, 3, 3),
             SubmitFailureAction::Fail
         );
+    }
+
+    const UNFUNDED_ERROR: &str = "max attempts reached: Error during transaction progress: \
+         The transaction is not valid: Invalid transaction: Inability to pay some fees \
+         (e.g. account balance too low)";
+
+    #[test]
+    fn an_unfunded_signer_parks_and_never_becomes_terminal() {
+        let candidate = [7; 32];
+
+        assert_eq!(
+            classify_submit_failure(UNFUNDED_ERROR, None, candidate, 1, 3),
+            SubmitFailureAction::Park
+        );
+        assert_eq!(
+            classify_submit_failure(UNFUNDED_ERROR, None, candidate, 99, 3),
+            SubmitFailureAction::Park
+        );
+        assert_eq!(
+            classify_submit_failure(UNFUNDED_ERROR, Some(candidate), candidate, 99, 3),
+            SubmitFailureAction::Assign
+        );
+    }
+
+    #[test]
+    fn a_deterministic_rejection_fails_on_the_first_pass() {
+        let candidate = [7; 32];
+        let reason = "proxied call failed: Resources::UsernameReservationTaken";
+
+        assert_eq!(
+            classify_submit_failure(reason, None, candidate, 1, 8),
+            SubmitFailureAction::Fail
+        );
+        assert_eq!(
+            classify_submit_failure(reason, Some(candidate), candidate, 1, 8),
+            SubmitFailureAction::Assign
+        );
+        assert_eq!(
+            classify_submit_failure(
+                "proxied call failed: Resources::Whatever",
+                None,
+                candidate,
+                1,
+                8
+            ),
+            SubmitFailureAction::Retry
+        );
+    }
+
+    #[test]
+    fn terminal_text_names_the_rule_that_ended_the_row() {
+        assert!(terminal_reason("Resources::UsernameReservationTaken")
+            .starts_with("rejected deterministically, not retried"));
+        assert!(terminal_reason("dispatch failed").starts_with("max attempts reached"));
     }
 
     #[test]
