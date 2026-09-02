@@ -821,6 +821,7 @@ dependencies = [
  "subxt-signer",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
