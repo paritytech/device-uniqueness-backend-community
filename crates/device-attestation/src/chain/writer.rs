@@ -24,6 +24,7 @@ use super::asset_hub::{AssetHub, ValidityWindow};
 use super::lease;
 use super::outbox::{self, Guard, Reservation};
 use super::people::PeopleChain;
+use super::registry::NameRegistry as _;
 use crate::dotns;
 
 /// The claim size a writer uses when `CHAIN_WRITER_BATCH_SIZE` is unset or
@@ -723,7 +724,7 @@ impl Writer {
             .iter()
             .map(|(r, _)| r.full_username.as_str())
             .collect();
-        let owners = match self.chain.username_owners(&names).await {
+        let owners = match self.chain.owners(&names).await {
             Ok(owners) => owners,
             Err(e) => {
                 // One read now covers the whole claimed set, so one bad
@@ -782,12 +783,7 @@ impl Writer {
                 self.next_nonce = None;
                 let reason = e.to_string();
 
-                let observed_owner = self
-                    .chain
-                    .username_owner(&r.full_username)
-                    .await
-                    .ok()
-                    .flatten();
+                let observed_owner = self.chain.owner(&r.full_username).await.ok().flatten();
                 match classify_submit_failure(
                     &reason,
                     observed_owner,
@@ -958,7 +954,7 @@ impl Writer {
             .collect();
         metrics::counter!("dub_chain_batch_item_failed_total", "lane" => "people")
             .increment(failed.len() as u64);
-        let owners = match self.chain.username_owners(&failed).await {
+        let owners = match self.chain.owners(&failed).await {
             Ok(owners) => owners,
             Err(e) => {
                 // Best-effort, exactly as the single-submit path's reconcile
@@ -1003,7 +999,7 @@ impl Writer {
         reason: &str,
     ) -> anyhow::Result<()> {
         let names: Vec<&str> = rows.iter().map(|(r, _)| r.full_username.as_str()).collect();
-        let owners = match self.chain.username_owners(&names).await {
+        let owners = match self.chain.owners(&names).await {
             Ok(owners) => owners,
             Err(e) => {
                 return self
@@ -1182,7 +1178,7 @@ impl Writer {
                 .iter()
                 .map(|(r, _)| r.full_username.as_str())
                 .collect();
-            let owners = match self.chain.username_owners(&names).await {
+            let owners = match self.chain.owners(&names).await {
                 Ok(owners) => owners,
                 Err(e) => {
                     // Left `SUBMITTING` rather than guessed about: unknown is
@@ -1353,7 +1349,7 @@ impl Writer {
             .iter()
             .map(|(r, _)| r.full_username.as_str())
             .collect();
-        let owners = match asset_hub.lite_label_owners(&labels).await {
+        let owners = match asset_hub.owners(&labels).await {
             Ok(owners) => owners,
             Err(e) => {
                 // One read covers every gated row, so a bad response is a
@@ -1478,11 +1474,7 @@ impl Writer {
             Err(e) => {
                 self.next_nonce_ah = None;
                 let reason = e.to_string();
-                let observed = asset_hub
-                    .lite_label_owner(&r.full_username)
-                    .await
-                    .ok()
-                    .flatten();
+                let observed = asset_hub.owner(&r.full_username).await.ok().flatten();
                 match classify_submit_failure(
                     &reason,
                     observed,
@@ -1642,7 +1634,7 @@ impl Writer {
             .collect();
         metrics::counter!("dub_chain_batch_item_failed_total", "lane" => "dotns")
             .increment(failed.len() as u64);
-        let owners = match asset_hub.lite_label_owners(&failed).await {
+        let owners = match asset_hub.owners(&failed).await {
             Ok(owners) => owners,
             Err(e) => {
                 tracing::warn!(error = %e, "post-batch label owner read failed; failed items will retry");
@@ -1684,7 +1676,7 @@ impl Writer {
         reason: &str,
     ) -> anyhow::Result<()> {
         let labels: Vec<&str> = rows.iter().map(|(r, _)| r.full_username.as_str()).collect();
-        let owners = match asset_hub.lite_label_owners(&labels).await {
+        let owners = match asset_hub.owners(&labels).await {
             Ok(owners) => owners,
             Err(e) => {
                 return self
@@ -1801,7 +1793,7 @@ impl Writer {
                 self.dotns_fail(guard, &r, "invalid candidate SS58").await?;
                 continue;
             };
-            match asset_hub.lite_label_owner(&r.full_username).await? {
+            match asset_hub.owner(&r.full_username).await? {
                 Some(owner) if owner == candidate => self.dotns_reserve(guard, &r).await?,
                 _ => {
                     self.dotns_retry(guard, &r, "reconcile: not yet on Asset Hub, re-queued")
