@@ -8,6 +8,8 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-02
+
 ### Fixed
 
 - **The invite-ticket pool mints again after People Chain 3000000.** The
@@ -210,5 +212,9 @@ same build:
   the literal placeholder `<base64-secret>`, and `turn-api` refuses to boot on
   invalid base64 — so the documented quickstart crash-looped one service.
 
-[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.5.0...HEAD
+
+[0.5.0]: https://github.com/paritytech/device-uniqueness-backend-community/rel
+eases/tag/v0.5.0
+
 [0.4.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.4.0
