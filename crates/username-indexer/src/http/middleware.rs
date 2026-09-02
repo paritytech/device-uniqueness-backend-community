@@ -87,14 +87,14 @@ mod tests {
         assert!(limiter.allow("1.2.3.4".to_owned()).await.is_ok());
         assert!(limiter.allow("1.2.3.4".to_owned()).await.is_ok());
         assert!(limiter.allow("1.2.3.4".to_owned()).await.is_ok());
-        assert!(!limiter.allow("1.2.3.4".to_owned()).await.is_ok());
+        assert!(limiter.allow("1.2.3.4".to_owned()).await.is_err());
     }
 
     #[tokio::test]
     async fn tracks_keys_independently() {
         let limiter = RateLimiter::new(RateLimiterConfig::default().set_max_burst(1)).unwrap();
         assert!(limiter.allow("1.1.1.1".to_owned()).await.is_ok());
-        assert!(!limiter.allow("1.1.1.1".to_owned()).await.is_ok());
+        assert!(limiter.allow("1.1.1.1".to_owned()).await.is_err());
         assert!(limiter.allow("2.2.2.2".to_owned()).await.is_ok());
     }
 }

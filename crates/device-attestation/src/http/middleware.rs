@@ -11,7 +11,7 @@ use super::state::AppState;
 /// Reject requests over the per-route/per-IP limit.
 pub async fn rate_limit(State(state): State<AppState>, req: Request, next: Next) -> Response {
     let key = format!("{}:{}", req.uri().path(), state.limiter.client_ip(&req));
-    if let Err(_) = state.limiter.allow(key).await {
+    if state.limiter.allow(key).await.is_err() {
         return AppError::RateLimited.into_response();
     }
     next.run(req).await
