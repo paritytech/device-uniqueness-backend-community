@@ -33,13 +33,14 @@ use crate::dotns;
 mod events;
 #[cfg(test)]
 mod fixtures;
+mod lane;
 mod observe;
 mod tx;
 
 use events::{check_proxied_call, item_results};
+use lane::{Defer, Dotns, Lane as _, Outcome, People};
 use observe::{
-    record_outbox_gauges, record_spec_version, record_submit_outcome, record_writer_info,
-    zero_init_submit_outcomes,
+    record_outbox_gauges, record_spec_version, record_writer_info, zero_init_submit_outcomes,
 };
 use tx::{
     build_registration_batch_tx, build_registration_tx, build_reserve_name_batch_tx,
@@ -732,7 +733,15 @@ impl Writer {
         for r in due {
             match parse_account(&r.candidate_account_id) {
                 Ok(candidate) => parsed.push((r, candidate)),
-                Err(_) => self.fail(guard, r, "invalid candidate SS58").await?,
+                Err(_) => {
+                    People::record(
+                        &self.pool,
+                        guard,
+                        r,
+                        Outcome::Failed("invalid candidate SS58"),
+                    )
+                    .await?
+                }
             }
         }
         if parsed.is_empty() {
@@ -762,10 +771,17 @@ impl Writer {
         let mut submittable = Vec::with_capacity(parsed.len());
         for (r, candidate) in parsed {
             match owners.get(&r.full_username) {
-                Some(owner) if *owner == candidate => self.assign_observed(guard, r).await?,
+                Some(owner) if *owner == candidate => {
+                    People::record(&self.pool, guard, r, Outcome::Observed).await?
+                }
                 Some(_) => {
-                    self.fail(guard, r, "username owned by another account")
-                        .await?
+                    People::record(
+                        &self.pool,
+                        guard,
+                        r,
+                        Outcome::Failed("username owned by another account"),
+                    )
+                    .await?
                 }
                 None => submittable.push((r, candidate)),
             }
@@ -787,7 +803,15 @@ impl Writer {
         let payload = build_registration_tx(r, &candidate, self.proxy_for.as_ref());
         let nonce = match self.nonce().await {
             Ok(n) => n,
-            Err(e) => return self.retry(guard, r, &format!("nonce fetch: {e}")).await,
+            Err(e) => {
+                return People::record(
+                    &self.pool,
+                    guard,
+                    r,
+                    Outcome::Retry(&format!("nonce fetch: {e}")),
+                )
+                .await
+            }
         };
 
         match self.submit(guard, r, &payload, nonce).await {
@@ -796,7 +820,7 @@ impl Writer {
                 // A lone row still proves the lane works, so it grows the size
                 // back toward the max after a halving search.
                 self.people_batch.succeeded(self.batch_max);
-                self.assign(guard, r).await
+                People::record(&self.pool, guard, r, Outcome::Landed).await
             }
             Err(e) => {
                 self.next_nonce = None;
@@ -810,11 +834,23 @@ impl Writer {
                     r.attempt + 1,
                     self.config.max_attempts,
                 ) {
-                    SubmitFailureAction::Assign => self.assign(guard, r).await,
-                    SubmitFailureAction::Park => self.park(guard, r, &reason).await,
-                    SubmitFailureAction::Retry => self.retry(guard, r, &reason).await,
+                    SubmitFailureAction::Assign => {
+                        People::record(&self.pool, guard, r, Outcome::Landed).await
+                    }
+                    SubmitFailureAction::Park => {
+                        People::record(&self.pool, guard, r, Outcome::Park(&reason)).await
+                    }
+                    SubmitFailureAction::Retry => {
+                        People::record(&self.pool, guard, r, Outcome::Retry(&reason)).await
+                    }
                     SubmitFailureAction::Fail => {
-                        self.fail(guard, r, &terminal_reason(&reason)).await
+                        People::record(
+                            &self.pool,
+                            guard,
+                            r,
+                            Outcome::Failed(&terminal_reason(&reason)),
+                        )
+                        .await
                     }
                 }
             }
@@ -895,15 +931,14 @@ impl Writer {
         backoff: time::Duration,
         reason: &str,
     ) -> anyhow::Result<()> {
-        let not_before = OffsetDateTime::now_utc() + backoff;
+        let until = OffsetDateTime::now_utc() + backoff;
         for (r, _) in rows {
-            // `r.attempt`, not `attempt + 1`: where a submit was attempted,
-            // `mark_submitting` already wrote the incremented value, and a
-            // whole-batch fault must not leave it there.
-            if !outbox::mark_retry(&self.pool, guard, r.id, not_before, r.attempt, reason).await? {
-                anyhow::bail!("lease lost while re-queueing a failed batch");
-            }
-            record_submit_outcome("people", "retry");
+            let outcome = Outcome::Defer {
+                until,
+                reason,
+                cause: Defer::Batch,
+            };
+            People::record(&self.pool, guard, r, outcome).await?;
         }
         Ok(())
     }
@@ -985,7 +1020,7 @@ impl Writer {
 
         for ((r, candidate), item) in rows.iter().zip(items) {
             let Err(reason) = item else {
-                self.assign(guard, r).await?;
+                People::record(&self.pool, guard, r, Outcome::Landed).await?;
                 continue;
             };
             let observed = owners.get(&r.full_username).copied();
@@ -996,10 +1031,24 @@ impl Writer {
                 r.attempt + 1,
                 self.config.max_attempts,
             ) {
-                SubmitFailureAction::Assign => self.assign(guard, r).await?,
-                SubmitFailureAction::Park => self.park(guard, r, &reason).await?,
-                SubmitFailureAction::Retry => self.retry(guard, r, &reason).await?,
-                SubmitFailureAction::Fail => self.fail(guard, r, &terminal_reason(&reason)).await?,
+                SubmitFailureAction::Assign => {
+                    People::record(&self.pool, guard, r, Outcome::Landed).await?
+                }
+                SubmitFailureAction::Park => {
+                    People::record(&self.pool, guard, r, Outcome::Park(&reason)).await?
+                }
+                SubmitFailureAction::Retry => {
+                    People::record(&self.pool, guard, r, Outcome::Retry(&reason)).await?
+                }
+                SubmitFailureAction::Fail => {
+                    People::record(
+                        &self.pool,
+                        guard,
+                        r,
+                        Outcome::Failed(&terminal_reason(&reason)),
+                    )
+                    .await?
+                }
             }
         }
         Ok(())
@@ -1034,7 +1083,7 @@ impl Writer {
         let mut unlanded = Vec::new();
         for (r, candidate) in rows {
             if owners.get(&r.full_username) == Some(candidate) {
-                self.assign(guard, r).await?;
+                People::record(&self.pool, guard, r, Outcome::Landed).await?;
             } else {
                 unlanded.push((*r, *candidate));
             }
@@ -1179,7 +1228,15 @@ impl Writer {
         for r in &stuck {
             match parse_account(&r.candidate_account_id) {
                 Ok(candidate) => parsed.push((r, candidate)),
-                Err(_) => self.fail(guard, r, "invalid candidate SS58").await?,
+                Err(_) => {
+                    People::record(
+                        &self.pool,
+                        guard,
+                        r,
+                        Outcome::Failed("invalid candidate SS58"),
+                    )
+                    .await?
+                }
             }
         }
         if parsed.is_empty() {
@@ -1213,10 +1270,15 @@ impl Writer {
             };
             for (r, candidate) in chunk {
                 if owners.get(&r.full_username) == Some(candidate) {
-                    self.assign_observed(guard, r).await?;
+                    People::record(&self.pool, guard, r, Outcome::Observed).await?;
                 } else {
-                    self.retry(guard, r, "reconcile: not yet on-chain, re-queued")
-                        .await?;
+                    People::record(
+                        &self.pool,
+                        guard,
+                        r,
+                        Outcome::Retry("reconcile: not yet on-chain, re-queued"),
+                    )
+                    .await?;
                 }
             }
         }
@@ -1352,7 +1414,13 @@ impl Writer {
         let mut gated = Vec::with_capacity(due.len());
         for r in due {
             let Ok(candidate) = parse_account(&r.candidate_account_id) else {
-                self.dotns_fail(guard, r, "invalid candidate SS58").await?;
+                Dotns::record(
+                    &self.pool,
+                    guard,
+                    r,
+                    Outcome::Failed("invalid candidate SS58"),
+                )
+                .await?;
                 continue;
             };
             match check_dotns_submittable(r, &candidate, &self.config.attester, window, now) {
@@ -1386,10 +1454,17 @@ impl Writer {
         let mut submittable = Vec::with_capacity(gated.len());
         for (r, candidate) in gated {
             match owners.get(&r.full_username) {
-                Some(owner) if *owner == candidate => self.dotns_reserve(guard, r).await?,
+                Some(owner) if *owner == candidate => {
+                    Dotns::record(&self.pool, guard, r, Outcome::Landed).await?
+                }
                 Some(_) => {
-                    self.dotns_fail(guard, r, "lite label reserved by another account")
-                        .await?
+                    Dotns::record(
+                        &self.pool,
+                        guard,
+                        r,
+                        Outcome::Failed("lite label reserved by another account"),
+                    )
+                    .await?
                 }
                 None => submittable.push((r, candidate)),
             }
@@ -1415,26 +1490,37 @@ impl Writer {
                     signed_at,
                     deadline_secs,
                 } => {
-                    self.dotns_expire(
+                    Dotns::record(
+                        &self.pool,
                         guard,
                         r,
-                        &format!(
+                        Outcome::Expired(&format!(
                             "reservation signature expired: signed_at={signed_at}, window \
                              {deadline_secs}s, now={now}. Only the client can re-sign."
-                        ),
+                        )),
                     )
                     .await
                 }
                 DotnsReject::NotInLane => {
-                    self.dotns_fail(guard, r, "row has no complete dotns block")
-                        .await
+                    Dotns::record(
+                        &self.pool,
+                        guard,
+                        r,
+                        Outcome::Failed("row has no complete dotns block"),
+                    )
+                    .await
                 }
                 DotnsReject::BadSignature => {
-                    self.dotns_fail(guard, r, "dotns signature does not verify")
-                        .await
+                    Dotns::record(
+                        &self.pool,
+                        guard,
+                        r,
+                        Outcome::Failed("dotns signature does not verify"),
+                    )
+                    .await
                 }
                 DotnsReject::UnbuildableLabel(why) | DotnsReject::UnbuildableReserved(why) => {
-                    self.dotns_fail(guard, r, &why).await
+                    Dotns::record(&self.pool, guard, r, Outcome::Failed(&why)).await
                 }
                 DotnsReject::FutureDated {
                     signed_at,
@@ -1442,16 +1528,20 @@ impl Writer {
                 } => {
                     let until = OffsetDateTime::from_unix_timestamp(submittable_at)
                         .unwrap_or_else(|_| OffsetDateTime::now_utc());
-                    self.dotns_defer(
+                    Dotns::record(
+                        &self.pool,
                         guard,
                         r,
-                        until,
-                        &format!(
-                            "reservation signature is future-dated: signed_at={signed_at}, \
-                             now={now}, gateway tolerates {}s of skew. Re-queued until \
-                             {submittable_at}.",
-                            window.max_future_skew_secs
-                        ),
+                        Outcome::Defer {
+                            until,
+                            reason: &format!(
+                                "reservation signature is future-dated: signed_at={signed_at}, \
+                                 now={now}, gateway tolerates {}s of skew. Re-queued until \
+                                 {submittable_at}.",
+                                window.max_future_skew_secs
+                            ),
+                            cause: Defer::NotYet,
+                        },
                     )
                     .await
                 }
@@ -1475,9 +1565,8 @@ impl Writer {
         let nonce = match self.nonce_ah(asset_hub).await {
             Ok(n) => n,
             Err(e) => {
-                return self
-                    .dotns_retry(guard, r, &format!("asset hub nonce fetch: {e}"))
-                    .await
+                let reason = format!("asset hub nonce fetch: {e}");
+                return Dotns::record(&self.pool, guard, r, Outcome::Retry(&reason)).await;
             }
         };
 
@@ -1488,7 +1577,7 @@ impl Writer {
             Ok(()) => {
                 self.next_nonce_ah = Some(nonce + 1);
                 self.dotns_batch.succeeded(self.batch_max);
-                self.dotns_reserve(guard, r).await
+                Dotns::record(&self.pool, guard, r, Outcome::Landed).await
             }
             Err(e) => {
                 self.next_nonce_ah = None;
@@ -1501,11 +1590,23 @@ impl Writer {
                     r.dotns_attempt + 1,
                     self.config.max_attempts,
                 ) {
-                    SubmitFailureAction::Assign => self.dotns_reserve(guard, r).await,
-                    SubmitFailureAction::Park => self.dotns_park(guard, r, &reason).await,
-                    SubmitFailureAction::Retry => self.dotns_retry(guard, r, &reason).await,
+                    SubmitFailureAction::Assign => {
+                        Dotns::record(&self.pool, guard, r, Outcome::Landed).await
+                    }
+                    SubmitFailureAction::Park => {
+                        Dotns::record(&self.pool, guard, r, Outcome::Park(&reason)).await
+                    }
+                    SubmitFailureAction::Retry => {
+                        Dotns::record(&self.pool, guard, r, Outcome::Retry(&reason)).await
+                    }
                     SubmitFailureAction::Fail => {
-                        self.dotns_fail(guard, r, &terminal_reason(&reason)).await
+                        Dotns::record(
+                            &self.pool,
+                            guard,
+                            r,
+                            Outcome::Failed(&terminal_reason(&reason)),
+                        )
+                        .await
                     }
                 }
             }
@@ -1579,21 +1680,14 @@ impl Writer {
         backoff: time::Duration,
         reason: &str,
     ) -> anyhow::Result<()> {
-        let not_before = OffsetDateTime::now_utc() + backoff;
+        let until = OffsetDateTime::now_utc() + backoff;
         for (r, _) in rows {
-            if !outbox::mark_dotns_retry(
-                &self.pool,
-                guard,
-                r.id,
-                not_before,
-                r.dotns_attempt,
+            let outcome = Outcome::Defer {
+                until,
                 reason,
-            )
-            .await?
-            {
-                anyhow::bail!("lease lost while re-queueing a failed dotns batch");
-            }
-            record_submit_outcome("dotns", "retry");
+                cause: Defer::Batch,
+            };
+            Dotns::record(&self.pool, guard, r, outcome).await?;
         }
         Ok(())
     }
@@ -1663,7 +1757,7 @@ impl Writer {
 
         for ((r, candidate), item) in rows.iter().zip(items) {
             let Err(reason) = item else {
-                self.dotns_reserve(guard, r).await?;
+                Dotns::record(&self.pool, guard, r, Outcome::Landed).await?;
                 continue;
             };
             let observed = owners.get(&r.full_username).copied();
@@ -1674,11 +1768,23 @@ impl Writer {
                 r.dotns_attempt + 1,
                 self.config.max_attempts,
             ) {
-                SubmitFailureAction::Assign => self.dotns_reserve(guard, r).await?,
-                SubmitFailureAction::Park => self.dotns_park(guard, r, &reason).await?,
-                SubmitFailureAction::Retry => self.dotns_retry(guard, r, &reason).await?,
+                SubmitFailureAction::Assign => {
+                    Dotns::record(&self.pool, guard, r, Outcome::Landed).await?
+                }
+                SubmitFailureAction::Park => {
+                    Dotns::record(&self.pool, guard, r, Outcome::Park(&reason)).await?
+                }
+                SubmitFailureAction::Retry => {
+                    Dotns::record(&self.pool, guard, r, Outcome::Retry(&reason)).await?
+                }
                 SubmitFailureAction::Fail => {
-                    self.dotns_fail(guard, r, &terminal_reason(&reason)).await?
+                    Dotns::record(
+                        &self.pool,
+                        guard,
+                        r,
+                        Outcome::Failed(&terminal_reason(&reason)),
+                    )
+                    .await?
                 }
             }
         }
@@ -1711,7 +1817,7 @@ impl Writer {
         let mut unlanded = Vec::new();
         for (r, candidate) in rows {
             if owners.get(&r.full_username) == Some(candidate) {
-                self.dotns_reserve(guard, r).await?;
+                Dotns::record(&self.pool, guard, r, Outcome::Landed).await?;
             } else {
                 unlanded.push((*r, *candidate));
             }
@@ -1809,124 +1915,30 @@ impl Writer {
         };
         for r in outbox::dotns_submitting(&self.pool).await? {
             let Some(candidate) = parse_account(&r.candidate_account_id).ok() else {
-                self.dotns_fail(guard, &r, "invalid candidate SS58").await?;
+                Dotns::record(
+                    &self.pool,
+                    guard,
+                    &r,
+                    Outcome::Failed("invalid candidate SS58"),
+                )
+                .await?;
                 continue;
             };
             match asset_hub.owner(&r.full_username).await? {
-                Some(owner) if owner == candidate => self.dotns_reserve(guard, &r).await?,
+                Some(owner) if owner == candidate => {
+                    Dotns::record(&self.pool, guard, &r, Outcome::Landed).await?
+                }
                 _ => {
-                    self.dotns_retry(guard, &r, "reconcile: not yet on Asset Hub, re-queued")
-                        .await?
+                    Dotns::record(
+                        &self.pool,
+                        guard,
+                        &r,
+                        Outcome::Retry("reconcile: not yet on Asset Hub, re-queued"),
+                    )
+                    .await?
                 }
             }
         }
-        Ok(())
-    }
-
-    async fn dotns_reserve(&self, guard: &Guard, r: &Reservation) -> anyhow::Result<()> {
-        if !outbox::mark_dotns_reserved(&self.pool, guard, r.id).await? {
-            anyhow::bail!("lease lost while reserving dotns name");
-        }
-        record_submit_outcome("dotns", "ok");
-        tracing::info!(id = r.id, username = %r.full_username, "dotns reserved on-chain");
-        Ok(())
-    }
-
-    async fn dotns_fail(&self, guard: &Guard, r: &Reservation, reason: &str) -> anyhow::Result<()> {
-        if !outbox::mark_dotns_failed(&self.pool, guard, r.id, reason).await? {
-            anyhow::bail!("lease lost while failing dotns reservation");
-        }
-        record_submit_outcome("dotns", "terminal");
-        tracing::warn!(
-            id = r.id,
-            username = %r.full_username,
-            reason,
-            "dotns reservation failed terminally; the People registration is unaffected"
-        );
-        Ok(())
-    }
-
-    async fn dotns_expire(
-        &self,
-        guard: &Guard,
-        r: &Reservation,
-        reason: &str,
-    ) -> anyhow::Result<()> {
-        if !outbox::mark_dotns_expired(&self.pool, guard, r.id, reason).await? {
-            anyhow::bail!("lease lost while expiring dotns reservation");
-        }
-        record_submit_outcome("dotns", "terminal");
-        tracing::warn!(
-            id = r.id,
-            username = %r.full_username,
-            reason,
-            "dotns reservation signature expired before submission"
-        );
-        Ok(())
-    }
-
-    async fn dotns_defer(
-        &self,
-        guard: &Guard,
-        r: &Reservation,
-        until: OffsetDateTime,
-        reason: &str,
-    ) -> anyhow::Result<()> {
-        if !outbox::mark_dotns_retry(&self.pool, guard, r.id, until, r.dotns_attempt, reason)
-            .await?
-        {
-            anyhow::bail!("lease lost while deferring dotns reservation");
-        }
-        tracing::warn!(
-            id = r.id,
-            username = %r.full_username,
-            until = %until,
-            reason,
-            "dotns reservation deferred; not yet within the gateway's skew bound"
-        );
-        Ok(())
-    }
-
-    async fn dotns_park(&self, guard: &Guard, r: &Reservation, reason: &str) -> anyhow::Result<()> {
-        let not_before =
-            OffsetDateTime::now_utc() + time::Duration::seconds(UNFUNDED_PARK_BACKOFF_SECS);
-        if !outbox::mark_dotns_retry(&self.pool, guard, r.id, not_before, r.dotns_attempt, reason)
-            .await?
-        {
-            anyhow::bail!("lease lost while parking a dotns reservation");
-        }
-        record_submit_outcome("dotns", "parked");
-        tracing::warn!(
-            id = r.id,
-            username = %r.full_username,
-            attempt = r.dotns_attempt,
-            backoff_secs = UNFUNDED_PARK_BACKOFF_SECS,
-            reason,
-            "dotns reservation parked without spending an attempt; the signer cannot pay fees"
-        );
-        Ok(())
-    }
-
-    async fn dotns_retry(
-        &self,
-        guard: &Guard,
-        r: &Reservation,
-        reason: &str,
-    ) -> anyhow::Result<()> {
-        let attempt = r.dotns_attempt + 1;
-        let backoff = 2u64.saturating_pow(attempt.clamp(0, 6) as u32);
-        let not_before = OffsetDateTime::now_utc() + time::Duration::seconds(backoff as i64);
-        if !outbox::mark_dotns_retry(&self.pool, guard, r.id, not_before, attempt, reason).await? {
-            anyhow::bail!("lease lost while scheduling dotns retry");
-        }
-        record_submit_outcome("dotns", "retry");
-        tracing::warn!(
-            id = r.id,
-            attempt,
-            backoff_secs = backoff,
-            reason,
-            "dotns reservation retry scheduled"
-        );
         Ok(())
     }
 
@@ -2017,119 +2029,6 @@ impl Writer {
                 );
             }
         }
-        Ok(())
-    }
-
-    /// Mark a row `ASSIGNED` because this writer's own submission put it
-    /// on-chain — including the reconcile of a submit that errored after the
-    /// extrinsic landed.
-    async fn assign(&self, guard: &Guard, r: &Reservation) -> anyhow::Result<()> {
-        self.mark_assigned(guard, r, true).await
-    }
-
-    /// Mark a row `ASSIGNED` because the chain *already* showed the candidate as
-    /// the owner: an idempotent replay, or a row a previous writer submitted.
-    ///
-    /// Deliberately does not record `dub_registration_latency_seconds`. The row
-    /// may have been registered days ago or carried across a restart, so its
-    /// `created_at` age is not this writer's intake→on-chain time, and that
-    /// histogram is read as the writer's own throughput number.
-    async fn assign_observed(&self, guard: &Guard, r: &Reservation) -> anyhow::Result<()> {
-        self.mark_assigned(guard, r, false).await
-    }
-
-    async fn mark_assigned(
-        &self,
-        guard: &Guard,
-        r: &Reservation,
-        submitted: bool,
-    ) -> anyhow::Result<()> {
-        // Assignment and device consumption commit together under the lease.
-        let mut tx = self.pool.begin().await?;
-        if !lease::fence(&mut tx, &guard.lease_name, &guard.holder_id, guard.epoch).await? {
-            anyhow::bail!("lease lost while assigning");
-        }
-        if !outbox::mark_assigned(&mut *tx, guard, r.id).await? {
-            anyhow::bail!("lease lost while assigning");
-        }
-        crate::widevine::store::consume_for_reservation(&mut *tx, r.id).await?;
-        tx.commit().await?;
-        record_submit_outcome("people", "ok");
-        let waited = (OffsetDateTime::now_utc() - r.created_at).as_seconds_f64();
-        if submitted {
-            // End to end, intake to on-chain — the number the throughput gate is
-            // measured against, and the one batching exists to move. Measured
-            // from the row's own `created_at`, so a backlog drained in one batch
-            // reports each row's real wait rather than the batch's.
-            metrics::histogram!("dub_registration_latency_seconds").record(waited.max(0.0));
-        }
-        tracing::info!(
-            id = r.id,
-            username = %r.full_username,
-            waited_secs = waited,
-            observed = !submitted,
-            "registration assigned on-chain"
-        );
-        Ok(())
-    }
-
-    async fn fail(&self, guard: &Guard, r: &Reservation, reason: &str) -> anyhow::Result<()> {
-        let mut tx = self.pool.begin().await?;
-        // Fence takeover before locking the reservation. A replacement writer
-        // cannot acquire this lease until both terminal writes commit or roll
-        // back, so it never observes an active claim whose device was released.
-        if !lease::fence(&mut tx, &guard.lease_name, &guard.holder_id, guard.epoch).await? {
-            anyhow::bail!("lease lost while failing");
-        }
-        if !outbox::mark_failed(&mut *tx, guard, r.id, reason).await? {
-            anyhow::bail!("lease lost while failing");
-        }
-        let released = crate::widevine::store::release_for_reservation(&mut *tx, r.id).await?;
-        tx.commit().await?;
-        if released {
-            tracing::info!(
-                id = r.id,
-                "widevine device record released with the failed claim"
-            );
-        }
-        record_submit_outcome("people", "terminal");
-        tracing::warn!(id = r.id, username = %r.full_username, reason, "registration failed terminally");
-        Ok(())
-    }
-
-    async fn park(&self, guard: &Guard, r: &Reservation, reason: &str) -> anyhow::Result<()> {
-        let not_before =
-            OffsetDateTime::now_utc() + time::Duration::seconds(UNFUNDED_PARK_BACKOFF_SECS);
-        if !outbox::mark_retry(&self.pool, guard, r.id, not_before, r.attempt, reason).await? {
-            anyhow::bail!("lease lost while parking a registration");
-        }
-        record_submit_outcome("people", "parked");
-        tracing::warn!(
-            id = r.id,
-            username = %r.full_username,
-            attempt = r.attempt,
-            backoff_secs = UNFUNDED_PARK_BACKOFF_SECS,
-            reason,
-            "registration parked without spending an attempt; the signer cannot pay fees"
-        );
-        Ok(())
-    }
-
-    async fn retry(&self, guard: &Guard, r: &Reservation, reason: &str) -> anyhow::Result<()> {
-        let attempt = r.attempt + 1;
-        let backoff = 2u64.saturating_pow(attempt.clamp(0, 6) as u32);
-        let not_before = OffsetDateTime::now_utc() + time::Duration::seconds(backoff as i64);
-        if !outbox::mark_retry(&self.pool, guard, r.id, not_before, attempt, reason).await? {
-            anyhow::bail!("lease lost while scheduling retry");
-        }
-        record_submit_outcome("people", "retry");
-        tracing::warn!(
-            id = r.id,
-            attempt,
-            backoff_secs = backoff,
-            reason,
-            "registration retry scheduled"
-        );
         Ok(())
     }
 }
