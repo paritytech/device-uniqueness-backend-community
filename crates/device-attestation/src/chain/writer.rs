@@ -2044,9 +2044,16 @@ impl Writer {
         r: &Reservation,
         submitted: bool,
     ) -> anyhow::Result<()> {
-        if !outbox::mark_assigned(&self.pool, guard, r.id).await? {
+        // Assignment and device consumption commit together under the lease.
+        let mut tx = self.pool.begin().await?;
+        if !lease::fence(&mut tx, &guard.lease_name, &guard.holder_id, guard.epoch).await? {
             anyhow::bail!("lease lost while assigning");
         }
+        if !outbox::mark_assigned(&mut *tx, guard, r.id).await? {
+            anyhow::bail!("lease lost while assigning");
+        }
+        crate::widevine::store::consume_for_reservation(&mut *tx, r.id).await?;
+        tx.commit().await?;
         record_submit_outcome("people", "ok");
         let waited = (OffsetDateTime::now_utc() - r.created_at).as_seconds_f64();
         if submitted {
@@ -2067,8 +2074,23 @@ impl Writer {
     }
 
     async fn fail(&self, guard: &Guard, r: &Reservation, reason: &str) -> anyhow::Result<()> {
-        if !outbox::mark_failed(&self.pool, guard, r.id, reason).await? {
+        let mut tx = self.pool.begin().await?;
+        // Fence takeover before locking the reservation. A replacement writer
+        // cannot acquire this lease until both terminal writes commit or roll
+        // back, so it never observes an active claim whose device was released.
+        if !lease::fence(&mut tx, &guard.lease_name, &guard.holder_id, guard.epoch).await? {
             anyhow::bail!("lease lost while failing");
+        }
+        if !outbox::mark_failed(&mut *tx, guard, r.id, reason).await? {
+            anyhow::bail!("lease lost while failing");
+        }
+        let released = crate::widevine::store::release_for_reservation(&mut *tx, r.id).await?;
+        tx.commit().await?;
+        if released {
+            tracing::info!(
+                id = r.id,
+                "widevine device record released with the failed claim"
+            );
         }
         record_submit_outcome("people", "terminal");
         tracing::warn!(id = r.id, username = %r.full_username, reason, "registration failed terminally");

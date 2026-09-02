@@ -72,6 +72,26 @@ pub struct RegisterRequest {
     #[serde(rename = "lifetimePoUDVoucher")]
     #[schema(rename = "lifetimePoUDVoucher", example = "base64url-voucher-key")]
     lifetime_poud_voucher: Option<String>,
+    /// Optional Android device-uniqueness evidence (Widevine PoUD): leaf-first
+    /// base64 DER attestation chain, 2-10 entries, whose leaf key was created
+    /// with `attestationChallenge = SHA-256(domain ‖ deviceChallenge ‖
+    /// accountKey ‖ deviceId)`. All three evidence fields are present
+    /// together or not at all; ignored unless `WIDEVINE_DEDUP_ENABLED`.
+    /// Sent only when the app measured Widevine L1.
+    #[serde(rename = "attestationChain")]
+    #[schema(rename = "attestationChain", example = json!(["base64-der-leaf", "base64-der-root"]))]
+    attestation_chain: Option<Vec<String>>,
+    /// Base64 32-byte single-use challenge from `/auth/challenges`, bound
+    /// into the leaf key's attestation challenge.
+    #[serde(rename = "deviceChallenge")]
+    #[schema(rename = "deviceChallenge", example = "base64-32-byte-challenge")]
+    device_challenge: Option<String>,
+    /// Base64 32-byte device pseudonym:
+    /// `SHA-256("dub/poud/widevine-id/v1" ‖ rawWidevineId)`, computed on the
+    /// device — the raw id never leaves it.
+    #[serde(rename = "deviceId")]
+    #[schema(rename = "deviceId", example = "base64-32-byte-device-id")]
+    device_id: Option<String>,
     /// Optional DotNS reservation block.
     dotns: Option<Dotns>,
 }
@@ -172,8 +192,11 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
          example = json!({ "registrationOutcome": "PAYMENT_REQUIRED",
                            "paymentAddress": "5F...", "amountRequired": "10000000000" })),
         (status = 400, description = "Validation failed (with per-field `fields`), malformed JSON, \
-            or a `lifetimePoUDVoucher` that is unknown, already used, or expired \
-            (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright).",
+            a `lifetimePoUDVoucher` that is unknown, already used, or expired \
+            (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), \
+            or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence \
+            (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, or wrong \
+            field sizes — the specific reason is logged server-side, never returned).",
          body = serde_json::Value,
          example = json!({
              "error": "The request body contains invalid values.",
@@ -184,6 +207,13 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
             lane off — with `PAYMENT_LANE_ENABLED` a missing token resolves to the 200 \
             PAYMENT_REQUIRED outcome instead).",
          body = serde_json::Value),
+        (status = 403, description = "Device evidence failed verification under \
+            `WIDEVINE_DEDUP_ENFORCE`: chain policy, the cert-bound evidence hash (challenge / \
+            account / deviceId), or a spent challenge. The specific reason is logged \
+            server-side, never returned. Retryable once \
+            with a fresh challenge; repeated failure surfaces as the paid lane.",
+         body = serde_json::Value,
+         example = json!({ "error": "DEVICE_EVIDENCE_INVALID", "message": "device evidence invalid" })),
         (status = 409, description = "Preferred digits taken, no digits available, or username taken.",
          body = serde_json::Value,
          example = json!({ "error": "Preferred digits 07 already taken for username tallesx" })),
@@ -196,7 +226,8 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
          body = serde_json::Value,
          example = json!({ "error": "iOS DeviceCheck verification failed" })),
         (status = 503, description = "The DeviceCheck free slot could not be marked used at Apple after \
-            a successful gate (upstream write failure; retryable).",
+            a successful gate (upstream write failure; retryable), or the enforced Widevine dedup gate \
+            could not fetch the attestation revocation list (`DEVICE_EVIDENCE_UNAVAILABLE`; retryable).",
          body = serde_json::Value,
          example = json!({ "error": "Failed to mark iOS device as registered with Apple DeviceCheck" }))
     )
@@ -283,6 +314,14 @@ pub async fn register(
         return payment_required(&state, &auth, &new, preferred_digits.as_deref()).await;
     }
 
+    // The Android twin of the iOS DeviceCheck gate below.
+    let widevine_device = match widevine_gate(&state, &auth, &value).await? {
+        WidevineGate::Proceed(device) => device,
+        WidevineGate::PaymentRequired => {
+            return payment_required(&state, &auth, &new, preferred_digits.as_deref()).await;
+        }
+    };
+
     // DeviceCheck is Apple iOS uniqueness, so it gates only iOS requests —
     // identified by the tamper-proof `plt` claim. A "seen device" resolves to a
     // 200 PAYMENT_REQUIRED, never an error. This query only shapes the fast path:
@@ -337,7 +376,15 @@ pub async fn register(
         None
     };
 
-    match reserve(&state, &new, mark_token.as_deref(), group).await? {
+    match reserve(
+        &state,
+        &new,
+        mark_token.as_deref(),
+        group,
+        widevine_device.as_ref(),
+    )
+    .await?
+    {
         ReserveOutcome::Reserved(id) => {
             tracing::info!(id, username = %full_username, queued = queue_lane, "username reserved");
 
@@ -374,9 +421,8 @@ pub async fn register(
             )
                 .into_response())
         }
-        // Lost the serialized claim race: a concurrent request already took this
-        // device's free slot under the lock. Same outcome as a `Blocked`
-        // verdict — a 200 PAYMENT_REQUIRED, never an error.
+        // Lost the claim race: a concurrent request took this device's free
+        // slot. Same outcome as `Blocked` — a 200, never an error.
         ReserveOutcome::DeviceAlreadyClaimed => {
             payment_required(&state, &auth, &new, preferred_digits.as_deref()).await
         }
@@ -430,9 +476,148 @@ async fn payment_required(
 /// replicas (device-attestation database namespace).
 const FREE_IOS_CLAIM_LOCK_KEY: i64 = 0x1DEA_DC01;
 
-/// Outcome of [`reserve`]. `DeviceAlreadyClaimed` only arises on the serialized
-/// free-iOS claim path, when a concurrent request won the lock and took this
-/// device's free slot first.
+/// Outcome of the Widevine gate for this claim.
+enum WidevineGate {
+    /// Proceed on the standard lane; `Some` carries the device record to
+    /// reserve atomically with the claim (enforced mode, unseen device).
+    Proceed(Option<crate::widevine::store::PendingDevice>),
+    /// Route to the payment outcome: seen device, or an enforced Android
+    /// claim without acceptable evidence.
+    PaymentRequired,
+}
+
+/// Evaluate the Widevine device evidence for this claim (wire spec v1).
+///
+/// Gate off: the evidence fields are ignored. Soft mode: verdicts are logged
+/// and routing never changes. Enforced: malformed evidence is a 400, invalid
+/// evidence a 403, a seen device or an evidence-less Android claim the payment
+/// outcome, and an unseen device proceeds carrying its `PENDING` record.
+///
+/// The challenge is consumed only after evidence fully verifies, so malformed
+/// evidence cannot burn one and a CRL outage stays retryable. The challenge is
+/// the whole gate's freshness boundary — the evidence carries no lifetime.
+async fn widevine_gate(
+    state: &AppState,
+    auth: &AuthSubject,
+    body: &Value,
+) -> UsernamesResult<WidevineGate> {
+    use crate::widevine;
+
+    let Some(cfg) = state.config.widevine.as_ref() else {
+        return Ok(WidevineGate::Proceed(None));
+    };
+    let enforce = cfg.enforce;
+    // Every reject logs its verdict in both modes. The response carries only
+    // the error code, so this log is the one place the reason survives.
+    let reject = |verdict: widevine::EvidenceError| -> UsernamesResult<WidevineGate> {
+        tracing::warn!(verdict = %verdict, enforced = enforce, "widevine evidence rejected");
+        if enforce {
+            return Err(verdict.into());
+        }
+        Ok(WidevineGate::Proceed(None))
+    };
+
+    let raw = match widevine::extract(body) {
+        Ok(raw) => raw,
+        Err(verdict) => return reject(verdict),
+    };
+    let Some(raw) = raw else {
+        // No evidence. Enforced mode routes Android claims to the paid lane;
+        // other platforms have their own gates (iOS: DeviceCheck above).
+        if enforce && auth.platform.as_deref() == Some("android") {
+            return Ok(WidevineGate::PaymentRequired);
+        }
+        return Ok(WidevineGate::Proceed(None));
+    };
+
+    // CRL unavailability is infrastructure, not a device failure: enforced
+    // mode surfaces a 503 "retry" rather than a spurious integrity reject.
+    let revoked_serials = match state.crl.revoked_serials().await {
+        Ok(serials) => serials,
+        Err(e) if enforce => {
+            tracing::warn!(error = %e, "attestation CRL unavailable (widevine enforced mode)");
+            return Err(UsernamesError::DeviceEvidenceUnavailable);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "attestation CRL unavailable (widevine soft mode, request allowed)");
+            return Ok(WidevineGate::Proceed(None));
+        }
+    };
+
+    // The JWT subject is this issuer's `0x`-hex sr25519 account key — it is
+    // folded into the cert-bound evidence hash as the candidate, so evidence
+    // can never be relayed under another account's token.
+    let subject_pubkey: Option<[u8; 32]> = auth
+        .subject
+        .strip_prefix("0x")
+        .and_then(|raw| hex::decode(raw).ok())
+        .and_then(|bytes| bytes.try_into().ok());
+    let Some(subject_pubkey) = subject_pubkey else {
+        return reject(widevine::EvidenceError::Invalid(
+            "JWT subject is not a 32-byte account key".to_string(),
+        ));
+    };
+
+    let params = widevine::VerifyParams {
+        config: &state.config,
+        widevine: cfg,
+        revoked_serials: &revoked_serials,
+        subject_pubkey: &subject_pubkey,
+        now_unix: time::OffsetDateTime::now_utc().unix_timestamp(),
+    };
+    let verified = match widevine::verify(&raw, &params) {
+        Ok(verified) => verified,
+        Err(verdict) => return reject(verdict),
+    };
+
+    // Single-use: the evidence challenge is consumed in soft mode too, so a
+    // replayed claim already logs (and later enforces) as spent. Infrastructure
+    // failures stay observational in soft mode instead of blocking the claim.
+    let challenge_consumed = match crate::auth::challenge::consume(&state.pool, &verified.challenge)
+        .await
+    {
+        Ok(consumed) => consumed,
+        Err(e) if enforce => return Err(e.into()),
+        Err(e) => {
+            tracing::warn!(error = %e, "widevine challenge consume failed (soft mode, request allowed)");
+            return Ok(WidevineGate::Proceed(None));
+        }
+    };
+    if !challenge_consumed {
+        return reject(widevine::EvidenceError::Invalid(
+            "evidence challenge is unknown, spent, or expired".to_string(),
+        ));
+    }
+
+    let seen = match widevine::store::seen(&state.pool, &verified.hmac).await {
+        Ok(seen) => seen,
+        Err(e) if enforce => return Err(e.into()),
+        Err(e) => {
+            tracing::warn!(error = %e, "widevine device lookup failed (soft mode, request allowed)");
+            return Ok(WidevineGate::Proceed(None));
+        }
+    };
+
+    if !enforce {
+        tracing::info!(
+            seen,
+            "widevine dedup verdict (soft mode, routing unchanged)"
+        );
+        return Ok(WidevineGate::Proceed(None));
+    }
+    if seen {
+        return Ok(WidevineGate::PaymentRequired);
+    }
+    Ok(WidevineGate::Proceed(Some(
+        crate::widevine::store::PendingDevice {
+            hmac: verified.hmac,
+        },
+    )))
+}
+
+/// Outcome of [`reserve`]. `DeviceAlreadyClaimed` arises when a concurrent
+/// request won a device race first: the serialized free-iOS claim (DeviceCheck
+/// lock), or the Widevine device-record unique key.
 enum ReserveOutcome {
     Reserved(i64),
     DeviceAlreadyClaimed,
@@ -440,26 +625,70 @@ enum ReserveOutcome {
 
 /// Persist the reservation.
 ///
-/// Without a `mark_token` it is a plain insert. With one (a hard-mode fresh iOS
-/// device) the whole claim is serialized under a transaction-scoped advisory
-/// lock, and Apple is re-queried *under* that lock — the gate's earlier query is
-/// already stale, so this re-check is what closes the TOCTOU. The row is
-/// inserted before the slot is marked, so an insert failure never reaches Apple
-/// and an Apple rejection rolls back.
+/// Without a `mark_token` or `widevine_device` it is a plain insert.
+///
+/// With a `widevine_device` (an enforced-mode fresh Android device) the device
+/// record is reserved `PENDING` in the same transaction as the claim: the
+/// unique `device_hmac` key is the race arbiter, so a concurrent claim
+/// for the same physical device yields `DeviceAlreadyClaimed` (mapped to a 200
+/// PAYMENT_REQUIRED) instead of a second free registration.
+///
+/// With a `mark_token` (a hard-mode fresh iOS device) the whole claim is
+/// serialized under a transaction-scoped advisory lock, and Apple is re-queried
+/// *under* that lock — the gate's earlier query is already stale, so this
+/// re-check is what closes the TOCTOU. The row is inserted before the slot is
+/// marked, so an insert failure never reaches Apple and an Apple rejection
+/// rolls back.
 ///
 /// Not fully atomic: a DB commit failure after a successful mark consumes the
 /// slot without a reservation. That fails safe — the device never gains an
 /// extra free registration.
+///
+/// The two device gates are platform-disjoint (`mark_token` is iOS-only,
+/// `widevine_device` Android-only), so at most one branch runs.
 async fn reserve(
     state: &AppState,
     new: &NewReservation,
     mark_token: Option<&[u8]>,
     queue_group: Option<u8>,
+    widevine_device: Option<&crate::widevine::store::PendingDevice>,
 ) -> UsernamesResult<ReserveOutcome> {
     let conflict = || UsernamesError::UsernameTaken {
         base: new.base.clone(),
         digits: new.digits.clone(),
     };
+
+    if let Some(device) = widevine_device {
+        let mut tx = state.pool.begin().await.map_err(|e| {
+            tracing::error!(error = ?e, "begin reservation transaction failed");
+            UsernamesError::PersistenceFailed
+        })?;
+        let id = match insert_reservation(&mut *tx, new, queue_group).await {
+            Ok(id) => id,
+            Err(InsertError::Conflict) => return Err(conflict()),
+            Err(InsertError::Db(e)) => {
+                tracing::error!(error = ?e, "reservation outbox insert failed");
+                return Err(UsernamesError::PersistenceFailed);
+            }
+        };
+        // The atomic reserve: the device record commits or rolls back with
+        // the claim itself, so a crash between the two is impossible.
+        match crate::widevine::store::insert_pending(&mut *tx, device, id).await {
+            Ok(()) => {}
+            Err(crate::widevine::store::InsertDeviceError::Seen) => {
+                return Ok(ReserveOutcome::DeviceAlreadyClaimed);
+            }
+            Err(crate::widevine::store::InsertDeviceError::Db(e)) => {
+                tracing::error!(error = ?e, "widevine device record insert failed");
+                return Err(UsernamesError::PersistenceFailed);
+            }
+        }
+        tx.commit().await.map_err(|e| {
+            tracing::error!(error = ?e, "commit reservation transaction failed");
+            UsernamesError::PersistenceFailed
+        })?;
+        return Ok(ReserveOutcome::Reserved(id));
+    }
 
     let Some(token) = mark_token else {
         return match insert_reservation(&state.pool, new, queue_group).await {

@@ -64,6 +64,22 @@ pub enum UsernamesError {
     /// client can retry.
     #[error("device registration failed")]
     DeviceRegistrationFailed,
+    /// Widevine device evidence failed structural validation — partial
+    /// fields, bad base64, wrong field sizes (enforced dedup mode; 400).
+    /// The reason is logged at the reject site, never returned.
+    #[error("device evidence malformed")]
+    DeviceEvidenceMalformed,
+    /// Widevine device evidence failed verification — chain policy, the
+    /// cert-bound evidence hash, or a spent challenge (enforced dedup
+    /// mode; 403). Retryable once with a fresh challenge. The reason is
+    /// logged at the reject site, never returned.
+    #[error("device evidence invalid")]
+    DeviceEvidenceInvalid,
+    /// The Widevine dedup gate could not be evaluated (attestation CRL
+    /// unavailable). Infrastructure, not a device failure — a 503 the
+    /// client retries.
+    #[error("device evidence verification unavailable")]
+    DeviceEvidenceUnavailable,
     /// Unexpected internal failure; logged, surfaced opaquely (500).
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
@@ -145,6 +161,30 @@ impl IntoResponse for UsernamesError {
                 })),
             )
                 .into_response(),
+            UsernamesError::DeviceEvidenceMalformed => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "DEVICE_EVIDENCE_MALFORMED",
+                    "message": "device evidence malformed"
+                })),
+            )
+                .into_response(),
+            UsernamesError::DeviceEvidenceInvalid => (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": "DEVICE_EVIDENCE_INVALID",
+                    "message": "device evidence invalid"
+                })),
+            )
+                .into_response(),
+            UsernamesError::DeviceEvidenceUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "DEVICE_EVIDENCE_UNAVAILABLE",
+                    "message": "device evidence verification unavailable"
+                })),
+            )
+                .into_response(),
             UsernamesError::Internal(err) => http_common::error::internal(&err),
         }
     }
@@ -153,6 +193,19 @@ impl IntoResponse for UsernamesError {
 impl From<sqlx::Error> for UsernamesError {
     fn from(err: sqlx::Error) -> Self {
         UsernamesError::Internal(err.into())
+    }
+}
+
+/// Map an evidence rejection to its enforced-mode HTTP outcome
+/// (`Malformed` → 400, `Invalid` → 403). Soft mode never converts —
+/// it logs the verdict instead.
+impl From<crate::widevine::EvidenceError> for UsernamesError {
+    fn from(err: crate::widevine::EvidenceError) -> Self {
+        use crate::widevine::EvidenceError;
+        match err {
+            EvidenceError::Malformed(_) => UsernamesError::DeviceEvidenceMalformed,
+            EvidenceError::Invalid(_) => UsernamesError::DeviceEvidenceInvalid,
+        }
     }
 }
 
