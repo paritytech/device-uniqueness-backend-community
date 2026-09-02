@@ -86,7 +86,7 @@ pub async fn check(
     auth: AuthSubject,
     body: Bytes,
 ) -> UsernamesResult<Response> {
-    super::check_rate_limit(&state, &auth.subject)?;
+    let () = super::check_rate_limit(&state, &auth.subject).await?;
 
     let value = super::parse_json_body(&body)?;
     let usernames = validate_usernames(&value)?;
