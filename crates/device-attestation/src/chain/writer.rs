@@ -1,24 +1,27 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::collections::HashMap;
-use std::str::FromStr as _;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    str::FromStr as _,
+    time::{Duration, Instant},
+};
 
 use anyhow::Context as _;
 use chain_types::{AssetHubExtrinsicParamsBuilder, PeopleExtrinsicParamsBuilder};
 use secrecy::{ExposeSecret as _, SecretString};
 use sqlx::PgPool;
-use subxt::client::OnlineClientAtBlockT;
-use subxt::dynamic::{self, Value};
-use subxt::error::DispatchError;
-use subxt::extrinsics::ExtrinsicEvents;
-use subxt::metadata::ArcMetadata;
-use subxt::tx::{DynamicPayload, TransactionProgress};
-use subxt::utils::AccountId32;
+use subxt::{
+    client::OnlineClientAtBlockT,
+    dynamic::Value,
+    extrinsics::ExtrinsicEvents,
+    metadata::ArcMetadata,
+    tx::{DynamicPayload, TransactionProgress},
+    utils::AccountId32,
+};
 use time::OffsetDateTime;
 
-use chain_client::{batch_item_results, settle_batch_size, WriterSigner};
+use chain_client::{settle_batch_size, WriterSigner};
 
 use super::asset_hub::{AssetHub, ValidityWindow};
 use super::lease;
@@ -26,6 +29,22 @@ use super::outbox::{self, Guard, Reservation};
 use super::people::PeopleChain;
 use super::registry::NameRegistry as _;
 use crate::dotns;
+
+mod events;
+#[cfg(test)]
+mod fixtures;
+mod observe;
+mod tx;
+
+use events::{check_proxied_call, item_results};
+use observe::{
+    record_outbox_gauges, record_spec_version, record_submit_outcome, record_writer_info,
+    zero_init_submit_outcomes,
+};
+use tx::{
+    build_registration_batch_tx, build_registration_tx, build_reserve_name_batch_tx,
+    build_reserve_name_tx,
+};
 
 /// The claim size a writer uses when `CHAIN_WRITER_BATCH_SIZE` is unset or
 /// unusable. Also the AIMD ceiling every lane climbs back to.
@@ -2093,309 +2112,6 @@ impl Writer {
     }
 }
 
-fn record_writer_info(config: &WriterConfig, signer: &AccountId32) {
-    metrics::gauge!(
-        "dub_writer_info",
-        "signer" => hex_account(&signer.0),
-        "attester" => hex_account(&config.attester),
-        "dotns_lane" => if config.dotns_gateway_enabled { "enabled" } else { "disabled" }
-    )
-    .set(1.0);
-}
-
-async fn record_spec_version<C: subxt::Config>(
-    chain: &'static str,
-    client: &subxt::OnlineClient<C>,
-) {
-    match client.at_current_block().await {
-        Ok(at) => {
-            metrics::gauge!("dub_chain_spec_version", "chain" => chain)
-                .set(at.spec_version() as f64);
-            metrics::gauge!("dub_chain_transaction_version", "chain" => chain)
-                .set(at.transaction_version() as f64);
-        }
-        Err(error) => {
-            tracing::warn!(chain, %error, "reading the runtime version failed");
-        }
-    }
-}
-
-const SUBMIT_LANES: [&str; 2] = ["people", "dotns"];
-const SUBMIT_OUTCOMES: [&str; 3] = ["ok", "retry", "terminal"];
-
-fn zero_init_submit_outcomes() {
-    for lane in SUBMIT_LANES {
-        for outcome in SUBMIT_OUTCOMES {
-            metrics::counter!("dub_chain_submit_total", "lane" => lane, "outcome" => outcome)
-                .absolute(0);
-        }
-        // Same reason, for the batch counters: "no batch has ever failed" and
-        // "the exporter is not reporting this lane" must not look alike.
-        metrics::counter!("dub_chain_batch_failed_total", "lane" => lane).absolute(0);
-        metrics::counter!("dub_chain_batch_item_failed_total", "lane" => lane).absolute(0);
-    }
-}
-
-fn record_submit_outcome(lane: &'static str, outcome: &'static str) {
-    metrics::counter!("dub_chain_submit_total", "lane" => lane, "outcome" => outcome).increment(1);
-}
-
-async fn record_outbox_gauges(pool: &PgPool) -> Result<(), sqlx::Error> {
-    for (status, depth) in outbox::depth_by_status(pool).await? {
-        let status = status.as_str();
-        metrics::gauge!("dub_outbox_depth", "status" => status).set(depth.depth as f64);
-        metrics::gauge!("dub_outbox_oldest_age_seconds", "status" => status)
-            .set(depth.oldest_age_secs.unwrap_or(0.0));
-    }
-    // The Asset Hub lane's own depths. A separate series, because a row can
-    // rest in ASSIGNED + DOTNS_FAILED_TERMINAL and one gauge cannot say both.
-    for (status, depth) in outbox::dotns_depth_by_status(pool).await? {
-        let status = status.as_str();
-        metrics::gauge!("dub_dotns_outbox_depth", "status" => status).set(depth.depth as f64);
-        metrics::gauge!("dub_dotns_outbox_oldest_age_seconds", "status" => status)
-            .set(depth.oldest_age_secs.unwrap_or(0.0));
-    }
-    Ok(())
-}
-
-/// Fail a submit whose proxied call was rejected inside a successful
-/// `Proxy.proxy` extrinsic.
-///
-/// A rejected inner call still emits `ExtrinsicSuccess`, so without this check
-/// `wait_for_success` reports a registration that never landed as `ASSIGNED`.
-fn check_proxied_call<T: subxt::Config>(
-    events: &ExtrinsicEvents<T>,
-    metadata: &ArcMetadata,
-) -> anyhow::Result<()> {
-    for event in events.iter() {
-        let event = event.context("decoding events")?;
-        if event.pallet_name() != "Proxy" || event.event_name() != "ProxyExecuted" {
-            continue;
-        }
-        if let Err(reason) = dispatch_result(event.field_bytes())? {
-            anyhow::bail!("proxied call failed: {}", describe(reason, metadata));
-        }
-    }
-    Ok(())
-}
-
-fn dispatch_result(field_bytes: &[u8]) -> anyhow::Result<Result<(), &[u8]>> {
-    match field_bytes.split_first() {
-        Some((0, _)) => Ok(Ok(())),
-        Some((1, error)) => Ok(Err(error)),
-        _ => anyhow::bail!("ProxyExecuted's result is not a Result<(), DispatchError>"),
-    }
-}
-
-fn item_results<T: subxt::Config>(
-    events: &ExtrinsicEvents<T>,
-    metadata: &ArcMetadata,
-) -> anyhow::Result<Vec<Result<(), String>>> {
-    let decoded = events
-        .iter()
-        .collect::<Result<Vec<_>, _>>()
-        .context("decoding batch events")?;
-
-    Ok(
-        batch_item_results(decoded, |event| (event.pallet_name(), event.event_name()))
-            .into_iter()
-            .map(|item| item.map_err(|event| describe(event.field_bytes(), metadata)))
-            .collect(),
-    )
-}
-
-fn describe(bytes: &[u8], metadata: &ArcMetadata) -> String {
-    match DispatchError::decode_from(bytes, metadata.clone()) {
-        Ok(DispatchError::Module(module)) => module.details_string(),
-        Ok(other) => format!("{other:?}"),
-        Err(e) => format!("undecodable dispatch error: {e}"),
-    }
-}
-
-fn build_registration_tx(
-    r: &Reservation,
-    candidate: &[u8; 32],
-    proxy_for: Option<&[u8; 32]>,
-) -> DynamicPayload<Vec<Value>> {
-    match proxy_for {
-        Some(real) => {
-            let args = vec![
-                // real: MultiAddress::Id(attester authority)
-                Value::unnamed_variant("Id", [Value::from_bytes(real)]),
-                // force_proxy_type: Option<ProxyType> = None (any granted type)
-                Value::unnamed_variant("None", []),
-                attest_call(r, candidate),
-            ];
-            dynamic::tx("Proxy", "proxy", args)
-        }
-        None => dynamic::tx("PeopleLite", "attest", attest_args(r, candidate)),
-    }
-}
-
-/// Build a whole pass as one extrinsic: `Utility.force_batch` of `attest`
-/// calls, optionally wrapped in `Proxy.proxy(real = attester authority, …)`.
-///
-/// `force_batch`, never `batch_all`: one poison row must not block its batch.
-/// The call order here **is** the positional contract the item fan-out relies
-/// on.
-///
-/// Never called with a single row — that stays a bare `attest`
-/// ([`build_registration_tx`]).
-fn build_registration_batch_tx(
-    rows: &[(&Reservation, [u8; 32])],
-    proxy_for: Option<&[u8; 32]>,
-) -> DynamicPayload<Vec<Value>> {
-    let calls = Value::unnamed_composite(
-        rows.iter()
-            .map(|(r, candidate)| attest_call(r, candidate))
-            .collect::<Vec<_>>(),
-    );
-    match proxy_for {
-        Some(real) => dynamic::tx(
-            "Proxy",
-            "proxy",
-            vec![
-                Value::unnamed_variant("Id", [Value::from_bytes(real)]),
-                Value::unnamed_variant("None", []),
-                force_batch_call(calls),
-            ],
-        ),
-        None => dynamic::tx("Utility", "force_batch", vec![calls]),
-    }
-}
-
-/// `Utility.force_batch(calls)` as a `RuntimeCall` value, for wrapping in a
-/// proxy.
-fn force_batch_call(calls: Value) -> Value {
-    Value::unnamed_variant("Utility", [Value::unnamed_variant("force_batch", [calls])])
-}
-
-/// Builds the dotNS reservation extrinsic: `DotnsGateway.reserve_name`.
-///
-/// Optionally wrapped in `Proxy.proxy(real = attester authority, …)`.
-///
-/// Argument order is asserted against the connected runtime's metadata at
-/// startup ([`AssetHub::connect`]). A chain running the older
-/// proof-of-ownership variant never reaches this function.
-fn build_reserve_name_tx(
-    r: &Reservation,
-    candidate: &[u8; 32],
-    proxy_for: Option<&[u8; 32]>,
-) -> DynamicPayload<Vec<Value>> {
-    match proxy_for {
-        Some(real) => {
-            let args = vec![
-                Value::unnamed_variant("Id", [Value::from_bytes(real)]),
-                Value::unnamed_variant("None", []),
-                reserve_name_call(r, candidate),
-            ];
-            dynamic::tx("Proxy", "proxy", args)
-        }
-        None => dynamic::tx(
-            "DotnsGateway",
-            "reserve_name",
-            reserve_name_args(r, candidate),
-        ),
-    }
-}
-
-/// Build a whole dotNS pass as one `Utility.force_batch` of `reserve_name`
-/// calls, optionally proxied. The Asset Hub twin of
-/// [`build_registration_batch_tx`], with the same positional contract.
-///
-/// Never called with a single row — that stays a bare `reserve_name`.
-fn build_reserve_name_batch_tx(
-    rows: &[(&Reservation, [u8; 32])],
-    proxy_for: Option<&[u8; 32]>,
-) -> DynamicPayload<Vec<Value>> {
-    let calls = Value::unnamed_composite(
-        rows.iter()
-            .map(|(r, candidate)| reserve_name_call(r, candidate))
-            .collect::<Vec<_>>(),
-    );
-    match proxy_for {
-        Some(real) => dynamic::tx(
-            "Proxy",
-            "proxy",
-            vec![
-                Value::unnamed_variant("Id", [Value::from_bytes(real)]),
-                Value::unnamed_variant("None", []),
-                force_batch_call(calls),
-            ],
-        ),
-        None => dynamic::tx("Utility", "force_batch", vec![calls]),
-    }
-}
-
-/// One `DotnsGateway.reserve_name` call as a `RuntimeCall` value.
-fn reserve_name_call(r: &Reservation, candidate: &[u8; 32]) -> Value {
-    Value::unnamed_variant(
-        "DotnsGateway",
-        [Value::unnamed_variant(
-            "reserve_name",
-            reserve_name_args(r, candidate),
-        )],
-    )
-}
-
-fn reserve_name_args(r: &Reservation, candidate: &[u8; 32]) -> Vec<Value> {
-    let reserved_base_label = match &r.reserved_username {
-        Some(name) => Value::unnamed_variant("Some", [Value::from_bytes(name.as_bytes())]),
-        None => Value::unnamed_variant("None", []),
-    };
-    vec![
-        Value::from_bytes(candidate),
-        sr25519_signature(r.dotns_signature.as_deref().unwrap_or_default()),
-        Value::from_bytes(r.full_username.as_bytes()),
-        Value::from_bytes(&r.identifier_key),
-        reserved_base_label,
-        Value::u128(u128::from(
-            r.dotns_signed_at.unwrap_or_default().unsigned_abs(),
-        )),
-    ]
-}
-
-fn attest_call(r: &Reservation, candidate: &[u8; 32]) -> Value {
-    Value::unnamed_variant(
-        "PeopleLite",
-        [Value::unnamed_variant("attest", attest_args(r, candidate))],
-    )
-}
-
-fn attest_args(r: &Reservation, candidate: &[u8; 32]) -> Vec<Value> {
-    let reserved_username = match &r.reserved_username {
-        Some(name) => Value::unnamed_variant("Some", [Value::from_bytes(name.as_bytes())]),
-        None => Value::unnamed_variant("None", []),
-    };
-    let consumer = Value::named_composite(vec![
-        (
-            "signature".to_string(),
-            sr25519_signature(&r.consumer_registration_signature),
-        ),
-        ("account".to_string(), Value::from_bytes(candidate)),
-        (
-            "identifier_key".to_string(),
-            Value::from_bytes(&r.identifier_key),
-        ),
-        (
-            "username".to_string(),
-            Value::from_bytes(r.full_username.as_bytes()),
-        ),
-        ("reserved_username".to_string(), reserved_username),
-    ]);
-    vec![
-        Value::from_bytes(candidate),
-        sr25519_signature(&r.candidate_signature),
-        Value::from_bytes(&r.ring_vrf_key),
-        Value::from_bytes(&r.proof_of_ownership),
-        Value::unnamed_variant("Some", [consumer]),
-    ]
-}
-
-fn sr25519_signature(bytes: &[u8]) -> Value {
-    Value::unnamed_variant("Sr25519", [Value::from_bytes(bytes)])
-}
-
 fn parse_account(ss58: &str) -> anyhow::Result<[u8; 32]> {
     Ok(AccountId32::from_str(ss58)
         .map_err(|e| anyhow::anyhow!("invalid SS58 account {ss58}: {e}"))?
@@ -2422,87 +2138,42 @@ fn env_u16(key: &str, default: u16) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    use super::fixtures::*;
     use super::*;
-    use chain_types::people::runtime_types::sp_runtime::{
-        DispatchError as RuntimeDispatchError, ModuleError,
-    };
-    use subxt::ext::scale_encode::EncodeAsType as _;
 
-    fn reservation() -> Reservation {
-        Reservation {
-            id: 1,
-            full_username: "testing.42".to_string(),
-            candidate_account_id: String::new(),
-            candidate_signature: vec![1; 64],
-            ring_vrf_key: vec![2; 32],
-            proof_of_ownership: vec![3; 64],
-            consumer_registration_signature: vec![4; 64],
-            identifier_key: vec![5; 65],
-            reserved_username: None,
-            attempt: 0,
-            dotns_signature: None,
-            dotns_signed_at: None,
-            dotns_attempt: 0,
-            created_at: OffsetDateTime::UNIX_EPOCH,
-        }
-    }
+    const FROM_ENV_VARS: &[&str] = &[
+        "DEVICE_ATTESTATION_DATABASE_URL",
+        "PEOPLE_RPC_URL",
+        "CHAIN_WRITER_SIGNER_SURI",
+        "ATTESTER_ACCOUNT",
+        "CHAIN_WRITER_HOLDER_ID",
+        "CHAIN_WRITER_LEASE_NAME",
+        "CHAIN_WRITER_LEASE_TTL_SECS",
+        "CHAIN_WRITER_POLL_SECS",
+        "CHAIN_WRITER_BATCH_SIZE",
+        "CHAIN_WRITER_FINALIZE_SECS",
+        "CHAIN_WRITER_MAX_ATTEMPTS",
+        "QUEUE_ENABLED",
+        "QUEUE_FALLBACK_AFTER_SECS",
+        "PAYMENT_POLL_INTERVAL_SECS",
+        "ATTESTER_RESOURCE_POLL_SECS",
+        "ATTESTER_ALLOWANCE_FLOOR",
+        "ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK",
+    ];
 
-    /// A lone registration submits a bare `attest`. It should not pay for a
-    /// `force_batch` wrapper, and this is the path whose `ProxyExecuted` is
-    /// still a genuine per-row verdict.
-    #[test]
-    fn a_single_row_set_submits_a_bare_attest() {
-        let reservation = reservation();
-        let candidate = [7; 32];
-        let payload = build_registration_tx(&reservation, &candidate, None);
+    const REQUIRED_ENV: &[(&str, &str)] = &[
+        (
+            "DEVICE_ATTESTATION_DATABASE_URL",
+            "postgres://writer:pw@localhost/device_attestation",
+        ),
+        ("CHAIN_WRITER_SIGNER_SURI", "//Writer"),
+        ("ATTESTER_ACCOUNT", ALICE_SS58),
+    ];
 
-        assert_eq!(payload.pallet_name(), "PeopleLite");
-        assert_eq!(payload.call_name(), "attest");
-        assert_eq!(payload.call_data(), &attest_args(&reservation, &candidate));
-    }
+    const ALICE_SS58: &str = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
 
-    /// Two rows: one `Utility.force_batch` whose calls are the rows' own
-    /// `attest`s, in claim order. That order **is** the positional contract the
-    /// item fan-out decides each row by.
-    #[test]
-    fn a_multi_row_batch_is_a_force_batch_of_attests_in_claim_order() {
-        let (first, second) = (reservation(), other_reservation());
-        let (a, b) = ([7; 32], [8; 32]);
-        let rows = [(&first, a), (&second, b)];
-        let payload = build_registration_batch_tx(&rows, None);
+    const ALICE_HEX: &str = "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d";
 
-        assert_eq!(payload.pallet_name(), "Utility");
-        assert_eq!(payload.call_name(), "force_batch");
-        assert_eq!(payload.call_data().len(), 1);
-        assert_eq!(
-            payload.call_data()[0],
-            Value::unnamed_composite([attest_call(&first, &a), attest_call(&second, &b)])
-        );
-    }
-
-    /// Proxied, the batch is the proxied call: `Proxy.proxy`'s third argument
-    /// is the whole `force_batch`, not one attest.
-    #[test]
-    fn a_proxied_batch_wraps_the_force_batch() {
-        let (first, second) = (reservation(), other_reservation());
-        let (a, b) = ([7; 32], [8; 32]);
-        let rows = [(&first, a), (&second, b)];
-        let payload = build_registration_batch_tx(&rows, Some(&[9; 32]));
-
-        assert_eq!(payload.pallet_name(), "Proxy");
-        assert_eq!(payload.call_name(), "proxy");
-        assert_eq!(
-            payload.call_data()[2],
-            force_batch_call(Value::unnamed_composite([
-                attest_call(&first, &a),
-                attest_call(&second, &b)
-            ]))
-        );
-    }
-
-    /// AIMD, and the shared backoff: a whole-batch failure halves the size and
-    /// defers the *set* once, rather than putting every row back into the very
-    /// next pass on its own `2^attempt`.
     #[test]
     fn a_failing_lane_halves_its_batch_and_backs_off_once_per_failure() {
         let mut lane = BatchLane::new("test", 25);
@@ -2513,42 +2184,29 @@ mod tests {
         assert_eq!(lane.failed(25), time::Duration::seconds(4));
         assert_eq!(lane.size, 6);
 
-        // Success clears the run and climbs back one at a time.
         lane.succeeded(25);
         assert_eq!(lane.size, 7);
         assert_eq!(lane.failed(25), time::Duration::seconds(2));
 
-        // Floor 1: the search ends at a single row, never at zero — a batch of
-        // nothing is not a submission.
         let mut floored = BatchLane::new("test", 25);
         for _ in 0..10 {
             floored.failed(25);
         }
         assert_eq!(floored.size, 1);
 
-        // The backoff exponent is clamped, so a long outage does not push the
-        // next attempt past an hour.
         assert_eq!(floored.failed(25), time::Duration::seconds(64));
     }
 
-    /// A chain that rejects every batch of two or more must not make the lane
-    /// alternate 1 -> 2 -> fail forever, paying a fee and a nonce on every other
-    /// pass. The lane remembers the size that failed and stops below it, and
-    /// only probes again after a long clean run.
     #[test]
     fn a_size_that_failed_is_remembered_and_only_re_probed_after_a_clean_run() {
         let mut lane = BatchLane::new("test", 25);
 
-        // Walk down to the floor the way a force_batch-rejecting proxy would.
-        // The halving skips 2 (3 / 2 == 1), so 3 is all the lane knows so far.
         while lane.size > 1 {
             lane.failed(25);
         }
         assert_eq!(lane.size, 1);
         assert_eq!(lane.ceiling, Some(3));
 
-        // The single row succeeds and the lane probes 2 — the one size below
-        // its ceiling it has not tried. That fails, and now it knows.
         lane.succeeded(25);
         assert_eq!(lane.size, 2);
         lane.failed(25);
@@ -2559,20 +2217,15 @@ mod tests {
             "2 is the smallest size known to fail"
         );
 
-        // From here single rows keep succeeding and the lane stays at 1 rather
-        // than climbing straight back into the size that just failed.
         for _ in 0..(CEILING_PROBE_RUN - 1) {
             lane.succeeded(25);
             assert_eq!(lane.size, 1);
         }
 
-        // Only after a long clean run does it relax the ceiling and try 2
-        // again — one wasted batch per run, not one per pass.
         lane.succeeded(25);
         assert_eq!(lane.ceiling, Some(3));
         assert_eq!(lane.size, 2);
 
-        // A lane that never failed is never capped.
         let mut healthy = BatchLane::new("test", 25);
         healthy.size = 1;
         for _ in 0..5 {
@@ -2580,37 +2233,6 @@ mod tests {
         }
         assert_eq!(healthy.size, 6);
         assert_eq!(healthy.ceiling, None);
-    }
-
-    /// A second row that differs from [`reservation`] in every field the call
-    /// carries, so an out-of-order batch cannot pass by coincidence.
-    fn other_reservation() -> Reservation {
-        Reservation {
-            id: 2,
-            full_username: "second.07".to_string(),
-            candidate_signature: vec![11; 64],
-            ring_vrf_key: vec![12; 32],
-            proof_of_ownership: vec![13; 64],
-            consumer_registration_signature: vec![14; 64],
-            identifier_key: vec![15; 65],
-            reserved_username: Some("second".to_string()),
-            ..reservation()
-        }
-    }
-
-    #[test]
-    fn proxied_registration_wraps_attest_directly() {
-        let reservation = reservation();
-        let candidate = [7; 32];
-        let proxy_for = [8; 32];
-        let payload = build_registration_tx(&reservation, &candidate, Some(&proxy_for));
-
-        assert_eq!(payload.pallet_name(), "Proxy");
-        assert_eq!(payload.call_name(), "proxy");
-        assert_eq!(
-            payload.call_data()[2],
-            attest_call(&reservation, &candidate)
-        );
     }
 
     #[test]
@@ -2699,38 +2321,6 @@ mod tests {
             SubmitFailureAction::Retry
         );
     }
-
-    const FROM_ENV_VARS: &[&str] = &[
-        "DEVICE_ATTESTATION_DATABASE_URL",
-        "PEOPLE_RPC_URL",
-        "CHAIN_WRITER_SIGNER_SURI",
-        "ATTESTER_ACCOUNT",
-        "CHAIN_WRITER_HOLDER_ID",
-        "CHAIN_WRITER_LEASE_NAME",
-        "CHAIN_WRITER_LEASE_TTL_SECS",
-        "CHAIN_WRITER_POLL_SECS",
-        "CHAIN_WRITER_BATCH_SIZE",
-        "CHAIN_WRITER_FINALIZE_SECS",
-        "CHAIN_WRITER_MAX_ATTEMPTS",
-        "QUEUE_ENABLED",
-        "QUEUE_FALLBACK_AFTER_SECS",
-        "PAYMENT_POLL_INTERVAL_SECS",
-        "ATTESTER_RESOURCE_POLL_SECS",
-        "ATTESTER_ALLOWANCE_FLOOR",
-        "ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK",
-    ];
-
-    const REQUIRED_ENV: &[(&str, &str)] = &[
-        (
-            "DEVICE_ATTESTATION_DATABASE_URL",
-            "postgres://writer:pw@localhost/device_attestation",
-        ),
-        ("CHAIN_WRITER_SIGNER_SURI", "//Writer"),
-        ("ATTESTER_ACCOUNT", ALICE_SS58),
-    ];
-
-    const ALICE_SS58: &str = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
-    const ALICE_HEX: &str = "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d";
 
     fn from_env_with(vars: &[(&str, &str)]) -> anyhow::Result<WriterConfig> {
         for key in FROM_ENV_VARS {
@@ -2882,86 +2472,6 @@ mod tests {
         assert_eq!(config.batch_size, 25);
     }
 
-    /// A `DispatchError` encoded the way a runtime writes one into an event
-    /// field: against the shape the metadata declares, not a hand-rolled guess
-    /// at the variant indices.
-    fn encoded(error: RuntimeDispatchError) -> Vec<u8> {
-        let metadata = chain_types::metadata_arc();
-        let ty = metadata
-            .dispatch_error_ty()
-            .expect("vendored metadata declares a DispatchError type");
-        let mut out = Vec::new();
-        error
-            .encode_as_type_to(ty, metadata.types(), &mut out)
-            .expect("DispatchError encodes against its own declared type");
-        out
-    }
-
-    /// A module error as a runtime encodes it into an event field.
-    fn module_error(index: u8, error: u8) -> Vec<u8> {
-        encoded(RuntimeDispatchError::Module(ModuleError {
-            index,
-            error: [error, 0, 0, 0],
-        }))
-    }
-
-    /// Regression: the silent-failure fix — a proxied call the chain rejected
-    /// was being recorded as `ASSIGNED`, because the outer extrinsic succeeds.
-    #[test]
-    fn module_errors_resolve_to_pallet_and_variant_names() {
-        let metadata = chain_types::metadata_arc();
-
-        assert_eq!(
-            describe(&module_error(62, 1), &metadata),
-            "PeopleLite::InvalidAttestationSignature"
-        );
-        assert_eq!(
-            describe(&module_error(62, 3), &metadata),
-            "PeopleLite::AlreadyRegistered"
-        );
-        assert_eq!(
-            describe(&encoded(RuntimeDispatchError::BadOrigin), &metadata),
-            "BadOrigin"
-        );
-    }
-
-    /// `ProxyExecuted` carries a `Result<(), DispatchError>`. An `Ok` is not a
-    /// verdict on anything the call contained; an `Err` must reach the operator
-    /// named, not as opaque bytes; and a third shape is a decoding failure
-    /// rather than a silent success.
-    #[test]
-    fn proxy_results_split_into_outcome_and_named_reason() {
-        let metadata = chain_types::metadata_arc();
-
-        assert_eq!(dispatch_result(&[0]).expect("Ok result"), Ok(()));
-
-        let mut err = vec![1];
-        err.extend_from_slice(&module_error(62, 3));
-        let reason = dispatch_result(&err)
-            .expect("Err result")
-            .expect_err("carries an error");
-        assert_eq!(describe(reason, &metadata), "PeopleLite::AlreadyRegistered");
-
-        assert!(dispatch_result(&[]).is_err());
-        assert!(dispatch_result(&[7]).is_err());
-    }
-
-    /// An error the vendored metadata cannot name is reported as unresolvable,
-    /// never as a different pallet's error.
-    #[test]
-    fn unresolvable_errors_are_reported_as_such() {
-        let rendered = describe(&module_error(200, 1), &chain_types::metadata_arc());
-        assert!(
-            rendered.starts_with("Unknown pallet error"),
-            "unexpected rendering: {rendered}"
-        );
-    }
-
-    /// The rendered name must still hit the `AlreadyRegistered` branch — and
-    /// only People's. Both lanes now resolve error names against their own
-    /// connected runtime and share this classifier, so the match is
-    /// pallet-qualified: a gateway error spelled the same way is a failure to
-    /// retry, not a reservation that landed.
     #[test]
     fn rendered_already_registered_still_assigns() {
         assert_eq!(
@@ -2984,49 +2494,6 @@ mod tests {
             ),
             SubmitFailureAction::Retry
         );
-    }
-
-    #[test]
-    fn direct_mode_submits_attest_unwrapped() {
-        let reservation = reservation();
-        let candidate = [7; 32];
-        let payload = build_registration_tx(&reservation, &candidate, None);
-
-        assert_eq!(payload.pallet_name(), "PeopleLite");
-        assert_eq!(payload.call_name(), "attest");
-    }
-    const WINDOW: u64 = 259_200;
-    const SKEW: u64 = 30;
-    const SIGNED_AT: i64 = 1_750_000_000;
-
-    const BOUNDS: ValidityWindow = ValidityWindow {
-        max_validity_secs: WINDOW,
-        max_future_skew_secs: SKEW,
-    };
-
-    fn signed_reservation() -> (Reservation, [u8; 32], [u8; 32]) {
-        let keypair = subxt_signer::sr25519::Keypair::from_uri(
-            &subxt_signer::SecretUri::from_str("//dotns-writer-test").expect("valid uri"),
-        )
-        .expect("keypair");
-        let candidate = keypair.public_key().0;
-        let attester = [11u8; 32];
-        let identifier_key = vec![5; 65];
-
-        let message = dotns::reservation_message(
-            &candidate,
-            &attester,
-            b"testing",
-            &identifier_key,
-            None,
-            SIGNED_AT as u64,
-        );
-
-        let mut r = reservation();
-        r.identifier_key = identifier_key;
-        r.dotns_signature = Some(keypair.sign(&message).0.to_vec());
-        r.dotns_signed_at = Some(SIGNED_AT);
-        (r, candidate, attester)
     }
 
     #[test]
@@ -3186,65 +2653,5 @@ mod tests {
             ),
             Err(DotnsReject::Expired { .. })
         ));
-    }
-
-    #[test]
-    fn direct_reservation_targets_the_gateway_pallet() {
-        let (r, candidate, _) = signed_reservation();
-        let payload = build_reserve_name_tx(&r, &candidate, None);
-
-        assert_eq!(payload.pallet_name(), "DotnsGateway");
-        assert_eq!(payload.call_name(), "reserve_name");
-        assert_eq!(payload.call_data().len(), dotns::RESERVE_NAME_FIELDS.len());
-        assert_eq!(payload.call_data(), &reserve_name_args(&r, &candidate));
-    }
-
-    /// The dotNS lane batches the same way, with the same positional contract.
-    #[test]
-    fn a_multi_row_dotns_batch_is_a_force_batch_of_reserve_names() {
-        let (first, candidate, _) = signed_reservation();
-        let mut second = first.clone();
-        second.id = 2;
-        second.full_username = "second.07".to_string();
-        let rows = [(&first, candidate), (&second, candidate)];
-
-        let direct = build_reserve_name_batch_tx(&rows, None);
-        assert_eq!(direct.pallet_name(), "Utility");
-        assert_eq!(direct.call_name(), "force_batch");
-        assert_eq!(
-            direct.call_data()[0],
-            Value::unnamed_composite([
-                reserve_name_call(&first, &candidate),
-                reserve_name_call(&second, &candidate)
-            ])
-        );
-
-        let proxied = build_reserve_name_batch_tx(&rows, Some(&[9; 32]));
-        assert_eq!(proxied.pallet_name(), "Proxy");
-        assert_eq!(proxied.call_name(), "proxy");
-        assert_eq!(
-            proxied.call_data()[2],
-            force_batch_call(direct.call_data()[0].clone())
-        );
-    }
-
-    #[test]
-    fn proxied_reservation_wraps_reserve_name_directly() {
-        let (r, candidate, _) = signed_reservation();
-        let proxy_for = [8; 32];
-        let payload = build_reserve_name_tx(&r, &candidate, Some(&proxy_for));
-
-        assert_eq!(payload.pallet_name(), "Proxy");
-        assert_eq!(payload.call_name(), "proxy");
-        assert_eq!(
-            payload.call_data()[2],
-            Value::unnamed_variant(
-                "DotnsGateway",
-                [Value::unnamed_variant(
-                    "reserve_name",
-                    reserve_name_args(&r, &candidate)
-                )]
-            )
-        );
     }
 }
