@@ -15,17 +15,17 @@ pub(super) fn check_proxied_call<T: Config>(
         if event.pallet_name() != "Proxy" || event.event_name() != "ProxyExecuted" {
             continue;
         }
-        if let Err(reason) = dispatch_result(event.field_bytes())? {
-            anyhow::bail!("proxied call failed: {}", describe(reason, metadata));
-        }
+        check_dispatch_result(event.field_bytes(), metadata)?;
     }
     Ok(())
 }
 
-fn dispatch_result(field_bytes: &[u8]) -> Result<Result<(), &[u8]>> {
+fn check_dispatch_result(field_bytes: &[u8], metadata: &ArcMetadata) -> Result<()> {
     match field_bytes.split_first() {
-        Some((0, _)) => Ok(Ok(())),
-        Some((1, error)) => Ok(Err(error)),
+        Some((0, _)) => Ok(()),
+        Some((1, error)) => {
+            anyhow::bail!("proxied call failed: {}", describe(error, metadata))
+        }
         _ => anyhow::bail!("ProxyExecuted's result is not a Result<(), DispatchError>"),
     }
 }
@@ -101,20 +101,21 @@ mod tests {
     }
 
     #[test]
-    fn proxy_results_split_into_outcome_and_named_reason() {
+    fn proxy_failures_are_reported_with_a_named_reason() {
         let metadata = chain_types::metadata_arc();
 
-        assert_eq!(dispatch_result(&[0]).expect("Ok result"), Ok(()));
+        check_dispatch_result(&[0], &metadata).expect("Ok result");
 
         let mut err = vec![1];
         err.extend_from_slice(&module_error(62, 3));
-        let reason = dispatch_result(&err)
-            .expect("Err result")
-            .expect_err("carries an error");
-        assert_eq!(describe(reason, &metadata), "PeopleLite::AlreadyRegistered");
+        let reason = check_dispatch_result(&err, &metadata).expect_err("Err result");
+        assert_eq!(
+            reason.to_string(),
+            "proxied call failed: PeopleLite::AlreadyRegistered"
+        );
 
-        assert!(dispatch_result(&[]).is_err());
-        assert!(dispatch_result(&[7]).is_err());
+        assert!(check_dispatch_result(&[], &metadata).is_err());
+        assert!(check_dispatch_result(&[7], &metadata).is_err());
     }
 
     #[test]
