@@ -571,14 +571,32 @@ async fn widevine_gate(
     };
 
     // Single-use: the evidence challenge is consumed in soft mode too, so a
-    // replayed claim already logs (and later enforces) as spent.
-    if !crate::auth::challenge::consume(&state.pool, &verified.challenge).await? {
+    // replayed claim already logs (and later enforces) as spent. Infrastructure
+    // failures stay observational in soft mode instead of blocking the claim.
+    let challenge_consumed = match crate::auth::challenge::consume(&state.pool, &verified.challenge)
+        .await
+    {
+        Ok(consumed) => consumed,
+        Err(e) if enforce => return Err(e.into()),
+        Err(e) => {
+            tracing::warn!(error = %e, "widevine challenge consume failed (soft mode, request allowed)");
+            return Ok(WidevineGate::Proceed(None));
+        }
+    };
+    if !challenge_consumed {
         return reject(widevine::EvidenceError::Invalid(
             "evidence challenge is unknown, spent, or expired".to_string(),
         ));
     }
 
-    let seen = widevine::store::seen(&state.pool, &verified.hmac).await?;
+    let seen = match widevine::store::seen(&state.pool, &verified.hmac).await {
+        Ok(seen) => seen,
+        Err(e) if enforce => return Err(e.into()),
+        Err(e) => {
+            tracing::warn!(error = %e, "widevine device lookup failed (soft mode, request allowed)");
+            return Ok(WidevineGate::Proceed(None));
+        }
+    };
 
     if !enforce {
         tracing::info!(
@@ -658,9 +676,6 @@ async fn reserve(
         match crate::widevine::store::insert_pending(&mut *tx, device, id).await {
             Ok(()) => {}
             Err(crate::widevine::store::InsertDeviceError::Seen) => {
-                if let Err(rb) = tx.rollback().await {
-                    tracing::error!(error = ?rb, "rollback after lost device-record race failed");
-                }
                 return Ok(ReserveOutcome::DeviceAlreadyClaimed);
             }
             Err(crate::widevine::store::InsertDeviceError::Db(e)) => {

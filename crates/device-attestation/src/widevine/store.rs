@@ -33,18 +33,16 @@ pub enum InsertDeviceError {
 /// Whether the device HMAC is already recorded (`PENDING` or `CONSUMED`
 /// both count — a pending claim holds the slot).
 pub async fn seen(pool: &PgPool, hmac: &[u8; 32]) -> Result<bool, sqlx::Error> {
-    let row = sqlx::query("SELECT 1 FROM widevine_devices WHERE device_hmac = $1 LIMIT 1")
+    let row = sqlx::query("SELECT 1 FROM widevine_devices WHERE device_hmac = $1")
         .bind(&hmac[..])
         .fetch_optional(pool)
         .await?;
     Ok(row.is_some())
 }
 
-/// Insert the `PENDING` device record tied to `reservation_id`. Generic over
-/// the executor so it runs inside the reservation's transaction — the atomic
-/// reserve the spec requires. A unique violation on `device_hmac` maps to
-/// [`InsertDeviceError::Seen`] (a concurrent claim recorded the device
-/// first).
+/// Insert the `PENDING` device record tied to `reservation_id`. A unique
+/// violation on `device_hmac` maps to [`InsertDeviceError::Seen`] when a
+/// concurrent claim records the device first.
 pub async fn insert_pending<'e, E>(
     executor: E,
     device: &PendingDevice,
@@ -71,35 +69,41 @@ where
 /// Mark the reservation's `PENDING` device record `CONSUMED` (on-chain
 /// success) and clear `reservation_id` — once the claim has landed, the
 /// table remembers only that the device used its free slot, never which
-/// username it registered. Returns the number of rows advanced (0 when the
-/// claim carried no device evidence).
-pub async fn consume_for_reservation(
-    pool: &PgPool,
+/// username it registered. Reservations without a pending Widevine record are
+/// successful no-ops.
+pub async fn consume_for_reservation<'e, E>(
+    executor: E,
     reservation_id: i64,
-) -> Result<u64, sqlx::Error> {
-    let done = sqlx::query(
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(
         "UPDATE widevine_devices \
          SET status = 'CONSUMED', reservation_id = NULL, updated_at = now() \
          WHERE reservation_id = $1 AND status = 'PENDING'",
     )
     .bind(reservation_id)
-    .execute(pool)
+    .execute(executor)
     .await?;
-    Ok(done.rows_affected())
+    Ok(())
 }
 
 /// Release the reservation's `PENDING` device record (terminal claim
 /// failure): the row is deleted so the device can claim again. `CONSUMED`
-/// rows are never released. Returns the number of rows released.
-pub async fn release_for_reservation(
-    pool: &PgPool,
+/// rows are never released. Returns whether a row was released.
+pub async fn release_for_reservation<'e, E>(
+    executor: E,
     reservation_id: i64,
-) -> Result<u64, sqlx::Error> {
+) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let done = sqlx::query(
         "DELETE FROM widevine_devices WHERE reservation_id = $1 AND status = 'PENDING'",
     )
     .bind(reservation_id)
-    .execute(pool)
+    .execute(executor)
     .await?;
-    Ok(done.rows_affected())
+    Ok(done.rows_affected() > 0)
 }
