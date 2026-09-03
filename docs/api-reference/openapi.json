@@ -495,7 +495,7 @@
             }
           },
           "409": {
-            "description": "Preferred digits taken, no digits available, username taken, or the claim carries `dotns.reservedUsername` for a full-person name that is already owned or whose reservation queue is full. The runtime checks that leg *before* it writes the lite username, and the consumer signature covers it, so submitting would cost the whole registration and no server-side retry could rescue it. Re-sign without `dotns.reservedUsername` to claim the lite name, or pick another base.",
+            "description": "Preferred digits taken, no digits available, username taken, or the claim carries `dotns.reservedUsername` for a full-person name that is already owned or whose reservation queue is full — checked against the reserved name itself, which `attest` takes as its own argument and which need not be `username`. The runtime checks that leg *before* it writes the lite username, and the consumer signature covers it, so submitting would cost the whole registration and no server-side retry could rescue it. Re-sign for another `dotns.reservedUsername`.",
             "content": {
               "application/json": {
                 "schema": {},
@@ -1271,7 +1271,7 @@
               "string",
               "null"
             ],
-            "description": "Optional reserved-name override.",
+            "description": "The bare full-person name to reserve. Its own name on chain — it need\nnot be `username`, and availability is checked against *this* name, not\nagainst the base of the lite username in the same claim.",
             "example": "reservedname"
           }
         }

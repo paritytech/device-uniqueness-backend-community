@@ -37,10 +37,14 @@ pub enum UsernamesError {
         /// The selected two-digit suffix.
         digits: String,
     },
-    /// The full-person name is owned, or its reservation
-    /// queue is full (409).
+    /// The `dotns.reservedUsername` full-person name is owned, or its
+    /// reservation queue is full (409).
+    ///
+    /// Carries the name the claim asked to *reserve*, which is what was
+    /// checked — not the base of the lite username, which the runtime never
+    /// looks at for this leg.
     #[error("full name unavailable")]
-    FullNameUnavailable { base: String },
+    FullNameUnavailable { reserved: String },
     /// The authenticated account has no queued registration (404, new
     /// `/api/v1/registration/queue` surface).
     #[error("no queue entry")]
@@ -117,12 +121,15 @@ impl IntoResponse for UsernamesError {
                 Json(json!({ "error": format!("No digits available for username {base}.") })),
             )
                 .into_response(),
-            UsernamesError::FullNameUnavailable { base } => (
+            // No "re-submit without dotns.reservedUsername" escape hatch: every
+            // client reserves unconditionally and none is planned that does
+            // not, so the only advice a caller can act on is another name.
+            UsernamesError::FullNameUnavailable { reserved } => (
                 StatusCode::CONFLICT,
                 Json(json!({
                     "error": format!(
-                        "The full name {base} is not available to reserve. Re-submit without \
-                         dotns.reservedUsername to claim {base}.NN, or choose another name."
+                        "The full name {reserved} is not available to reserve. \
+                         Choose another name."
                     )
                 })),
             )

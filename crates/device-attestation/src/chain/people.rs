@@ -19,6 +19,25 @@ fn owner_key(
     people::runtime_types::bounded_collections::bounded_vec::BoundedVec(username.as_ref().to_vec())
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReservationState {
+    /// The bare name is owned as a full-person username.
+    pub full_name_owned: bool,
+    /// Accounts queued for the bare name.
+    pub queue_len: u32,
+    pub queue_capacity: u32,
+}
+
+impl ReservationState {
+    pub fn queue_full(&self) -> bool {
+        self.queue_len >= self.queue_capacity
+    }
+
+    pub fn rejects(&self) -> bool {
+        self.full_name_owned || self.queue_full()
+    }
+}
+
 /// Everything under one base username that decides whether a claim can land, checked at a
 /// single block.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -33,12 +52,20 @@ pub struct BaseState {
 }
 
 impl BaseState {
+    pub fn reservation(&self) -> ReservationState {
+        ReservationState {
+            full_name_owned: self.full_name_owned,
+            queue_len: self.queue_len,
+            queue_capacity: self.queue_capacity,
+        }
+    }
+
     pub fn reservation_queue_full(&self) -> bool {
-        self.queue_len >= self.queue_capacity
+        self.reservation().queue_full()
     }
 
     pub fn rejects_reservations(&self) -> bool {
-        self.full_name_owned || self.reservation_queue_full()
+        self.reservation().rejects()
     }
 }
 
@@ -202,6 +229,45 @@ impl PeopleChain {
         })
     }
 
+    /// The reservation state of one bare full-person name.
+    pub async fn reservation_state(&self, name: &str) -> anyhow::Result<ReservationState> {
+        let at = self.client.at_current_block().await?;
+        let block_hash = at.block_hash();
+        let owners = at
+            .storage()
+            .entry(people::storage().resources().username_owner_of())?;
+        let queue = at
+            .storage()
+            .entry(people::storage().resources().username_reservation_queue())?;
+        let keys = [
+            owners.fetch_key((owner_key(name),))?,
+            queue.fetch_key((owner_key(name),))?,
+        ];
+
+        let values = storage::fetch_many(&self.rpc, &keys, block_hash)
+            .await
+            .context("reading username reservation state")?;
+        let [full_name, reservation_queue] = values.as_slice() else {
+            anyhow::bail!("batched reservation-state read returned too few values");
+        };
+
+        Ok(ReservationState {
+            full_name_owned: full_name.is_some(),
+            queue_len: match reservation_queue {
+                Some(bytes) => decode_queue_len(bytes)?,
+                None => 0,
+            },
+            queue_capacity: at
+                .constants()
+                .entry(
+                    people::constants()
+                        .resources()
+                        .max_reservation_queue_length(),
+                )
+                .context("reading Resources::MaxReservationQueueLength")?,
+        })
+    }
+
     pub async fn username_owners(
         &self,
         names: &[&str],
@@ -265,5 +331,28 @@ mod tests {
         assert!(state(10, false).rejects_reservations());
         assert!(state(11, false).rejects_reservations());
         assert!(state(0, true).rejects_reservations());
+    }
+
+    #[test]
+    fn the_reservation_half_of_a_base_state_matches_a_standalone_read() {
+        for (queue_len, full_name_owned) in
+            [(0, false), (9, false), (10, false), (11, false), (0, true)]
+        {
+            let base = BaseState {
+                taken: BTreeSet::from([1, 2, 3]),
+                full_name_owned,
+                queue_len,
+                queue_capacity: 10,
+            };
+            let standalone = ReservationState {
+                full_name_owned,
+                queue_len,
+                queue_capacity: 10,
+            };
+
+            assert_eq!(base.reservation(), standalone);
+            assert_eq!(base.rejects_reservations(), standalone.rejects());
+            assert_eq!(base.reservation_queue_full(), standalone.queue_full());
+        }
     }
 }

@@ -26,7 +26,7 @@ use crate::{
 };
 
 use super::error::{FieldError, UsernamesError, UsernamesResult};
-use super::{available_digits, base_state, MAX_BASE_LEN};
+use super::{available_digits, base_state, reservation_state, MAX_BASE_LEN};
 
 /// The flat registration request (documentation mirror — the handler
 /// validates raw JSON so it can report every failing field).
@@ -108,7 +108,9 @@ pub(crate) struct Dotns {
     #[serde(rename = "signedAt")]
     #[schema(rename = "signedAt", example = 1780000000i64)]
     signed_at: i64,
-    /// Optional reserved-name override.
+    /// The bare full-person name to reserve. Its own name on chain — it need
+    /// not be `username`, and availability is checked against *this* name, not
+    /// against the base of the lite username in the same claim.
     #[serde(rename = "reservedUsername")]
     #[schema(rename = "reservedUsername", example = "reservedname")]
     reserved_username: Option<String>,
@@ -217,10 +219,11 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
          example = json!({ "error": "DEVICE_EVIDENCE_INVALID", "message": "device evidence invalid" })),
         (status = 409, description = "Preferred digits taken, no digits available, username taken, or \
             the claim carries `dotns.reservedUsername` for a full-person name that is already owned \
-            or whose reservation queue is full. The runtime checks that leg *before* it writes the \
-            lite username, and the consumer signature covers it, so submitting would cost the whole \
-            registration and no server-side retry could rescue it. Re-sign without \
-            `dotns.reservedUsername` to claim the lite name, or pick another base.",
+            or whose reservation queue is full — checked against the reserved name itself, which \
+            `attest` takes as its own argument and which need not be `username`. The runtime checks \
+            that leg *before* it writes the lite username, and the consumer signature covers it, so \
+            submitting would cost the whole registration and no server-side retry could rescue it. \
+            Re-sign for another `dotns.reservedUsername`.",
          body = serde_json::Value,
          example = json!({ "error": "Preferred digits 07 already taken for username tallesx" })),
         (status = 429, description = "Subject rate limit exceeded (with `Retry-After`).",
@@ -251,10 +254,17 @@ pub async fn register(
     let mut parsed = validate_register(&value, &state.config)?;
 
     let base = base_state(&state, &parsed.username).await?;
-    if reserves_full_name(&parsed) && base.rejects_reservations() {
-        return Err(UsernamesError::FullNameUnavailable {
-            base: parsed.username.clone(),
-        });
+    if let Some(reserved) = reserved_name(&parsed) {
+        let reservation = if reserved == parsed.username {
+            base.reservation()
+        } else {
+            reservation_state(&state, reserved).await?
+        };
+        if reservation.rejects() {
+            return Err(UsernamesError::FullNameUnavailable {
+                reserved: reserved.to_string(),
+            });
+        }
     }
     let digit = select_digit(
         &base.taken,
@@ -848,11 +858,9 @@ struct ParsedDotns {
     reserved_username: Option<String>,
 }
 
-fn reserves_full_name(parsed: &ParsedRegister) -> bool {
-    parsed
-        .dotns
-        .as_ref()
-        .is_some_and(|d| d.reserved_username.is_some())
+/// The full-person name this claim asks to reserve, if it asks for one.
+fn reserved_name(parsed: &ParsedRegister) -> Option<&str> {
+    parsed.dotns.as_ref()?.reserved_username.as_deref()
 }
 
 /// Validate `Device-Token-iOS`: base64, when present.
@@ -1608,22 +1616,68 @@ mod tests {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
 
         let plain = validate_register(&valid_body(), &config).expect("valid");
-        assert!(
-            !reserves_full_name(&plain),
+        assert_eq!(
+            reserved_name(&plain),
+            None,
             "no dotns block means no reservation leg"
         );
 
         let mut without = valid_body();
         without["dotns"] = dotns_block(now, None, &config);
-        assert!(!reserves_full_name(
-            &validate_register(&without, &config).expect("valid")
-        ));
+        assert_eq!(
+            reserved_name(&validate_register(&without, &config).expect("valid")),
+            None
+        );
 
         let mut with = valid_body();
         with["dotns"] = dotns_block(now, Some("aliceuser"), &config);
-        assert!(reserves_full_name(
-            &validate_register(&with, &config).expect("valid")
-        ));
+        assert_eq!(
+            reserved_name(&validate_register(&with, &config).expect("valid")),
+            Some("aliceuser")
+        );
+    }
+
+    /// The name the preflight gates on is the one the runtime reserves, not
+    /// the base of the lite username — `attest` takes them as separate
+    /// arguments and nothing requires them to agree.
+    #[test]
+    fn the_reserved_name_is_read_from_the_dotns_block_not_the_username() {
+        let config = config();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+
+        let mut body = valid_body();
+        assert_eq!(body["username"], json!("aliceuser"));
+        body["dotns"] = dotns_block(now, Some("reservedname"), &config);
+
+        let parsed = validate_register(&body, &config).expect("valid");
+        assert_eq!(reserved_name(&parsed), Some("reservedname"));
+    }
+
+    /// The 409 names the name that was actually checked — the reserved one,
+    /// not the base of the lite username, which the runtime never consults for
+    /// this leg and which the old message printed in its place.
+    #[tokio::test]
+    async fn the_full_name_conflict_names_the_reserved_name() {
+        use axum::response::IntoResponse as _;
+        use http_body_util::BodyExt as _;
+
+        let response = UsernamesError::FullNameUnavailable {
+            reserved: "reservedname".to_string(),
+        }
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("read body")
+            .to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).expect("json body");
+        assert_eq!(
+            body["error"],
+            json!("The full name reservedname is not available to reserve. Choose another name.")
+        );
     }
 
     fn dotns_block(

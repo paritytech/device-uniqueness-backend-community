@@ -25,7 +25,10 @@ use serde_json::Value;
 use utoipa::ToSchema;
 
 use crate::{
-    chain::{outbox, people::BaseState},
+    chain::{
+        outbox,
+        people::{BaseState, ReservationState},
+    },
     http::state::AppState,
 };
 
@@ -75,6 +78,17 @@ pub(crate) async fn base_state(state: &AppState, base: &str) -> UsernamesResult<
         taken: merge_discriminators(chain.taken, pending),
         ..chain
     })
+}
+
+pub(crate) async fn reservation_state(
+    state: &AppState,
+    name: &str,
+) -> UsernamesResult<ReservationState> {
+    state
+        .chain
+        .reservation_state(name)
+        .await
+        .map_err(UsernamesError::from)
 }
 
 /// Subject-keyed rate limit for the authenticated usernames surface (never

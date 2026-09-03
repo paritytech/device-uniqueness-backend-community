@@ -218,10 +218,14 @@ Operational invariants an agent must respect when touching the code.
   chain is reconciled to it. No service reads another service's tables.
 - **A claim's optional full-name reservation is checked before it is accepted, because it cannot be
   dropped afterwards.** `dotns.reservedUsername` is relayed into `attest`'s `reserved_username` — the
-  bare, undiscriminated *full-person* name. The runtime validates that leg **before** it writes the
-  lite username, so a name already owned (`Resources::UsernameReservationTaken`), a reservation
-  queue at `Resources::MaxReservationQueueLength` (`QueueFull`), or an account that already reserved
-  (`AlreadyHasReservation`) costs the caller the **whole** registration, not just the reservation.
+  bare, undiscriminated *full-person* name. It is **its own name**: `attest` takes it as a separate
+  argument from the lite username, and nothing requires it to be that username's base, so the
+  preflight reads the reservation state of the reserved name — not of the base being claimed under —
+  and only skips the extra read when the two are equal. The runtime validates that leg **before** it
+  writes the lite username, so a name already owned (`Resources::UsernameReservationTaken`), a
+  reservation queue at `Resources::MaxReservationQueueLength` (`QueueFull`), or an account that
+  already reserved (`AlreadyHasReservation`) costs the caller the **whole** registration, not just
+  the reservation.
   The writer cannot resubmit without the reservation: the consumer signature covers
   `reserved_username`, so only the client can re-sign. Intake therefore refuses such a claim with a
   `409` before a row or a fee exists, and the writer treats all three as deterministic rejections so
@@ -232,9 +236,10 @@ Operational invariants an agent must respect when touching the code.
   and the queue length are read in the same batched `state_queryStorageAt` as the 100 discriminator
   keys, so they cost no extra round trip and cannot disagree about their block.
   *Trade-off:* `base.NN` is genuinely claimable by a caller that sends no `dotns.reservedUsername`,
-  and reporting `EXHAUSTED` withholds it. That is correct while every shipping client reserves
-  unconditionally; revisit it — making the last two conditions contingent on the caller's declared
-  intent — once a client can claim without reserving.
+  and reporting `EXHAUSTED` withholds it. That costs nothing in practice: every client reserves
+  unconditionally and no client is planned that can register without the reservation leg, so the
+  withheld case has no caller. Making the last two conditions contingent on the caller's declared
+  intent would only pay off if that changed.
 - **The writer submits a whole pass as one extrinsic.** A claimed set becomes one
   `Utility.force_batch` of `attest` calls (proxied as a whole when the signer is a delegate), so N
   registrations cost one finalization rather than N. `force_batch`, never `batch_all`: one poison row
