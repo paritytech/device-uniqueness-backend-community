@@ -1305,7 +1305,7 @@
         "properties": {
           "status": {
             "type": "string",
-            "description": "`AVAILABLE`, `EXHAUSTED` (nothing claimable under this base), or\n`INVALID` (fails base rules).",
+            "description": "`AVAILABLE`, `EXHAUSTED` (nothing claimable under this base), or `INVALID` (fails base rules).",
             "example": "AVAILABLE"
           },
           "availableDigits": {
