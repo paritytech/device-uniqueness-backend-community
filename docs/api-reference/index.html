@@ -1743,7 +1743,7 @@ device — the raw id never leaves it.</td></tr>
                 <span class="sc-code c409">409</span>
                 <span class="sc-label">Preferred digits 07 already taken for username tallesx</span>
               </div>
-              <div class="sc-desc">Preferred digits taken, no digits available, or username taken.</div>
+              <div class="sc-desc">Preferred digits taken, no digits available, username taken, or the claim carries <code>dotns.reservedUsername</code> for a full-person name that is already owned or whose reservation queue is full. The runtime checks that leg *before* it writes the lite username, and the consumer signature covers it, so submitting would cost the whole registration and no server-side retry could rescue it. Re-sign without <code>dotns.reservedUsername</code> to claim the lite name, or pick another base.</div>
             </div>
             <div class="status-card">
               <div class="sc-head">
@@ -1836,6 +1836,9 @@ device — the raw id never leaves it.</td></tr>
         <span class="n">3</span>
       <span class="p">]</span>
     <span class="p">}</span><span class="p">,</span>
+    <span class="s">"takenx"</span><span class="p">:</span> <span class="p">{</span>
+      <span class="s">"status"</span><span class="p">:</span> <span class="s">"EXHAUSTED"</span>
+    <span class="p">}</span><span class="p">,</span>
     <span class="s">"abc"</span><span class="p">:</span> <span class="p">{</span>
       <span class="s">"status"</span><span class="p">:</span> <span class="s">"INVALID"</span>
     <span class="p">}</span>
@@ -1872,7 +1875,7 @@ device — the raw id never leaves it.</td></tr>
                 <span class="sc-code c200">200</span>
                 <span class="sc-label">OK</span>
               </div>
-              <div class="sc-desc">Per-base availability read from People Chain UsernameOwnerOf plus pending outbox reservations, tagged <code>{_tag: &quot;v1&quot;, value}</code> with availableDigits.</div>
+              <div class="sc-desc">Per-base availability read from People Chain UsernameOwnerOf plus pending outbox reservations, tagged <code>{_tag: &quot;v1&quot;, value}</code> with availableDigits. <code>EXHAUSTED</code> means nothing claimable under this base: no free discriminator, or the bare full-person name is owned or its reservation queue is full — the last two would make a claim carrying <code>dotns.reservedUsername</code> fail on chain and take the lite username with it.</div>
             </div>
             <div class="status-card">
               <div class="sc-head">

@@ -495,7 +495,7 @@
             }
           },
           "409": {
-            "description": "Preferred digits taken, no digits available, or username taken.",
+            "description": "Preferred digits taken, no digits available, username taken, or the claim carries `dotns.reservedUsername` for a full-person name that is already owned or whose reservation queue is full. The runtime checks that leg *before* it writes the lite username, and the consumer signature covers it, so submitting would cost the whole registration and no server-side retry could rescue it. Re-sign without `dotns.reservedUsername` to claim the lite name, or pick another base.",
             "content": {
               "application/json": {
                 "schema": {},
@@ -573,7 +573,7 @@
         },
         "responses": {
           "200": {
-            "description": "Per-base availability read from People Chain UsernameOwnerOf plus pending outbox reservations, tagged `{_tag: \"v1\", value}` with availableDigits.",
+            "description": "Per-base availability read from People Chain UsernameOwnerOf plus pending outbox reservations, tagged `{_tag: \"v1\", value}` with availableDigits. `EXHAUSTED` means nothing claimable under this base: no free discriminator, or the bare full-person name is owned or its reservation queue is full — the last two would make a claim carrying `dotns.reservedUsername` fail on chain and take the lite username with it.",
             "content": {
               "application/json": {
                 "schema": {
@@ -589,6 +589,9 @@
                         2,
                         3
                       ]
+                    },
+                    "takenx": {
+                      "status": "EXHAUSTED"
                     },
                     "abc": {
                       "status": "INVALID"
@@ -1302,7 +1305,7 @@
         "properties": {
           "status": {
             "type": "string",
-            "description": "`AVAILABLE`, `EXHAUSTED` (all 100 taken), or `INVALID` (fails base rules).",
+            "description": "`AVAILABLE`, `EXHAUSTED` (nothing claimable under this base), or\n`INVALID` (fails base rules).",
             "example": "AVAILABLE"
           },
           "availableDigits": {
