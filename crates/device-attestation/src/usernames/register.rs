@@ -3,15 +3,27 @@
 
 use std::{collections::BTreeSet, str::FromStr as _};
 
-use axum::{body::Bytes,extract::State,http::{HeaderMap, StatusCode},Json, response::{IntoResponse as _, Response}};
+use axum::{
+    body::Bytes,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse as _, Response},
+    Json,
+};
 use base64::Engine as _;
 use http_common::AuthSubject;
-use rand::{rngs::OsRng,seq::SliceRandom as _};
+use rand::{rngs::OsRng, seq::SliceRandom as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
-use crate::{chain::outbox::{self, InsertError, NewReservation}, device_check::{self, Decision}, eligibility, http::state::AppState, payment, queue};
+use crate::{
+    chain::outbox::{self, InsertError, NewReservation},
+    device_check::{self, Decision},
+    eligibility,
+    http::state::AppState,
+    payment, queue,
+};
 
 use super::error::{FieldError, UsernamesError, UsernamesResult};
 use super::{available_digits, base_state, MAX_BASE_LEN};

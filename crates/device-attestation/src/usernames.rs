@@ -7,13 +7,27 @@ pub mod register;
 
 use std::collections::BTreeSet;
 
-use axum::{body::Bytes, extract::{Request, State}, http::{header::{HeaderMap, HeaderValue}, StatusCode}, Json,middleware::Next, response::{IntoResponse, Response}, Router, routing::post};
+use axum::{
+    body::Bytes,
+    extract::{Request, State},
+    http::{
+        header::{HeaderMap, HeaderValue},
+        StatusCode,
+    },
+    middleware::Next,
+    response::{IntoResponse, Response},
+    routing::post,
+    Json, Router,
+};
 use http_common::error::not_found;
 use serde::Serialize;
 use serde_json::Value;
 use utoipa::ToSchema;
 
-use crate::{chain::{outbox,people::BaseState}, http::state::AppState};
+use crate::{
+    chain::{outbox, people::BaseState},
+    http::state::AppState,
+};
 
 use self::error::{UsernamesError, UsernamesResult};
 

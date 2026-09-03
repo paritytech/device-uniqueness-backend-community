@@ -3,7 +3,12 @@
 
 use std::collections::BTreeMap;
 
-use axum::{body::Bytes, extract::State, Json, response::{IntoResponse, Response}};
+use axum::{
+    body::Bytes,
+    extract::State,
+    response::{IntoResponse, Response},
+    Json,
+};
 use http_common::AuthSubject;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,7 +16,11 @@ use utoipa::ToSchema;
 
 use crate::http::state::AppState;
 
-use super::{error::{FieldError, UsernamesError, UsernamesResult}, available_digits, base_state, is_valid_base};
+use super::{
+    available_digits, base_state,
+    error::{FieldError, UsernamesError, UsernamesResult},
+    is_valid_base,
+};
 use crate::chain::people::BaseState;
 
 const MAX_USERNAMES: usize = 100;
