@@ -559,9 +559,9 @@ pub async fn status(
     // Own bucket, subject-keyed (the queue-status precedent): polling here
     // must not eat the claim path's quota.
     let key = format!("/api/v1/usernames/payment-status:{}", auth.subject);
-    if !state.limiter.allow(&key) {
+    if let Err(err) = state.limiter.allow(key).await {
         return Err(UsernamesError::RateLimited {
-            retry_after_secs: state.config.auth_rate_window.as_secs(),
+            retry_after_secs: err.wait_time_from(state.limiter.current_time()).as_secs(),
         });
     }
     let row = sqlx::query(
