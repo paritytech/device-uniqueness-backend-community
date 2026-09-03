@@ -1,9 +1,7 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{http::StatusCode, Json, response::{IntoResponse, Response}};
 pub use http_common::FieldError;
 use serde_json::json;
 
@@ -35,6 +33,10 @@ pub enum UsernamesError {
         /// The selected two-digit suffix.
         digits: String,
     },
+    /// The full-person name is owned, or its reservation
+    /// queue is full (409).
+    #[error("full name unavailable")]
+    FullNameUnavailable { base: String },
     /// The authenticated account has no queued registration (404, new
     /// `/api/v1/registration/queue` surface).
     #[error("no queue entry")]
@@ -109,6 +111,16 @@ impl IntoResponse for UsernamesError {
             UsernamesError::NoDigitsAvailable { base } => (
                 StatusCode::CONFLICT,
                 Json(json!({ "error": format!("No digits available for username {base}.") })),
+            )
+                .into_response(),
+            UsernamesError::FullNameUnavailable { base } => (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": format!(
+                        "The full name {base} is not available to reserve. Re-submit without \
+                         dotns.reservedUsername to claim {base}.NN, or choose another name."
+                    )
+                })),
             )
                 .into_response(),
             UsernamesError::UsernameTaken { base, digits } => (

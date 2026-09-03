@@ -1,31 +1,20 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::collections::BTreeSet;
-use std::str::FromStr as _;
+use std::{collections::BTreeSet, str::FromStr as _};
 
-use axum::body::Bytes;
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse as _, Response};
-use axum::Json;
+use axum::{body::Bytes,extract::State,http::{HeaderMap, StatusCode},Json, response::{IntoResponse as _, Response}};
 use base64::Engine as _;
 use http_common::AuthSubject;
-use rand::rngs::OsRng;
-use rand::seq::SliceRandom as _;
+use rand::{rngs::OsRng,seq::SliceRandom as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
-use crate::chain::outbox::{self, InsertError, NewReservation};
-use crate::device_check::{self, Decision};
-use crate::eligibility;
-use crate::http::state::AppState;
-use crate::payment;
-use crate::queue;
+use crate::{chain::outbox::{self, InsertError, NewReservation}, device_check::{self, Decision}, eligibility, http::state::AppState, payment, queue};
 
 use super::error::{FieldError, UsernamesError, UsernamesResult};
-use super::{available_digits, taken_discriminators, MAX_BASE_LEN};
+use super::{available_digits, base_state, MAX_BASE_LEN};
 
 /// The flat registration request (documentation mirror — the handler
 /// validates raw JSON so it can report every failing field).
@@ -214,7 +203,12 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
             with a fresh challenge; repeated failure surfaces as the paid lane.",
          body = serde_json::Value,
          example = json!({ "error": "DEVICE_EVIDENCE_INVALID", "message": "device evidence invalid" })),
-        (status = 409, description = "Preferred digits taken, no digits available, or username taken.",
+        (status = 409, description = "Preferred digits taken, no digits available, username taken, or \
+            the claim carries `dotns.reservedUsername` for a full-person name that is already owned \
+            or whose reservation queue is full. The runtime checks that leg *before* it writes the \
+            lite username, and the consumer signature covers it, so submitting would cost the whole \
+            registration and no server-side retry could rescue it. Re-sign without \
+            `dotns.reservedUsername` to claim the lite name, or pick another base.",
          body = serde_json::Value,
          example = json!({ "error": "Preferred digits 07 already taken for username tallesx" })),
         (status = 429, description = "Subject rate limit exceeded (with `Retry-After`).",
@@ -244,8 +238,17 @@ pub async fn register(
     let value = super::parse_json_body(&body)?;
     let mut parsed = validate_register(&value, &state.config)?;
 
-    let taken = taken_discriminators(&state, &parsed.username).await?;
-    let digit = select_digit(&taken, parsed.preferred_digits.as_deref(), &parsed.username)?;
+    let base = base_state(&state, &parsed.username).await?;
+    if reserves_full_name(&parsed) && base.rejects_reservations() {
+        return Err(UsernamesError::FullNameUnavailable {
+            base: parsed.username.clone(),
+        });
+    }
+    let digit = select_digit(
+        &base.taken,
+        parsed.preferred_digits.as_deref(),
+        &parsed.username,
+    )?;
     let digits = format!("{digit:02}");
     let full_username = format!("{}.{digits}", parsed.username);
     let voucher = parsed.voucher.take();
@@ -831,6 +834,13 @@ struct ParsedDotns {
     signature: Vec<u8>,
     signed_at: i64,
     reserved_username: Option<String>,
+}
+
+fn reserves_full_name(parsed: &ParsedRegister) -> bool {
+    parsed
+        .dotns
+        .as_ref()
+        .is_some_and(|d| d.reserved_username.is_some())
 }
 
 /// Validate `Device-Token-iOS`: base64, when present.
@@ -1578,6 +1588,30 @@ mod tests {
         let parsed = validate_register(&valid, &enabled).expect("valid dotns");
         let dotns = parsed.dotns.expect("dotns parsed");
         assert_eq!(dotns.reserved_username.as_deref(), Some("reservedname"));
+    }
+
+    #[test]
+    fn only_a_claim_that_asks_for_the_full_name_is_preflighted() {
+        let config = config();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+
+        let plain = validate_register(&valid_body(), &config).expect("valid");
+        assert!(
+            !reserves_full_name(&plain),
+            "no dotns block means no reservation leg"
+        );
+
+        let mut without = valid_body();
+        without["dotns"] = dotns_block(now, None, &config);
+        assert!(!reserves_full_name(
+            &validate_register(&without, &config).expect("valid")
+        ));
+
+        let mut with = valid_body();
+        with["dotns"] = dotns_block(now, Some("aliceuser"), &config);
+        assert!(reserves_full_name(
+            &validate_register(&with, &config).expect("valid")
+        ));
     }
 
     fn dotns_block(
