@@ -536,7 +536,25 @@ const UNFUNDED_SIGNER: &str = "Inability to pay some fees";
 
 const UNFUNDED_PARK_BACKOFF_SECS: i64 = 300;
 
-const DETERMINISTIC_REJECTIONS: &[&str] = &["Resources::UsernameReservationTaken"];
+/// Rejections that another submission cannot talk the runtime out of, so the
+/// row fails on the first pass rather than paying `max_attempts` fees for the
+/// same answer.
+///
+/// All three come from `attest`'s optional `reserved_username` leg, which the
+/// runtime checks *before* it writes the lite username — so they cost the whole
+/// registration. The intake preflight refuses these claims before a row exists;
+/// what reaches here raced that check (a queue that filled in between). The
+/// writer cannot resubmit without the reservation, because the consumer
+/// signature covers it — only the client can re-sign.
+///
+/// `QueueFull` is not immutable in principle: entries expire and
+/// `remove_expired_username_reservation` is permissionless. But nothing drains
+/// within the seconds our backoff spans, so retrying only buys more fees.
+const DETERMINISTIC_REJECTIONS: &[&str] = &[
+    "Resources::UsernameReservationTaken",
+    "Resources::QueueFull",
+    "Resources::AlreadyHasReservation",
+];
 
 fn is_deterministic_rejection(reason: &str) -> bool {
     DETERMINISTIC_REJECTIONS
@@ -2209,6 +2227,47 @@ mod tests {
         assert_eq!(
             classify_submit_failure(
                 "proxied call failed: Resources::Whatever",
+                None,
+                candidate,
+                1,
+                8
+            ),
+            SubmitFailureAction::Retry
+        );
+    }
+
+    #[test]
+    fn every_reservation_leg_rejection_fails_on_the_first_pass() {
+        let candidate = [7; 32];
+        // All three abort `attest` before the lite username is written, and the
+        // consumer signature covers `reserved_username`, so no resubmission
+        // this writer can build would land. Retrying only spends fees.
+        for error in [
+            "Resources::UsernameReservationTaken",
+            "Resources::QueueFull",
+            "Resources::AlreadyHasReservation",
+        ] {
+            let reason = format!("proxied call failed: {error}");
+            assert_eq!(
+                classify_submit_failure(&reason, None, candidate, 1, 8),
+                SubmitFailureAction::Fail,
+                "{error} should not be retried"
+            );
+            assert!(
+                terminal_reason(&reason).starts_with("rejected deterministically, not retried"),
+                "{error} should be reported as a deterministic rejection"
+            );
+        }
+    }
+
+    #[test]
+    fn a_queue_full_from_another_pallet_still_retries() {
+        // The match is a substring test, so the guard is the pallet prefix.
+        // Only `Resources`' queue bounds the reservation leg.
+        let candidate = [7; 32];
+        assert_eq!(
+            classify_submit_failure(
+                "proxied call failed: DotnsGateway::QueueFull",
                 None,
                 candidate,
                 1,
