@@ -5611,6 +5611,7 @@ dependencies = [
  "bs58",
  "chain-types",
  "ed25519-dalek",
+ "futures",
  "hex",
  "hkdf",
  "hmac 0.12.1",
