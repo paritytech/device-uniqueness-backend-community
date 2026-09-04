@@ -47,15 +47,26 @@ pub enum IndexError {
     SnapshotNumber(u64),
 }
 
-/// Index every finalized block from the stored checkpoint up to the head.
+/// Index every finalized block from the stored checkpoint up to the head,
+/// reading the finalized head itself.
+pub async fn index_finalized_range(
+    pool: &PgPool,
+    chain: &PeopleChain,
+) -> Result<Option<IndexReport>, IndexError> {
+    let head_number = chain.finalized_head_number().await?;
+    index_finalized_range_to(pool, chain, head_number).await
+}
+
+/// Index every finalized block from the stored checkpoint up to `head_number`.
 ///
 /// Takes the projection lock with `pg_try_advisory_lock`, returning `Ok(None)`
 /// when another instance holds it. Commits per block, so an interrupted pass
 /// never advances past the last fully-written one. A zero report means the
 /// checkpoint row is missing (bootstrap seeds it at startup).
-pub async fn index_finalized_range(
+pub async fn index_finalized_range_to(
     pool: &PgPool,
     chain: &PeopleChain,
+    head_number: u64,
 ) -> Result<Option<IndexReport>, IndexError> {
     let mut lock_connection = pool.acquire().await?;
     lock_connection.close_on_drop();
@@ -84,12 +95,6 @@ pub async fn index_finalized_range(
     let checkpoint = checkpoint_row.try_get::<i64, _>("last_finalized_number")?;
     let checkpoint = u64::try_from(checkpoint).unwrap_or(0);
 
-    let head = chain
-        .online()
-        .at_current_block()
-        .await
-        .map_err(|source| ChainError::Query(Box::new(source)))?;
-    let head_number = head.block_number();
     if head_number <= checkpoint {
         return Ok(Some(IndexReport {
             from_block: checkpoint,

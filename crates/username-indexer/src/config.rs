@@ -22,7 +22,9 @@ pub struct Config {
     pub people_rpc_url: String,
     /// Maximum number of storage entries requested and written per page.
     pub storage_page_size: u32,
-    /// Poll interval, in seconds, for new finalized blocks.
+    /// Longest the sync loop waits without a finalized header, in seconds,
+    /// before forcing a pass anyway. Not a poll interval — the timer resets on
+    /// every header, so on a healthy subscription it never fires.
     pub sync_interval_secs: u32,
     /// Requests per window per client IP on the public search route.
     pub search_rate_limit: u32,

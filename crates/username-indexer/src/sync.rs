@@ -4,13 +4,14 @@
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use futures::{FutureExt as _, Stream, StreamExt as _};
 use serde::Serialize;
 use sqlx::{PgPool, Row as _};
 use time::OffsetDateTime;
 
 use crate::chain::PeopleChain;
 use crate::config::Config;
-use crate::incremental::index_finalized_range;
+use crate::incremental::{index_finalized_range_to, IndexError, IndexReport};
 
 const BACKOFF_BASE_SECS: u64 = 1;
 const BACKOFF_MAX_SECS: u64 = 60;
@@ -74,70 +75,235 @@ pub async fn checkpoint_freshness(pool: &PgPool) -> Result<Option<FreshnessSnaps
     }))
 }
 
+/// What woke a sync pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wake {
+    /// Finalized headers arrived; the payload is the highest number drained.
+    Block(u64),
+    /// The fallback timer fired without a header.
+    Timer,
+    /// The subscription ended or failed.
+    Resubscribe,
+}
+
+impl Wake {
+    fn as_str(self) -> &'static str {
+        match self {
+            Wake::Block(_) => "block",
+            Wake::Timer => "timer",
+            Wake::Resubscribe => "resubscribe",
+        }
+    }
+
+    /// The finalized head this wake already knows, saving the pass a round-trip.
+    ///
+    /// A subscribed header number is a *lower bound* on the finalized head —
+    /// the subscription cannot run ahead of finality — so indexing up to it is
+    /// always safe, and the next header closes any gap. `Resubscribe` yields
+    /// nothing on purpose: a number from a stream that just died is not one to
+    /// index against.
+    fn head(self) -> Option<u64> {
+        match self {
+            Wake::Block(number) => Some(number),
+            Wake::Timer | Wake::Resubscribe => None,
+        }
+    }
+}
+
 /// Run the incremental finalized resync loop until the task is dropped.
 ///
-/// Ticks on the configured interval and updates `freshness` on success; on
-/// failure logs and waits a bounded exponential backoff, never advancing the
-/// checkpoint. The caller bootstraps, so this waits one interval first.
+/// Driven by a finalized-header subscription, so a registration reaches search
+/// within a block of finality instead of within `sync_interval_secs`. Headers
+/// are only a *signal*: every pass re-reads the checkpoint and indexes up to
+/// the head, so a coalesced or dropped header costs nothing. The interval
+/// survives as the fallback timer — the safety net for a subscription that goes
+/// quiet without erroring.
+///
+/// A failed pass logs and waits a bounded exponential backoff, never advancing
+/// the checkpoint. A dropped subscription backs off on the same counter, so a
+/// node that accepts a subscription and closes it immediately cannot spin.
 pub async fn run(pool: PgPool, chain: PeopleChain, config: Config, freshness: Freshness) {
-    let mut interval = tokio::time::interval(Duration::from_secs(config.sync_interval_secs.into()));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    interval.tick().await;
-
+    let fallback = Duration::from_secs(config.sync_interval_secs.into());
     let mut consecutive_failures = 0_u32;
+
     loop {
-        interval.tick().await;
-        let started = Instant::now();
-        // Before indexing, so the gauges describe the backlog this pass is
-        // about to work through rather than the zero left behind it.
-        if let Err(error) = record_lag_gauges(&pool, &chain).await {
-            tracing::warn!(error = ?error, "checkpoint lag gauge pass failed");
-        }
-        match index_finalized_range(&pool, &chain).await {
-            Ok(Some(report)) => {
-                consecutive_failures = 0;
-                freshness.update(FreshnessSnapshot {
-                    last_finalized_number: report.to_block,
-                    last_synced_at: OffsetDateTime::now_utc(),
-                    records_indexed: report.accounts_upserted,
-                    decode_failures: report.decode_failures,
-                });
-                tracing::info!(
-                    from_block = report.from_block,
-                    to_block = report.to_block,
-                    blocks_processed = report.blocks_processed,
-                    accounts_upserted = report.accounts_upserted,
-                    accounts_deleted = report.accounts_deleted,
-                    decode_failures = report.decode_failures,
-                    duration_ms = started.elapsed().as_millis() as u64,
-                    "finalized resync complete"
-                );
-            }
-            Ok(None) => {
-                consecutive_failures = 0;
-                tracing::debug!("another instance holds the projection lock; skipping this pass");
-            }
+        let blocks = match chain.finalized_blocks().await {
+            Ok(blocks) => blocks,
             Err(error) => {
+                metrics::gauge!("dub_indexer_subscribed").set(0.0);
                 consecutive_failures = consecutive_failures.saturating_add(1);
                 let delay = backoff(consecutive_failures);
                 tracing::warn!(
                     error = ?error,
                     consecutive_failures,
                     backoff_secs = delay.as_secs(),
-                    "finalized resync failed; retrying"
+                    "subscribing to finalized blocks failed; retrying"
                 );
                 tokio::time::sleep(delay).await;
+                continue;
+            }
+        };
+        // Only the number is ever read, and keeping the block would pin a
+        // `BlockRef` the node is asked to hold unpruned. The error is boxed
+        // because `BlocksError` is far larger than the number beside it.
+        let mut headers = blocks.map(|item| item.map(|block| block.number()).map_err(Box::new));
+        // Subscribing is not yet evidence of a working subscription, so the
+        // failure counter is left alone; a completed pass is what clears it.
+        metrics::gauge!("dub_indexer_subscribed").set(1.0);
+        tracing::info!(
+            fallback_secs = fallback.as_secs(),
+            "subscribed to finalized block headers"
+        );
+
+        loop {
+            let wake = wait_for_wake(&mut headers, fallback).await;
+
+            // The stream died rather than delivered, so there is nothing new to
+            // index. Back off here instead of after a pointless pass: a pass
+            // would succeed with zero blocks, clear the counter, and turn a
+            // subscription that dies on arrival into a hot loop.
+            if wake == Wake::Resubscribe {
+                metrics::counter!("dub_indexer_resubscribes_total").increment(1);
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                let delay = backoff(consecutive_failures);
+                tracing::warn!(
+                    consecutive_failures,
+                    backoff_secs = delay.as_secs(),
+                    "finalized block subscription dropped; resubscribing"
+                );
+                tokio::time::sleep(delay).await;
+                break;
+            }
+
+            let started = Instant::now();
+            match pass(&pool, &chain, wake.head()).await {
+                Ok(Some(report)) => {
+                    consecutive_failures = 0;
+                    freshness.update(FreshnessSnapshot {
+                        last_finalized_number: report.to_block,
+                        last_synced_at: OffsetDateTime::now_utc(),
+                        records_indexed: report.accounts_upserted,
+                        decode_failures: report.decode_failures,
+                    });
+                    if report.blocks_processed > 0 {
+                        tracing::info!(
+                            wake = wake.as_str(),
+                            from_block = report.from_block,
+                            to_block = report.to_block,
+                            blocks_processed = report.blocks_processed,
+                            accounts_upserted = report.accounts_upserted,
+                            accounts_deleted = report.accounts_deleted,
+                            decode_failures = report.decode_failures,
+                            duration_ms = started.elapsed().as_millis() as u64,
+                            "finalized resync complete"
+                        );
+                    } else {
+                        tracing::debug!(
+                            wake = wake.as_str(),
+                            to_block = report.to_block,
+                            "finalized resync found no new blocks"
+                        );
+                    }
+                }
+                Ok(None) => {
+                    consecutive_failures = 0;
+                    tracing::debug!(
+                        "another instance holds the projection lock; skipping this pass"
+                    );
+                }
+                Err(error) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    let delay = backoff(consecutive_failures);
+                    tracing::warn!(
+                        error = ?error,
+                        wake = wake.as_str(),
+                        consecutive_failures,
+                        backoff_secs = delay.as_secs(),
+                        "finalized resync failed; retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+
+        metrics::gauge!("dub_indexer_subscribed").set(0.0);
+    }
+}
+
+/// Wait for the next reason to run a pass.
+///
+/// Returns as soon as one header is available, then drains whatever the
+/// subscription already holds, so a burst — a catch-up after a backoff, or
+/// finality advancing several blocks at once — costs one pass rather than one
+/// per block. Generic over the header stream so the whole state machine is
+/// testable without a chain.
+///
+/// Both drops are safe: `StreamExt::next` is cancel-safe, so neither the
+/// `select!` losing the race nor `now_or_never` finding the stream pending can
+/// swallow a header.
+async fn wait_for_wake<S, E>(headers: &mut S, fallback: Duration) -> Wake
+where
+    S: Stream<Item = Result<u64, E>> + Unpin,
+    E: std::fmt::Debug,
+{
+    let first = tokio::select! {
+        item = headers.next() => item,
+        () = tokio::time::sleep(fallback) => return Wake::Timer,
+    };
+    let mut head = match first {
+        Some(Ok(number)) => number,
+        Some(Err(error)) => {
+            tracing::warn!(error = ?error, "finalized block subscription failed");
+            return Wake::Resubscribe;
+        }
+        None => {
+            tracing::warn!("finalized block subscription ended");
+            return Wake::Resubscribe;
+        }
+    };
+
+    while let Some(ready) = headers.next().now_or_never() {
+        match ready {
+            Some(Ok(number)) => head = head.max(number),
+            Some(Err(error)) => {
+                tracing::warn!(error = ?error, "finalized block subscription failed");
+                return Wake::Resubscribe;
+            }
+            None => {
+                tracing::warn!("finalized block subscription ended");
+                return Wake::Resubscribe;
             }
         }
     }
+
+    Wake::Block(head)
+}
+
+/// Record the lag gauges, then index everything up to the finalized head.
+///
+/// `known_head` is the number the subscription already delivered. Without one —
+/// the fallback timer, which is also how a quiet stream recovers — the head
+/// costs an `at_current_block` round-trip, so the hot path avoids it.
+async fn pass(
+    pool: &PgPool,
+    chain: &PeopleChain,
+    known_head: Option<u64>,
+) -> Result<Option<IndexReport>, IndexError> {
+    let head = match known_head {
+        Some(number) => number,
+        None => chain.finalized_head_number().await?,
+    };
+    if let Err(error) = record_lag_gauges(pool, head).await {
+        tracing::warn!(error = ?error, "checkpoint lag gauge pass failed");
+    }
+    index_finalized_range_to(pool, chain, head).await
 }
 
 /// Record the finalized head, the checkpoint, and the gap between them.
 ///
 /// The gap is the projection's real staleness — search answers from the
 /// checkpoint, so it can grow while every individual pass reports success.
-async fn record_lag_gauges(pool: &PgPool, chain: &PeopleChain) -> anyhow::Result<()> {
-    let head = chain.online().at_current_block().await?.block_number();
+async fn record_lag_gauges(pool: &PgPool, head: u64) -> Result<(), sqlx::Error> {
     metrics::gauge!("dub_chain_finalized_head_block").set(head as f64);
 
     let Some(snapshot) = checkpoint_freshness(pool).await? else {
@@ -163,9 +329,92 @@ fn backoff(consecutive_failures: u32) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use futures::channel::mpsc;
     use time::macros::datetime;
 
-    use super::{backoff, Freshness, FreshnessSnapshot, BACKOFF_MAX_SECS};
+    use super::{backoff, wait_for_wake, Freshness, FreshnessSnapshot, Wake, BACKOFF_MAX_SECS};
+
+    const FALLBACK: Duration = Duration::from_secs(30);
+
+    /// One finalized header, or the subscription failing to produce it.
+    type Header = Result<u64, String>;
+
+    /// A header channel standing in for the finalized subscription. Dropping the
+    /// sender ends the stream the way a closed subscription does.
+    fn headers() -> (
+        mpsc::UnboundedSender<Header>,
+        mpsc::UnboundedReceiver<Header>,
+    ) {
+        mpsc::unbounded()
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_headers_costs_one_pass_at_the_highest_number() {
+        let (sender, mut stream) = headers();
+        for number in [7, 8, 9] {
+            sender.unbounded_send(Ok(number)).expect("send header");
+        }
+
+        let wake = wait_for_wake(&mut stream, FALLBACK).await;
+        assert_eq!(wake, Wake::Block(9));
+        // The pass indexes checkpoint+1..=9 in one go rather than three times.
+        assert_eq!(wake.head(), Some(9));
+    }
+
+    #[tokio::test]
+    async fn a_quiet_subscription_falls_back_to_the_timer() {
+        let (_sender, mut stream) = headers();
+
+        // Real elapsed time, so it is deliberately short: `tokio`'s clock
+        // control lives behind the `test-util` feature this workspace does not
+        // enable, and the fallback duration is a parameter either way.
+        let wake = wait_for_wake(&mut stream, Duration::from_millis(10)).await;
+        assert_eq!(wake, Wake::Timer);
+        // No header means no head; the pass reads one over RPC instead.
+        assert_eq!(wake.head(), None);
+    }
+
+    #[tokio::test]
+    async fn an_ended_subscription_asks_to_resubscribe() {
+        let (sender, mut stream) = headers();
+        drop(sender);
+
+        assert_eq!(
+            wait_for_wake(&mut stream, FALLBACK).await,
+            Wake::Resubscribe
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_header_asks_to_resubscribe() {
+        let (sender, mut stream) = headers();
+        sender
+            .unbounded_send(Err("connection reset".to_string()))
+            .expect("send failure");
+
+        assert_eq!(
+            wait_for_wake(&mut stream, FALLBACK).await,
+            Wake::Resubscribe
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_while_draining_outranks_the_headers_before_it() {
+        let (sender, mut stream) = headers();
+        sender.unbounded_send(Ok(5)).expect("send header");
+        sender
+            .unbounded_send(Err("connection reset".to_string()))
+            .expect("send failure");
+
+        // Block 5 is not lost — the next pass indexes up to the head it reads
+        // for itself. Carrying the number forward from a dead stream is what
+        // would be wrong.
+        let wake = wait_for_wake(&mut stream, FALLBACK).await;
+        assert_eq!(wake, Wake::Resubscribe);
+        assert_eq!(wake.head(), None);
+    }
 
     #[test]
     fn backoff_grows_exponentially_then_caps() {

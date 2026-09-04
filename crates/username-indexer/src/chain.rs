@@ -4,8 +4,7 @@
 use std::sync::Arc;
 
 use chain_types::PeopleConfig;
-use subxt::backend::LegacyBackend;
-use subxt::OnlineClient;
+use subxt::{backend::LegacyBackend, client::Blocks, OnlineClient};
 use subxt_rpcs::client::{ReconnectingRpcClient, RpcClient};
 
 /// Boxed chain transport or metadata error.
@@ -59,6 +58,22 @@ impl PeopleChain {
 
     pub fn online(&self) -> &OnlineClient<PeopleConfig> {
         &self.client
+    }
+
+    pub async fn finalized_blocks(&self) -> Result<Blocks<PeopleConfig>, ChainError> {
+        self.client
+            .stream_blocks()
+            .await
+            .map_err(|source| ChainError::Query(Box::new(source)))
+    }
+
+    pub async fn finalized_head_number(&self) -> Result<u64, ChainError> {
+        Ok(self
+            .client
+            .at_current_block()
+            .await
+            .map_err(|source| ChainError::Query(Box::new(source)))?
+            .block_number())
     }
 
     /// Verify that a current finalized block is reachable.

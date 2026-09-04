@@ -8,6 +8,20 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Changed
+
+- **`username-indexer` syncs on finalized headers instead of a timer.** The
+  resync loop now subscribes to the People Chain's finalized block stream and
+  indexes on each header, so a newly registered username reaches
+  `GET /api/v1/usernames/search` about a block after finality rather than up to
+  `SYNC_INTERVAL_SECS` (default 30s) later. Headers are only a signal — every
+  pass still re-reads the checkpoint and indexes up to the head — so a dropped
+  or coalesced header costs nothing, and a burst is drained into one pass.
+  `SYNC_INTERVAL_SECS` keeps its name and default but is now the fallback: the
+  longest the loop sits without a header before forcing a pass anyway. Nothing
+  to change in an environment. Two new metrics: `dub_indexer_subscribed` (1 while
+  the subscription is live) and `dub_indexer_resubscribes_total`.
+
 ## [0.5.0] - 2026-09-02
 
 ### Fixed
