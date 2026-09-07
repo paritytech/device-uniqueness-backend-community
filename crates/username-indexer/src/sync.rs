@@ -116,41 +116,32 @@ impl Wake {
     }
 }
 
-/// Run the incremental resync loop until the task is dropped.
-///
-/// Driven by a **best**-block header subscription, so a registration reaches
-/// search about a block after it is authored instead of within
-/// `sync_interval_secs`. Headers are only a *signal*: every pass re-reads the
-/// checkpoint, reads the finalized head from the chain, and indexes up to it, so
-/// a coalesced or dropped header costs nothing. The interval survives as the
-/// fallback timer — the safety net for a subscription that goes quiet without
-/// erroring, in which case the pass asks for the best head over RPC rather than
-/// leaving the speculative window unreconciled.
-///
-/// A failed pass logs and waits a bounded exponential backoff, never advancing
-/// the checkpoint. A dropped subscription backs off on the same counter, so a
-/// node that accepts a subscription and closes it immediately cannot spin.
 pub async fn run(pool: PgPool, chain: PeopleChain, config: Config, freshness: Freshness) {
     let fallback = Duration::from_secs(config.sync_interval_secs.into());
-    let mut consecutive_failures = 0_u32;
-    // Outlives the subscription: a resubscribe does not invalidate what we
-    // already read from heights finality has yet to reach.
-    let mut cache = SpeculativeCache::new();
+    let mut subscribe_failures = 0_u32;
+    let mut state = PassState {
+        consecutive_failures: 0,
+        // Outlives the subscription: a resubscribe does not invalidate what we
+        // already read from heights finality has yet to reach.
+        cache: SpeculativeCache::new(),
+        last_pass: None,
+    };
 
     loop {
         let blocks = match chain.best_blocks().await {
             Ok(blocks) => blocks,
             Err(error) => {
                 metrics::gauge!("dub_indexer_subscribed").set(0.0);
-                consecutive_failures = consecutive_failures.saturating_add(1);
-                let delay = backoff(consecutive_failures);
+                subscribe_failures = subscribe_failures.saturating_add(1);
+                let delay = backoff(subscribe_failures);
                 tracing::warn!(
                     error = ?error,
-                    consecutive_failures,
+                    subscribe_failures,
                     backoff_secs = delay.as_secs(),
                     "subscribing to best blocks failed; retrying"
                 );
                 tokio::time::sleep(delay).await;
+                degraded_pass(&pool, &chain, &config, &freshness, &mut state, fallback).await;
                 continue;
             }
         };
@@ -158,8 +149,9 @@ pub async fn run(pool: PgPool, chain: PeopleChain, config: Config, freshness: Fr
         // `BlockRef` the node is asked to hold unpruned. The error is boxed
         // because `BlocksError` is far larger than the number beside it.
         let mut headers = blocks.map(|item| item.map(|block| block.number()).map_err(Box::new));
-        // Subscribing is not yet evidence of a working subscription, so the
-        // failure counter is left alone; a completed pass is what clears it.
+        // Subscribing is not yet evidence of a working subscription, so neither
+        // failure counter is cleared here; a delivered header clears
+        // `subscribe_failures`, a completed pass clears the pass counter.
         metrics::gauge!("dub_indexer_subscribed").set(1.0);
         tracing::info!(
             fallback_secs = fallback.as_secs(),
@@ -170,90 +162,134 @@ pub async fn run(pool: PgPool, chain: PeopleChain, config: Config, freshness: Fr
             let wake = wait_for_wake(&mut headers, fallback).await;
 
             // The stream died rather than delivered, so there is nothing new to
-            // index. Back off here instead of after a pointless pass: a pass
-            // would succeed with zero blocks, clear the counter, and turn a
-            // subscription that dies on arrival into a hot loop.
+            // index from it. Back off before resubscribing, then still run a
+            // timer pass if the interval has elapsed — the subscription being
+            // broken is exactly when the fallback has to carry the projection.
             if wake == Wake::Resubscribe {
                 metrics::counter!("dub_indexer_resubscribes_total").increment(1);
-                consecutive_failures = consecutive_failures.saturating_add(1);
-                let delay = backoff(consecutive_failures);
+                subscribe_failures = subscribe_failures.saturating_add(1);
+                let delay = backoff(subscribe_failures);
                 tracing::warn!(
-                    consecutive_failures,
+                    subscribe_failures,
                     backoff_secs = delay.as_secs(),
                     "best block subscription dropped; resubscribing"
                 );
                 tokio::time::sleep(delay).await;
+                degraded_pass(&pool, &chain, &config, &freshness, &mut state, fallback).await;
                 break;
             }
 
-            let started = Instant::now();
-            match pass(
-                &pool,
-                &chain,
-                wake.best_head(),
-                config.speculative_indexing,
-                &mut cache,
-            )
-            .await
-            {
-                Ok(Some(report)) => {
-                    consecutive_failures = 0;
-                    let finalized = report.finalized;
-                    freshness.update(FreshnessSnapshot {
-                        last_finalized_number: finalized.to_block,
-                        last_synced_at: OffsetDateTime::now_utc(),
-                        records_indexed: finalized.accounts_upserted,
-                        decode_failures: finalized.decode_failures,
-                    });
-                    let speculative_change = report.speculative.is_some_and(|speculative| {
-                        speculative.accounts_admitted > 0 || speculative.accounts_retracted > 0
-                    });
-                    if finalized.blocks_processed > 0 || speculative_change {
-                        tracing::info!(
-                            wake = wake.as_str(),
-                            from_block = finalized.from_block,
-                            to_block = finalized.to_block,
-                            blocks_processed = finalized.blocks_processed,
-                            accounts_upserted = finalized.accounts_upserted,
-                            accounts_deleted = finalized.accounts_deleted,
-                            decode_failures = finalized.decode_failures,
-                            speculative_to_block = report.speculative.map(|s| s.to_block),
-                            speculative_admitted = report.speculative.map(|s| s.accounts_admitted),
-                            speculative_retracted =
-                                report.speculative.map(|s| s.accounts_retracted),
-                            duration_ms = started.elapsed().as_millis() as u64,
-                            "resync complete"
-                        );
-                    } else {
-                        tracing::debug!(
-                            wake = wake.as_str(),
-                            to_block = finalized.to_block,
-                            "resync found nothing new"
-                        );
-                    }
-                }
-                Ok(None) => {
-                    consecutive_failures = 0;
-                    tracing::debug!(
-                        "another instance holds the projection lock; skipping this pass"
-                    );
-                }
-                Err(error) => {
-                    consecutive_failures = consecutive_failures.saturating_add(1);
-                    let delay = backoff(consecutive_failures);
-                    tracing::warn!(
-                        error = ?error,
-                        wake = wake.as_str(),
-                        consecutive_failures,
-                        backoff_secs = delay.as_secs(),
-                        "finalized resync failed; retrying"
-                    );
-                    tokio::time::sleep(delay).await;
-                }
+            // A header arrived, so the subscription is working: stop pacing
+            // resubscription as if it were not.
+            if matches!(wake, Wake::Block(_)) {
+                subscribe_failures = 0;
             }
+
+            run_pass(&pool, &chain, &config, &freshness, &mut state, wake).await;
         }
 
         metrics::gauge!("dub_indexer_subscribed").set(0.0);
+    }
+}
+
+/// Loop state that outlives any one subscription.
+struct PassState {
+    /// Consecutive *pass* failures, pacing the post-failure backoff.
+    consecutive_failures: u32,
+    cache: SpeculativeCache,
+    /// When the last pass was attempted, so the degraded path can hold to the
+    /// fallback interval instead of firing on every resubscribe backoff.
+    last_pass: Option<Instant>,
+}
+
+async fn degraded_pass(
+    pool: &PgPool,
+    chain: &PeopleChain,
+    config: &Config,
+    freshness: &Freshness,
+    state: &mut PassState,
+    fallback: Duration,
+) {
+    if !fallback_is_due(state.last_pass, fallback) {
+        return;
+    }
+    run_pass(pool, chain, config, freshness, state, Wake::Timer).await;
+}
+
+fn fallback_is_due(last_pass: Option<Instant>, fallback: Duration) -> bool {
+    last_pass.is_none_or(|last| last.elapsed() >= fallback)
+}
+
+async fn run_pass(
+    pool: &PgPool,
+    chain: &PeopleChain,
+    config: &Config,
+    freshness: &Freshness,
+    state: &mut PassState,
+    wake: Wake,
+) {
+    let started = Instant::now();
+    state.last_pass = Some(started);
+    match pass(
+        pool,
+        chain,
+        wake.best_head(),
+        config.speculative_indexing,
+        &mut state.cache,
+    )
+    .await
+    {
+        Ok(Some(report)) => {
+            state.consecutive_failures = 0;
+            let finalized = report.finalized;
+            freshness.update(FreshnessSnapshot {
+                last_finalized_number: finalized.to_block,
+                last_synced_at: OffsetDateTime::now_utc(),
+                records_indexed: finalized.accounts_upserted,
+                decode_failures: finalized.decode_failures,
+            });
+            let speculative_change = report.speculative.is_some_and(|speculative| {
+                speculative.accounts_admitted > 0 || speculative.accounts_retracted > 0
+            });
+            if finalized.blocks_processed > 0 || speculative_change {
+                tracing::info!(
+                    wake = wake.as_str(),
+                    from_block = finalized.from_block,
+                    to_block = finalized.to_block,
+                    blocks_processed = finalized.blocks_processed,
+                    accounts_upserted = finalized.accounts_upserted,
+                    accounts_deleted = finalized.accounts_deleted,
+                    decode_failures = finalized.decode_failures,
+                    speculative_to_block = report.speculative.map(|s| s.to_block),
+                    speculative_admitted = report.speculative.map(|s| s.accounts_admitted),
+                    speculative_retracted = report.speculative.map(|s| s.accounts_retracted),
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    "resync complete"
+                );
+            } else {
+                tracing::debug!(
+                    wake = wake.as_str(),
+                    to_block = finalized.to_block,
+                    "resync found nothing new"
+                );
+            }
+        }
+        Ok(None) => {
+            state.consecutive_failures = 0;
+            tracing::debug!("another instance holds the projection lock; skipping this pass");
+        }
+        Err(error) => {
+            state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+            let delay = backoff(state.consecutive_failures);
+            tracing::warn!(
+                error = ?error,
+                wake = wake.as_str(),
+                consecutive_failures = state.consecutive_failures,
+                backoff_secs = delay.as_secs(),
+                "finalized resync failed; retrying"
+            );
+            tokio::time::sleep(delay).await;
+        }
     }
 }
 
@@ -452,12 +488,15 @@ fn backoff(consecutive_failures: u32) -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use futures::channel::mpsc;
     use time::macros::datetime;
 
-    use super::{backoff, wait_for_wake, Freshness, FreshnessSnapshot, Wake, BACKOFF_MAX_SECS};
+    use super::{
+        backoff, fallback_is_due, wait_for_wake, Freshness, FreshnessSnapshot, Wake,
+        BACKOFF_MAX_SECS,
+    };
 
     const FALLBACK: Duration = Duration::from_secs(30);
 
@@ -537,6 +576,19 @@ mod tests {
         let wake = wait_for_wake(&mut stream, FALLBACK).await;
         assert_eq!(wake, Wake::Resubscribe);
         assert_eq!(wake.best_head(), None);
+    }
+
+    #[test]
+    fn the_fallback_is_due_before_the_first_pass_and_once_the_interval_elapses() {
+        let fallback = Duration::from_secs(30);
+        assert!(fallback_is_due(None, fallback));
+
+        let now = Instant::now();
+        assert!(!fallback_is_due(Some(now), fallback));
+
+        if let Some(an_interval_ago) = now.checked_sub(fallback) {
+            assert!(fallback_is_due(Some(an_interval_ago), fallback));
+        }
     }
 
     #[test]
