@@ -105,7 +105,7 @@ done
 # `ingest_live` and `chain_identity_live` both drive the singleton `sync_state`
 # row, and `chain_identity_live` clears `assigned_usernames` wholesale — this
 # loop runs one suite at a time, which is what keeps them from interleaving.
-for suite in pagination_live poc_gate_live ingest_live chain_identity_live; do
+for suite in pagination_live poc_gate_live ingest_live chain_identity_live source_precedence_live; do
   DATABASE_URL="$indexer_url" \
     "${cargo_cmd[@]}" -p username-indexer --test "$suite" -- --ignored
 done
