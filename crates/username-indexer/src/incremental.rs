@@ -29,6 +29,20 @@ pub struct IndexReport {
     pub decode_failures: u64,
 }
 
+impl IndexReport {
+    /// A pass that indexed nothing and left the projection resting at `block`.
+    fn idle(block: u64) -> Self {
+        Self {
+            from_block: block,
+            to_block: block,
+            blocks_processed: 0,
+            accounts_upserted: 0,
+            accounts_deleted: 0,
+            decode_failures: 0,
+        }
+    }
+}
+
 /// Fatal incremental indexing failure.
 #[derive(Debug, thiserror::Error)]
 pub enum IndexError {
@@ -49,12 +63,24 @@ pub enum IndexError {
 
 /// Index every finalized block from the stored checkpoint up to the head,
 /// reading the finalized head itself.
+///
+/// The order matters: the lock, then the checkpoint, and only then the chain.
+/// Both early exits — another instance holds the lock, or the projection has no
+/// checkpoint to index from — are answerable from the database alone, and
+/// asking the chain for a head neither would use turns a local no-op into a
+/// round trip that can fail.
 pub async fn index_finalized_range(
     pool: &PgPool,
     chain: &PeopleChain,
 ) -> Result<Option<IndexReport>, IndexError> {
+    let Some(_lock) = try_projection_lock(pool).await? else {
+        return Ok(None);
+    };
+    let Some(checkpoint) = read_checkpoint(pool).await? else {
+        return Ok(Some(IndexReport::idle(0)));
+    };
     let head_number = chain.finalized_head_number().await?;
-    index_finalized_range_to(pool, chain, head_number).await
+    index_from_checkpoint(pool, chain, checkpoint, head_number).await
 }
 
 /// Index every finalized block from the stored checkpoint up to `head_number`.
@@ -99,31 +125,31 @@ pub async fn index_finalized_range_locked(
     chain: &PeopleChain,
     head_number: u64,
 ) -> Result<Option<IndexReport>, IndexError> {
-    let checkpoint_row = sqlx::query("SELECT last_finalized_number FROM sync_state WHERE id = 1")
-        .fetch_optional(pool)
-        .await?;
-    let Some(checkpoint_row) = checkpoint_row else {
-        return Ok(Some(IndexReport {
-            from_block: 0,
-            to_block: 0,
-            blocks_processed: 0,
-            accounts_upserted: 0,
-            accounts_deleted: 0,
-            decode_failures: 0,
-        }));
+    let Some(checkpoint) = read_checkpoint(pool).await? else {
+        return Ok(Some(IndexReport::idle(0)));
     };
-    let checkpoint = checkpoint_row.try_get::<i64, _>("last_finalized_number")?;
-    let checkpoint = u64::try_from(checkpoint).unwrap_or(0);
+    index_from_checkpoint(pool, chain, checkpoint, head_number).await
+}
 
+async fn read_checkpoint(pool: &PgPool) -> Result<Option<u64>, IndexError> {
+    let Some(row) = sqlx::query("SELECT last_finalized_number FROM sync_state WHERE id = 1")
+        .fetch_optional(pool)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let checkpoint = row.try_get::<i64, _>("last_finalized_number")?;
+    Ok(Some(u64::try_from(checkpoint).unwrap_or(0)))
+}
+
+async fn index_from_checkpoint(
+    pool: &PgPool,
+    chain: &PeopleChain,
+    checkpoint: u64,
+    head_number: u64,
+) -> Result<Option<IndexReport>, IndexError> {
     if head_number <= checkpoint {
-        return Ok(Some(IndexReport {
-            from_block: checkpoint,
-            to_block: checkpoint,
-            blocks_processed: 0,
-            accounts_upserted: 0,
-            accounts_deleted: 0,
-            decode_failures: 0,
-        }));
+        return Ok(Some(IndexReport::idle(checkpoint)));
     }
 
     let mut report = IndexReport {
