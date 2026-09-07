@@ -19,6 +19,9 @@ impl RateLimiter {
         let Ok(_) = tokio::runtime::Handle::try_current() else {
             anyhow::bail!("Failed to construct the rate-limiter, no Tokio runtime detected")
         };
+        if config.max_burst == 0 {
+            anyhow::bail!("Failed to construct the rate-limiter, max-burst must be non-zero")
+        };
         Ok({
             let quota = {
                 let replenish_interval_ns =
@@ -67,5 +70,25 @@ impl RateLimiter {
         };
 
         "unknown".to_owned()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{rate_limiter::Config, RateLimiter};
+
+    #[tokio::test]
+    async fn retry_after() {
+        let limit =
+            RateLimiter::new(Config::default().set_window_secs(10).set_max_burst(1)).unwrap();
+
+        limit.allow("test".to_owned()).await.unwrap();
+        let timeout = limit
+            .allow("test".to_owned())
+            .await
+            .unwrap_err()
+            .wait_time_from(limit.current_time())
+            .as_secs();
+        assert!(timeout > 0);
     }
 }
