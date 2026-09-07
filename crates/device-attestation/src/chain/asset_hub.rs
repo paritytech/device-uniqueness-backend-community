@@ -16,10 +16,24 @@ use crate::dotns;
 
 const PALLET: &str = "DotnsGateway";
 
-#[derive(Debug, Clone, Copy)]
+/// `00..=99`, matching the discriminator space the API allocates from.
+const DISCRIMINATORS: u8 = 100;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BaseLabels {
+    pub taken: BTreeSet<u8>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ValidityWindow {
     pub max_validity_secs: u64,
     pub max_future_skew_secs: u64,
+}
+
+impl ValidityWindow {
+    pub fn max_validity(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.max_validity_secs)
+    }
 }
 
 #[derive(Clone)]
@@ -36,6 +50,18 @@ impl AssetHub {
             .await
             .with_context(|| format!("Asset Hub at {url}"))?;
         Ok(this)
+    }
+
+    /// Connect without asserting the `reserve_name` shape.
+    ///
+    /// The shape check exists so the writer never builds an extrinsic the
+    /// connected runtime cannot decode. `registration-queue` submits nothing —
+    /// it reads balances — so a runtime that moved `reserve_name` is the
+    /// writer's problem to park on, not a reason for the advancer to refuse to
+    /// promote anything.
+    pub async fn connect_read_only(url: &str) -> anyhow::Result<Self> {
+        let (client, rpc) = chain_client::connect_asset_hub_with_rpc(url).await?;
+        Ok(Self::from_parts(client, rpc))
     }
 
     /// Wraps an already-constructed online client and the RPC client it was
@@ -74,6 +100,33 @@ impl AssetHub {
             .collect();
         dotns::check_reserve_name_shape(&fields)?;
         Ok(())
+    }
+
+    pub async fn base_labels(&self, base: &str) -> anyhow::Result<BaseLabels> {
+        let at = self.client.at_current_block().await?;
+        let block_hash = at.block_hash();
+        let entry = at
+            .storage()
+            .entry(subxt::dynamic::storage::<_, AccountId32>(
+                PALLET,
+                "LiteLabelOwner",
+            ))?;
+        let keys = (0..DISCRIMINATORS)
+            .map(|discriminator| {
+                entry.fetch_key((label_key(&format!("{base}.{discriminator:02}")),))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let values = storage::fetch_many(&self.rpc, &keys, block_hash)
+            .await
+            .context("reading dotNS lite label owners for a base")?;
+
+        Ok(BaseLabels {
+            taken: storage::present_of(values)
+                .into_iter()
+                .map(|i| i as u8)
+                .collect(),
+        })
     }
 
     pub async fn lite_label_owner(&self, lite_label: &str) -> anyhow::Result<Option<[u8; 32]>> {

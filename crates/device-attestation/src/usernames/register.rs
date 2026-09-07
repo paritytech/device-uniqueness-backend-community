@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::{collections::BTreeSet, str::FromStr as _};
+use std::{collections::BTreeSet, str::FromStr as _, time::Duration};
 
 use axum::{
     body::Bytes,
@@ -26,7 +26,7 @@ use crate::{
 };
 
 use super::error::{FieldError, UsernamesError, UsernamesResult};
-use super::{available_digits, base_state, reservation_state, MAX_BASE_LEN};
+use super::{available_digits, base_state, MAX_BASE_LEN};
 
 /// The flat registration request (documentation mirror — the handler
 /// validates raw JSON so it can report every failing field).
@@ -93,11 +93,13 @@ pub struct RegisterRequest {
     #[serde(rename = "deviceId")]
     #[schema(rename = "deviceId", example = "base64-32-byte-device-id")]
     device_id: Option<String>,
-    /// Optional DotNS reservation block.
-    dotns: Option<Dotns>,
+    /// DotNS reservation block. Required: the gateway is the name authority,
+    /// so a claim without one has no name to reserve and cannot be registered.
+    dotns: Dotns,
 }
 
-/// Optional DotNS reservation, parking a base label for later full-person use.
+/// The DotNS reservation the gateway registers the lite label from, optionally
+/// parking a base label for later full-person use.
 #[derive(Deserialize, ToSchema)]
 #[allow(dead_code)]
 pub(crate) struct Dotns {
@@ -160,7 +162,9 @@ const MSG_HEX_65: &str = "Must be a hexadecimal string of exactly 65 bytes.";
 const MSG_DIGITS: &str = "Digits must be between 01-99";
 const MSG_INVALID_SS58: &str = "Invalid ss58 address.";
 const MSG_INVALID_SIGNATURE: &str = "Invalid signature.";
-const MSG_DOTNS_DISABLED: &str = "dotNS gateway is not enabled in this environment.";
+const MSG_DOTNS_REQUIRED: &str =
+    "A dotns reservation block is required: the dotNS gateway is the name authority, \
+     and a claim without one cannot be registered.";
 /// `BaseLabel` is `BoundedVec<u8, ConstU32<32>>` in the dotns-gateway pallet.
 const MAX_DOTNS_LABEL_LEN: usize = 32;
 const PATTERN_BASE: &str = "^([a-z]{6,})$";
@@ -254,18 +258,7 @@ pub async fn register(
     let mut parsed = validate_register(&value, &state.config)?;
 
     let base = base_state(&state, &parsed.username).await?;
-    if let Some(reserved) = reserved_name(&parsed) {
-        let reservation = if reserved == parsed.username {
-            base.reservation()
-        } else {
-            reservation_state(&state, reserved).await?
-        };
-        if reservation.rejects() {
-            return Err(UsernamesError::FullNameUnavailable {
-                reserved: reserved.to_string(),
-            });
-        }
-    }
+    // The reserved full-person label is no longer arbitrated here.
     let digit = select_digit(
         &base.taken,
         parsed.preferred_digits.as_deref(),
@@ -275,7 +268,13 @@ pub async fn register(
     let full_username = format!("{}.{digits}", parsed.username);
     let voucher = parsed.voucher.take();
     let preferred_digits = parsed.preferred_digits.clone();
-    let new = build_reservation(&auth, parsed, &digits, &full_username);
+    let new = build_reservation(
+        &auth,
+        parsed,
+        &digits,
+        &full_username,
+        state.dotns_validity.max_validity(),
+    );
 
     // Voucher precedence (spec order): a submitted
     // voucher resolves the claim before the DeviceCheck/PoUD gate ever runs —
@@ -396,7 +395,7 @@ pub async fn register(
     // reopening the unthrottled direct path.
     let queue_lane = state.config.queue_enabled;
     let group = if queue_lane {
-        Some(queue::intake_group(&state.chain, &auth.subject).await)
+        Some(queue::intake_group(&state.asset_hub, &auth.subject).await)
     } else {
         None
     };
@@ -829,12 +828,23 @@ struct ParsedRegister {
 
 /// Assemble the outbox row from the validated request (shared by the voucher
 /// INSTANT path and the standard gate/queue path).
+/// Stamp the row, including the deadline its dotNS reservation dies at.
+///
+/// `max_validity` is `DotnsGateway::MaxValiditySeconds`, read from chain — the
+/// bound is never configured. A claim with no dotns block gets no deadline,
+/// matching its `NULL` `dotns_status`.
 fn build_reservation(
     auth: &AuthSubject,
     parsed: ParsedRegister,
     digits: &str,
     full_username: &str,
+    max_validity: Duration,
 ) -> NewReservation {
+    let dotns_expires_at = parsed.dotns.as_ref().and_then(|d| {
+        time::OffsetDateTime::from_unix_timestamp(d.signed_at)
+            .ok()
+            .and_then(|signed| signed.checked_add(time::Duration::try_from(max_validity).ok()?))
+    });
     NewReservation {
         account_id: auth.subject.clone(),
         candidate_account_id: parsed.candidate_account_id,
@@ -848,6 +858,7 @@ fn build_reservation(
         identifier_key: parsed.identifier_key,
         dotns_signature: parsed.dotns.as_ref().map(|d| d.signature.clone()),
         dotns_signed_at: parsed.dotns.as_ref().map(|d| d.signed_at),
+        dotns_expires_at,
         reserved_username: parsed.dotns.and_then(|d| d.reserved_username),
     }
 }
@@ -856,11 +867,6 @@ struct ParsedDotns {
     signature: Vec<u8>,
     signed_at: i64,
     reserved_username: Option<String>,
-}
-
-/// The full-person name this claim asks to reserve, if it asks for one.
-fn reserved_name(parsed: &ParsedRegister) -> Option<&str> {
-    parsed.dotns.as_ref()?.reserved_username.as_deref()
 }
 
 /// Validate `Device-Token-iOS`: base64, when present.
@@ -1067,8 +1073,20 @@ fn validate_register(
         MSG_HEX_65,
     );
 
+    // Required, not optional. dotNS is the name authority: the writer's dotNS
+    // lane leads and the People half is claimable only once `dotns_status`
+    // reaches `RESERVED`, so a claim carrying no block has nothing to reserve
+    // and would sit in the outbox unclaimable by either lane — a 202 for a
+    // registration that can never complete. Refuse it at intake instead.
     let dotns = match get("dotns") {
-        None => None,
+        None => {
+            errors.push(FieldError {
+                message: MSG_DOTNS_REQUIRED.to_string(),
+                field: "dotns".to_string(),
+            });
+            refine_skipped = true;
+            None
+        }
         Some(Value::Object(block)) => {
             let mut signature = None;
             match block.get("signature") {
@@ -1226,60 +1244,54 @@ fn validate_register(
         }
 
         if let Some((_signature, signed_at, reserved_username)) = &dotns {
-            if !config.dotns_gateway_enabled {
-                errors.push(FieldError {
-                    message: MSG_DOTNS_DISABLED.to_string(),
-                    field: "dotns".to_string(),
-                });
-            } else {
-                if let Some(signed_at) = signed_at {
-                    let now = time::OffsetDateTime::now_utc().unix_timestamp();
-                    let skew = config.dotns_max_future_skew_secs as i64;
-                    let max_age = config.dotns_intake_freshness_max_age_secs as i64;
-                    if *signed_at > now + skew {
-                        errors.push(FieldError {
-                            message: format!("signedAt is in the future (tolerance {skew}s)."),
-                            field: "dotns.signedAt".to_string(),
-                        });
-                    }
-                    if now - signed_at > max_age {
-                        errors.push(FieldError {
-                            message: format!(
-                                "signedAt is older than the intake freshness bound ({max_age}s). \
-                                 Re-sign with a fresh timestamp and resubmit."
-                            ),
-                            field: "dotns.signedAt".to_string(),
-                        });
-                    }
+            if let Some(signed_at) = signed_at {
+                let now = time::OffsetDateTime::now_utc().unix_timestamp();
+                let skew = config.dotns_max_future_skew_secs as i64;
+                let max_age = config.dotns_intake_freshness_max_age_secs as i64;
+                if *signed_at > now + skew {
+                    errors.push(FieldError {
+                        message: format!("signedAt is in the future (tolerance {skew}s)."),
+                        field: "dotns.signedAt".to_string(),
+                    });
                 }
-
-                // `reservedUsername` is relayed verbatim into `reserve_name`'s
-                // `Option<BaseLabel>`, a `BoundedVec<u8, 32>`. A longer value
-                // makes the extrinsic unbuildable. Rejecting it here rather
-                // than letting the writer discover it.
-                if let Some(reserved) = reserved_username {
-                    if reserved.len() > MAX_DOTNS_LABEL_LEN {
-                        errors.push(FieldError {
-                            message: format!(
-                                "reservedUsername exceeds the maximum label length: \
-                                 ({MAX_DOTNS_LABEL_LEN})."
-                            ),
-                            field: "dotns.reservedUsername".to_string(),
-                        });
-                    }
+                if now - signed_at > max_age {
+                    errors.push(FieldError {
+                        message: format!(
+                            "signedAt is older than the intake freshness bound ({max_age}s). \
+                             Re-sign with a fresh timestamp and resubmit."
+                        ),
+                        field: "dotns.signedAt".to_string(),
+                    });
                 }
-
-                // The reservation signature is deliberately **not** verified here, and an
-                // unverifiable one is deliberately not a 400.
-                //
-                // The dotNS half is optional and independent — `ASSIGNED` +
-                // `DOTNS_FAILED_TERMINAL` is a legitimate resting state — so rejecting would
-                // cost the caller its People username over the optional half. The writer runs
-                // `check_dotns_submittable` before spending an extrinsic either way.
-                //
-                // The gates above stay 400s: they reject *malformed* blocks, not unverifiable
-                // signatures.
             }
+
+            // `reservedUsername` is relayed verbatim into `reserve_name`'s
+            // `Option<BaseLabel>`, a `BoundedVec<u8, 32>`. A longer value
+            // makes the extrinsic unbuildable. Rejecting it here rather
+            // than letting the writer discover it.
+            if let Some(reserved) = reserved_username {
+                if reserved.len() > MAX_DOTNS_LABEL_LEN {
+                    errors.push(FieldError {
+                        message: format!(
+                            "reservedUsername exceeds the maximum label length: \
+                             ({MAX_DOTNS_LABEL_LEN})."
+                        ),
+                        field: "dotns.reservedUsername".to_string(),
+                    });
+                }
+            }
+
+            // The reservation signature is deliberately **not** verified here.
+            //
+            // Intake cannot see what the writer sees: the attester's live
+            // allowance, the chain's clock, or the gateway's own view of the
+            // label. `check_dotns_submittable` runs all of that before an
+            // extrinsic is spent, and a signature that fails there is recorded
+            // on the row rather than guessed at here.
+            //
+            // The gates above stay 400s because they reject *malformed* blocks
+            // — a label the extrinsic could not carry, a timestamp outside the
+            // bounds the pallet itself enforces — not unverifiable signatures.
         }
     }
 
@@ -1417,7 +1429,14 @@ mod tests {
             "ringVrfKey": format!("0x{}", hex::encode(ring)),
             "proofOfOwnership": format!("0x{}", "03".repeat(64)),
             "consumerRegistrationSignature": format!("0x{}", "04".repeat(64)),
-            "identifierKey": format!("0x{}", "05".repeat(65))
+            "identifierKey": format!("0x{}", "05".repeat(65)),
+            // Required: dotNS is the name authority, so every valid claim
+            // carries a reservation block. The signature is never verified at
+            // intake, so a structurally valid one is enough here.
+            "dotns": {
+                "signature": format!("0x{}", "06".repeat(64)),
+                "signedAt": time::OffsetDateTime::now_utc().unix_timestamp(),
+            }
         })
     }
 
@@ -1453,6 +1472,9 @@ mod tests {
                 "proofOfOwnership",
                 "consumerRegistrationSignature",
                 "identifierKey",
+                // dotNS is the name authority; a claim without a reservation
+                // block cannot be registered, so it is a required field.
+                "dotns",
             ]
         );
     }
@@ -1514,10 +1536,12 @@ mod tests {
             "consumerRegistrationSignature": 10, "identifierKey": 11
         });
         let errors = errors_of(body);
-        assert_eq!(errors.len(), 7);
+        assert_eq!(errors.len(), 8);
         assert!(errors
             .iter()
+            .take(7)
             .all(|(_, detail)| detail == "expected string, received number"));
+        assert_eq!(errors[7].0, "dotns");
     }
 
     #[test]
@@ -1564,21 +1588,8 @@ mod tests {
     }
 
     #[test]
-    fn dotns_gating_and_freshness_use_the_captured_messages() {
-        let mut disabled = config();
-        disabled.dotns_gateway_enabled = false;
-        let mut body = valid_body();
+    fn dotns_freshness_bounds_use_the_captured_messages() {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        body["dotns"] = json!({ "signature": format!("0x{}", "ab".repeat(64)), "signedAt": now });
-        match validate_register(&body, &disabled) {
-            Err(UsernamesError::InvalidBody(errors)) => {
-                assert_eq!(errors.len(), 1);
-                assert_eq!(errors[0].field, "dotns");
-                assert_eq!(errors[0].message, MSG_DOTNS_DISABLED);
-            }
-            other => panic!("expected InvalidBody, got {other:?}", other = other.err()),
-        }
-
         let enabled = config();
         let mut future = valid_body();
         future["dotns"] =
@@ -1610,36 +1621,60 @@ mod tests {
         assert_eq!(dotns.reserved_username.as_deref(), Some("reservedname"));
     }
 
+    /// Only a claim that carries the field asks for a full name. The value
+    /// travels to `DotnsGateway::reserve_name` as `reserved_base_label`, so
+    /// absent must stay absent rather than defaulting to the lite base.
     #[test]
-    fn only_a_claim_that_asks_for_the_full_name_is_preflighted() {
+    fn only_a_claim_that_asks_for_the_full_name_carries_a_reserved_label() {
         let config = config();
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
 
-        let plain = validate_register(&valid_body(), &config).expect("valid");
-        assert_eq!(
-            reserved_name(&plain),
-            None,
-            "no dotns block means no reservation leg"
-        );
-
         let mut without = valid_body();
         without["dotns"] = dotns_block(now, None, &config);
-        assert_eq!(
-            reserved_name(&validate_register(&without, &config).expect("valid")),
-            None
-        );
+        let parsed = validate_register(&without, &config).expect("valid");
+        assert_eq!(parsed.dotns.expect("dotns parsed").reserved_username, None);
 
         let mut with = valid_body();
         with["dotns"] = dotns_block(now, Some("aliceuser"), &config);
+        let parsed = validate_register(&with, &config).expect("valid");
         assert_eq!(
-            reserved_name(&validate_register(&with, &config).expect("valid")),
+            parsed
+                .dotns
+                .expect("dotns parsed")
+                .reserved_username
+                .as_deref(),
             Some("aliceuser")
         );
     }
 
-    /// The name the preflight gates on is the one the runtime reserves, not
-    /// the base of the lite username — `attest` takes them as separate
-    /// arguments and nothing requires them to agree.
+    /// A claim with no reservation block is refused at intake rather than
+    /// accepted and stranded. The writer's dotNS lane leads and the People
+    /// half waits on `dotns_status = 'RESERVED'`, so such a row would be
+    /// claimable by neither: a 202 for a registration that can never land.
+    #[test]
+    fn a_claim_without_a_dotns_block_is_refused() {
+        let mut body = valid_body();
+        body.as_object_mut().expect("object").remove("dotns");
+        assert_eq!(
+            errors_of(body),
+            [("dotns".to_string(), MSG_DOTNS_REQUIRED.to_string())]
+        );
+
+        // An explicit null is the same absence, not a differently-shaped block.
+        let mut null_block = valid_body();
+        null_block["dotns"] = json!(null);
+        assert_eq!(
+            errors_of(null_block)
+                .into_iter()
+                .map(|(field, _)| field)
+                .collect::<Vec<_>>(),
+            ["dotns".to_string()]
+        );
+    }
+
+    /// The reserved label is the one the gateway registers, not the base of
+    /// the lite username — `reserve_name` takes them as separate arguments
+    /// and nothing requires them to agree.
     #[test]
     fn the_reserved_name_is_read_from_the_dotns_block_not_the_username() {
         let config = config();
@@ -1650,7 +1685,14 @@ mod tests {
         body["dotns"] = dotns_block(now, Some("reservedname"), &config);
 
         let parsed = validate_register(&body, &config).expect("valid");
-        assert_eq!(reserved_name(&parsed), Some("reservedname"));
+        assert_eq!(
+            parsed
+                .dotns
+                .expect("dotns parsed")
+                .reserved_username
+                .as_deref(),
+            Some("reservedname")
+        );
     }
 
     /// The 409 names the name that was actually checked — the reserved one,

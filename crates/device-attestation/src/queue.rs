@@ -11,12 +11,23 @@ use serde::Serialize;
 use sqlx::{PgPool, Row as _};
 use utoipa::ToSchema;
 
-use crate::chain::{lease, PeopleChain};
+use crate::chain::{lease, AssetHub};
 use crate::http::state::AppState;
 use crate::usernames::error::{UsernamesError, UsernamesResult};
 
 /// Queue promotions per advancer iteration (the spec's four slots).
 pub const SLOTS_PER_ITERATION: usize = 4;
+
+pub fn drain_duration(depth: u64, interval: Duration) -> Duration {
+    let iterations = depth.div_ceil(SLOTS_PER_ITERATION as u64);
+    interval.saturating_mul(u32::try_from(iterations).unwrap_or(u32::MAX))
+}
+
+pub fn max_safe_depth(max_validity: Duration, headroom: Duration, interval: Duration) -> u64 {
+    let usable = max_validity.saturating_sub(headroom).as_secs();
+    let interval_secs = interval.as_secs().max(1);
+    (usable / interval_secs).saturating_mul(SLOTS_PER_ITERATION as u64)
+}
 
 /// Planck per DOT (10-decimal token, shared by Polkadot and Paseo).
 const PLANCK_PER_DOT: u128 = 10_000_000_000;
@@ -40,7 +51,7 @@ const INTAKE_BALANCE_TIMEOUT: Duration = Duration::from_secs(5);
 /// through [`group_for_balance`]. Fails open to group 1 — a chain hiccup,
 /// timeout, or malformed subject must never block intake, only deprioritise
 /// it (the next advancer refresh corrects the group).
-pub async fn intake_group(chain: &PeopleChain, subject: &str) -> u8 {
+pub async fn intake_group(chain: &AssetHub, subject: &str) -> u8 {
     let Some(account) = parse_subject(subject) else {
         tracing::warn!(subject, "queue intake: unparseable subject; using group 1");
         return 1;
@@ -149,7 +160,7 @@ const BALANCE_READ_CONCURRENCY: usize = 16;
 ///
 /// A failed balance read **keeps the current group**: unlike intake there is a
 /// known-good value, and failing open to 1 would demote the whole queue.
-pub async fn refresh_groups(pool: &PgPool, chain: &PeopleChain) -> Result<(), sqlx::Error> {
+pub async fn refresh_groups(pool: &PgPool, chain: &AssetHub) -> Result<(), sqlx::Error> {
     use futures::StreamExt as _;
 
     let rows = sqlx::query(
@@ -218,8 +229,42 @@ pub struct Promoted {
 /// it: the row leaves `QUEUED`). `FOR UPDATE SKIP LOCKED` keeps promotion
 /// exactly-once even if a second advancer ever runs concurrently.
 pub async fn advance_iteration(pool: &PgPool) -> Result<Vec<Promoted>, sqlx::Error> {
+    advance_iteration_within(pool, Duration::ZERO).await
+}
+
+pub async fn advance_iteration_within(
+    pool: &PgPool,
+    horizon: Duration,
+) -> Result<Vec<Promoted>, sqlx::Error> {
     let mut promoted = Vec::new();
+    let horizon_secs = f64::from(u32::try_from(horizon.as_secs()).unwrap_or(u32::MAX));
     for slot in 1..=SLOTS_PER_ITERATION {
+        if horizon.is_zero() {
+            break;
+        }
+        let row = sqlx::query(
+            "UPDATE username_reservations SET status = 'RESERVED', updated_at = now() \
+             WHERE id = (SELECT id FROM username_reservations \
+                         WHERE status = 'QUEUED' \
+                           AND dotns_expires_at IS NOT NULL \
+                           AND dotns_expires_at > now() \
+                           AND dotns_expires_at <= now() + make_interval(secs => $1) \
+                         ORDER BY dotns_expires_at ASC, created_at ASC, id ASC \
+                         LIMIT 1 \
+                         FOR UPDATE SKIP LOCKED) \
+             RETURNING id, full_username",
+        )
+        .bind(horizon_secs)
+        .fetch_optional(pool)
+        .await?;
+        let Some(row) = row else { break };
+        promoted.push(Promoted {
+            id: row.try_get("id")?,
+            full_username: row.try_get("full_username")?,
+            slot,
+        });
+    }
+    for slot in (promoted.len() + 1)..=SLOTS_PER_ITERATION {
         let min_group = (5 - slot) as i32;
         let row = sqlx::query(
             "UPDATE username_reservations SET status = 'RESERVED', updated_at = now() \
@@ -255,8 +300,11 @@ pub const ADVANCER_LEASE_NAME: &str = "registration-queue-advancer";
 pub struct AdvancerConfig {
     /// Postgres connection string (shared schema with device-attestation-api).
     pub database_url: String,
-    /// People Chain RPC endpoint (balance reads for group refresh).
-    pub people_rpc_url: String,
+    /// Asset Hub RPC endpoint (balance reads for the group refresh). Asset
+    /// Hub is where balances live now that the payment lane watches deposits
+    /// there; grouping off the other chain would rank the queue by a balance
+    /// nobody is being asked to hold.
+    pub asset_hub_rpc_url: String,
     /// Iteration interval (the spec's "every N seconds").
     pub interval: Duration,
     /// Lease TTL; must comfortably exceed `interval` so a live advancer's
@@ -277,8 +325,7 @@ impl AdvancerConfig {
         validate_cadence(interval, lease_ttl)?;
         Ok(Self {
             database_url,
-            people_rpc_url: std::env::var("PEOPLE_RPC_URL")
-                .unwrap_or_else(|_| "wss://previewnet.substrate.dev/people".to_string()),
+            asset_hub_rpc_url: http_common::config::required_var("ASSET_HUB_RPC_URL")?,
             interval,
             lease_ttl,
             // Unique per boot: in a container the PID is always 1, and equal
@@ -376,13 +423,101 @@ pub async fn fallback_drain(pool: &PgPool, grace: Duration) -> Result<u64, sqlx:
     Ok(done.rows_affected())
 }
 
+/// Current `QUEUED` depth.
+pub async fn queued_depth(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let depth: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM username_reservations WHERE status = 'QUEUED'")
+            .fetch_one(pool)
+            .await?;
+    Ok(depth.max(0) as u64)
+}
+
+fn record_queue_headroom(depth: u64, window: Option<Duration>, interval: Duration) {
+    metrics::gauge!("dub_queue_depth").set(depth as f64);
+    metrics::gauge!("dub_queue_drain_seconds")
+        .set(drain_duration(depth, interval).as_secs() as f64);
+    if let Some(window) = window {
+        metrics::gauge!("dub_queue_safe_depth").set(max_safe_depth(
+            window,
+            WRITER_HEADROOM,
+            interval,
+        ) as f64);
+    }
+}
+
+const WRITER_HEADROOM: Duration = Duration::from_secs(300);
+
+pub async fn stamped_validity_window(pool: &PgPool) -> Result<Option<Duration>, sqlx::Error> {
+    let secs: Option<f64> = sqlx::query_scalar(
+        "SELECT extract(epoch from dotns_expires_at - to_timestamp(dotns_signed_at))::float8 \
+         FROM username_reservations \
+         WHERE dotns_expires_at IS NOT NULL AND dotns_signed_at IS NOT NULL \
+         ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+    Ok(secs.filter(|s| *s > 0.0).map(Duration::from_secs_f64))
+}
+
+/// Abandon every queued claim already past its dotNS deadline, and give each
+/// one's Widevine device record back.
+///
+/// The device release is the whole reason this is a transaction rather than a
+/// single UPDATE. Abandoning a claim is what the writer's `Dotns::terminal`
+/// does for a row it owns, and that path releases the device precisely so the
+/// handset can claim again — an expired reservation is terminal for the claim,
+/// not for the device. A sweep that abandoned the row and left the record
+/// `PENDING` would tell the client to re-register while
+/// [`crate::widevine::store::seen`] permanently refused it.
+pub async fn expire_queued(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let expired: Vec<i64> = sqlx::query_scalar(
+        "UPDATE username_reservations \
+            SET dotns_status = 'EXPIRED', \
+                status = 'ABANDONED', \
+                dotns_last_error = $1, \
+                last_error = $2, \
+                not_before = NULL, \
+                dotns_not_before = NULL, \
+                updated_at = now() \
+          WHERE status = 'QUEUED' \
+            AND dotns_expires_at IS NOT NULL \
+            AND dotns_expires_at <= now() \
+          RETURNING id",
+    )
+    .bind(EXPIRED_IN_QUEUE_REASON)
+    .bind(ABANDONED_IN_QUEUE_REASON)
+    .fetch_all(&mut *tx)
+    .await?;
+    if expired.is_empty() {
+        tx.rollback().await?;
+        return Ok(0);
+    }
+    let released = crate::widevine::store::release_for_reservations(&mut *tx, &expired).await?;
+    tx.commit().await?;
+    if released > 0 {
+        tracing::info!(
+            released,
+            "widevine device records released with the expired claims"
+        );
+    }
+    Ok(expired.len() as u64)
+}
+
+const EXPIRED_IN_QUEUE_REASON: &str =
+    "dotNS reservation signature expired while queued; only the client can re-sign";
+
+const ABANDONED_IN_QUEUE_REASON: &str =
+    "dotNS reservation expired in the queue; People registration never attempted";
+
 /// The `registration-queue` service loop: hold the advancer lease, then every
 /// `interval` renew it, refresh groups, and run one promotion iteration.
 ///
 /// Per-iteration errors are logged and the loop continues; a lost lease drops
 /// back to acquisition. If the process dies, claims park as `QUEUED` behind the
 /// throttle and the chain-writer raises the stranded-queue warning.
-pub async fn run_advancer(pool: PgPool, chain: PeopleChain, config: AdvancerConfig) {
+pub async fn run_advancer(pool: PgPool, chain: AssetHub, config: AdvancerConfig) {
     tracing::info!(
         interval_secs = config.interval.as_secs(),
         holder = %config.holder_id,
@@ -391,7 +526,7 @@ pub async fn run_advancer(pool: PgPool, chain: PeopleChain, config: AdvancerConf
     http_common::metrics::spawn_readiness_probe(
         "registration-queue",
         (pool.clone(), chain.clone()),
-        |(p, c)| crate::http::health::probe(p, c),
+        |(p, c)| crate::http::health::probe_asset_hub(p, c),
     );
     loop {
         let epoch = match lease::try_acquire(
@@ -464,7 +599,30 @@ pub async fn run_advancer(pool: PgPool, chain: PeopleChain, config: AdvancerConf
                         "queue group refresh timed out; advancing with current groups"
                     ),
                 }
-                match advance_iteration(&pool).await {
+                match expire_queued(&pool).await {
+                    Ok(0) => {}
+                    Ok(expired) => {
+                        metrics::counter!("dub_queue_expired_total").increment(expired);
+                        tracing::warn!(
+                            expired,
+                            "queued claims abandoned: dotNS reservation expired before promotion"
+                        );
+                    }
+                    Err(error) => tracing::warn!(error = %error, "queue expiry sweep failed"),
+                }
+
+                let horizon = match queued_depth(&pool).await {
+                    Ok(depth) => {
+                        let window = stamped_validity_window(&pool).await.unwrap_or(None);
+                        record_queue_headroom(depth, window, config.interval);
+                        drain_duration(depth, config.interval)
+                    }
+                    Err(error) => {
+                        tracing::warn!(error = %error, "queue depth read failed");
+                        Duration::ZERO
+                    }
+                };
+                match advance_iteration_within(&pool, horizon).await {
                     Ok(promoted) => {
                         for p in &promoted {
                             tracing::info!(id = p.id, username = %p.full_username, slot = p.slot, "queued claim promoted");
@@ -583,6 +741,46 @@ pub async fn status(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_safe_depth_derivation_follows_the_window_and_the_cadence() {
+        let three_days = Duration::from_secs(3 * 24 * 60 * 60);
+        let headroom = Duration::from_secs(300);
+        let interval = Duration::from_secs(6);
+
+        assert_eq!(max_safe_depth(three_days, headroom, interval), 172_600);
+
+        assert_eq!(
+            max_safe_depth(three_days, headroom, Duration::from_secs(3)),
+            345_200
+        );
+        assert_eq!(
+            max_safe_depth(Duration::from_secs(3600), headroom, interval),
+            2_200
+        );
+        assert_eq!(max_safe_depth(headroom, headroom, interval), 0);
+        assert_eq!(
+            max_safe_depth(Duration::from_secs(60), headroom, interval),
+            0
+        );
+    }
+
+    #[test]
+    fn drain_duration_rounds_up_to_whole_iterations() {
+        let interval = Duration::from_secs(6);
+        assert_eq!(drain_duration(0, interval), Duration::ZERO);
+        assert_eq!(drain_duration(1, interval), interval);
+        assert_eq!(drain_duration(4, interval), interval);
+        assert_eq!(drain_duration(5, interval), interval * 2);
+        assert_eq!(drain_duration(400, interval), interval * 100);
+    }
+
+    #[test]
+    fn the_at_risk_horizon_widens_with_the_backlog() {
+        let interval = Duration::from_secs(6);
+        assert!(drain_duration(1_000, interval) > drain_duration(100, interval));
+        assert_eq!(drain_duration(1_000, interval), Duration::from_secs(1_500));
+    }
     use super::*;
     use serde_json::json;
 

@@ -106,9 +106,9 @@ For anything past that you need, on whichever network you target:
 - for invites, an inviter account holding `AvailableInvites` quota.
 
 Paseo's People Chain is
-`wss://paseo-people-next-system-rpc.polkadot.io` — set
-`DOTNS_GATEWAY_ENABLED=false` with it, because Paseo's Asset Hub runs a different
-`reserve_name`.
+`wss://paseo-people-next-system-rpc.polkadot.io`, but its Asset Hub runs a
+different `reserve_name`, and dotNS is the name authority — so this backend
+cannot register usernames against Paseo at all.
 
 [docs/operations.md](docs/operations.md) covers this from zero, including the
 secret boundaries the compose file enforces and why they are worth keeping.

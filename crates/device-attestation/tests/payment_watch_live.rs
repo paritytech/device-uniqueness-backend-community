@@ -6,7 +6,7 @@ use std::time::Duration;
 use device_attestation::chain::outbox::{self, NewReservation};
 use device_attestation::config::PaymentConfig;
 use device_attestation::payment::{self, ClaimPayload, ConfirmOutcome};
-use device_attestation::PeopleChain;
+use device_attestation::AssetHub;
 use sqlx::Row as _;
 
 fn reservation(base: &str, digits: &str, subject: &str) -> NewReservation {
@@ -23,6 +23,7 @@ fn reservation(base: &str, digits: &str, subject: &str) -> NewReservation {
         identifier_key: vec![5; 65],
         dotns_signature: None,
         dotns_signed_at: None,
+        dotns_expires_at: None,
         reserved_username: None,
     }
 }
@@ -43,10 +44,10 @@ async fn connect() -> sqlx::PgPool {
         .expect("connect and migrate")
 }
 
-async fn chain() -> PeopleChain {
-    let rpc_url = std::env::var("PEOPLE_RPC_URL")
-        .unwrap_or_else(|_| "wss://paseo-people-next-system-rpc.polkadot.io".to_string());
-    PeopleChain::connect(&rpc_url).await.expect("live RPC")
+async fn chain() -> AssetHub {
+    let rpc_url = std::env::var("ASSET_HUB_RPC_URL")
+        .unwrap_or_else(|_| "wss://paseo-asset-hub-next-rpc.polkadot.io".to_string());
+    AssetHub::connect(&rpc_url).await.expect("live RPC")
 }
 
 async fn request_id(pool: &sqlx::PgPool, subject: &str) -> i64 {

@@ -24,6 +24,30 @@ pub struct AssignedUsername {
     pub display_username: String,
     pub snapshot_hash: [u8; 32],
     pub snapshot_number: u64,
+    /// Which chain answered for this name.
+    pub source: Source,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    People,
+    AssetHub,
+}
+
+impl Source {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Source::People => "people",
+            Source::AssetHub => "asset-hub",
+        }
+    }
+
+    pub const fn may_overwrite(self, existing: Source) -> bool {
+        matches!(
+            (self, existing),
+            (Source::AssetHub, _) | (Source::People, Source::People)
+        )
+    }
 }
 
 /// Advisory-lock id shared by bootstrap + incremental sync so only one writer
@@ -99,11 +123,12 @@ pub(crate) fn decode_consumer(
         display_username,
         snapshot_hash,
         snapshot_number,
+        source: Source::People,
     })
 }
 
 /// Upsert one projection row within an open transaction, keyed by account.
-pub(crate) async fn upsert(
+pub async fn upsert(
     tx: &mut Transaction<'_, Postgres>,
     record: &AssignedUsername,
     snapshot_number: i64,
@@ -111,8 +136,9 @@ pub(crate) async fn upsert(
     sqlx::query(
         "INSERT INTO assigned_usernames (
             account_id, account_id_ss58, identifier_key, lite_username, lite_base,
-            lite_digits, full_username, display_username, snapshot_hash, snapshot_number
-         ) VALUES ($1, $2, $3, $4, $5, $6::numeric, $7, $8, $9, $10)
+            lite_digits, full_username, display_username, snapshot_hash, snapshot_number,
+            source
+         ) VALUES ($1, $2, $3, $4, $5, $6::numeric, $7, $8, $9, $10, $11)
          ON CONFLICT (account_id) DO UPDATE SET
             account_id_ss58 = EXCLUDED.account_id_ss58,
             identifier_key = EXCLUDED.identifier_key,
@@ -123,8 +149,11 @@ pub(crate) async fn upsert(
             display_username = EXCLUDED.display_username,
             snapshot_hash = EXCLUDED.snapshot_hash,
             snapshot_number = EXCLUDED.snapshot_number,
+            source = EXCLUDED.source,
             speculative_from_block = NULL,
-            updated_at = now()",
+            updated_at = now()
+         WHERE EXCLUDED.source = 'asset-hub'
+            OR assigned_usernames.source = 'people'",
     )
     .bind(record.account_id.as_slice())
     .bind(&record.account_id_ss58)
@@ -136,6 +165,7 @@ pub(crate) async fn upsert(
     .bind(&record.display_username)
     .bind(record.snapshot_hash.as_slice())
     .bind(snapshot_number)
+    .bind(record.source.as_str())
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -145,14 +175,19 @@ pub(crate) async fn upsert(
 ///
 /// Used when an affected account's `Resources::Consumers` entry is absent at
 /// the finalized block, reconciling the local row to authoritative chain state.
-pub(crate) async fn delete_account(
+pub async fn delete_account(
     tx: &mut Transaction<'_, Postgres>,
     account_id: &[u8; 32],
+    by: Source,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM assigned_usernames WHERE account_id = $1")
-        .bind(account_id.as_slice())
-        .execute(&mut **tx)
-        .await?;
+    sqlx::query(
+        "DELETE FROM assigned_usernames \
+         WHERE account_id = $1 AND ($2 = 'asset-hub' OR source = 'people')",
+    )
+    .bind(account_id.as_slice())
+    .bind(by.as_str())
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 
@@ -165,8 +200,8 @@ pub(crate) async fn upsert_speculative(
         "INSERT INTO assigned_usernames (
             account_id, account_id_ss58, identifier_key, lite_username, lite_base,
             lite_digits, full_username, display_username, snapshot_hash, snapshot_number,
-            speculative_from_block
-         ) VALUES ($1, $2, $3, $4, $5, $6::numeric, $7, $8, $9, $10, $10)
+            speculative_from_block, source
+         ) VALUES ($1, $2, $3, $4, $5, $6::numeric, $7, $8, $9, $10, $10, $11)
          ON CONFLICT (account_id) DO UPDATE SET
             account_id_ss58 = EXCLUDED.account_id_ss58,
             identifier_key = EXCLUDED.identifier_key,
@@ -177,8 +212,10 @@ pub(crate) async fn upsert_speculative(
             display_username = EXCLUDED.display_username,
             snapshot_hash = EXCLUDED.snapshot_hash,
             snapshot_number = EXCLUDED.snapshot_number,
+            source = EXCLUDED.source,
             updated_at = now()
          WHERE assigned_usernames.speculative_from_block IS NOT NULL
+           AND (EXCLUDED.source = 'asset-hub' OR assigned_usernames.source = 'people')
            AND (
                 assigned_usernames.account_id_ss58,
                 assigned_usernames.identifier_key,
@@ -207,6 +244,7 @@ pub(crate) async fn upsert_speculative(
     .bind(&record.display_username)
     .bind(record.snapshot_hash.as_slice())
     .bind(best_number)
+    .bind(record.source.as_str())
     .execute(&mut **tx)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -215,12 +253,15 @@ pub(crate) async fn upsert_speculative(
 pub(crate) async fn delete_if_speculative(
     tx: &mut Transaction<'_, Postgres>,
     account_id: &[u8; 32],
+    by: Source,
 ) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
         "DELETE FROM assigned_usernames
-         WHERE account_id = $1 AND speculative_from_block IS NOT NULL",
+         WHERE account_id = $1 AND speculative_from_block IS NOT NULL
+           AND ($2 = 'asset-hub' OR source = 'people')",
     )
     .bind(account_id.as_slice())
+    .bind(by.as_str())
     .execute(&mut **tx)
     .await?;
     Ok(result.rows_affected() > 0)

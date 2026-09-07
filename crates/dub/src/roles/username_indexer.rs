@@ -5,10 +5,11 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 
+use username_indexer::gateway::ingest as gateway;
 use username_indexer::http::middleware::RateLimiter;
 use username_indexer::poc::{self, Poc};
 use username_indexer::sync::{self, Freshness, FreshnessSnapshot};
-use username_indexer::{db, ensure_seeded, routes, AppState, Config, PeopleChain};
+use username_indexer::{db, ensure_seeded, routes, AppState, AssetHubChain, Config, PeopleChain};
 
 pub async fn run() -> anyhow::Result<()> {
     http_common::telemetry::init("username-indexer");
@@ -18,6 +19,7 @@ pub async fn run() -> anyhow::Result<()> {
     tracing::info!(
         bind = %config.bind_addr,
         people_rpc = %config.people_rpc_url,
+        asset_hub_rpc = %config.asset_hub_rpc_url,
         storage_page_size = config.storage_page_size,
         sync_interval_secs = config.sync_interval_secs,
         "starting username-indexer"
@@ -25,9 +27,11 @@ pub async fn run() -> anyhow::Result<()> {
 
     let pool = db::connect(&config.database_url).await?;
     let chain = PeopleChain::connect(&config.people_rpc_url, config.storage_page_size).await?;
+    let asset_hub =
+        AssetHubChain::connect(&config.asset_hub_rpc_url, config.storage_page_size).await?;
 
     let bind_addr = config.bind_addr;
-    let state = build_state(&config, pool.clone(), chain).await?;
+    let state = build_state(&config, pool.clone(), chain, asset_hub).await?;
 
     let listener = tokio::net::TcpListener::bind(bind_addr)
         .await
@@ -57,6 +61,7 @@ pub async fn build_state(
     config: &Config,
     pool: sqlx::PgPool,
     chain: PeopleChain,
+    asset_hub: AssetHubChain,
 ) -> anyhow::Result<AppState> {
     // Resolved before any I/O so a misconfigured gate fails at startup rather
     // than after the finalized bootstrap scan (which can take minutes).
@@ -101,11 +106,28 @@ pub async fn build_state(
             }
         }
     }
+    match gateway::ensure_seeded(&pool, &asset_hub, &chain).await? {
+        Some(report) => tracing::info!(
+            indexed = report.indexed,
+            skipped_without_chat_key = report.skipped_without_chat_key,
+            skipped_malformed = report.skipped_malformed,
+            snapshot_number = report.snapshot_number,
+            trigger = ?report.trigger,
+            "gateway username census complete"
+        ),
+        None => tracing::info!("existing gateway checkpoint found; resuming gateway sync"),
+    }
+
     tokio::spawn(sync::run(
         pool.clone(),
         chain.clone(),
         config.clone(),
         freshness.clone(),
+    ));
+    tokio::spawn(gateway::run(
+        pool.clone(),
+        asset_hub,
+        Duration::from_secs(config.sync_interval_secs.into()),
     ));
 
     let limiter = RateLimiter::new(

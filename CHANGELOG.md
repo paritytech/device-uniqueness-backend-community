@@ -10,6 +10,182 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ### Changed
 
+- **Asset Hub is now the username source of truth; the People Chain keeps only
+  the consumer record.** `DotnsGateway::LiteLabelOwner` decides which usernames
+  exist and who owns them. `PeopleLite.attest` still runs, because
+  `Resources::Consumers` is where the chat `identifier_key` lives, but nothing
+  reads its username bytes any more. This aligns the backend with the clients,
+  which already resolve names against Asset Hub and treat the People username
+  bytes as legacy.
+
+  The two writer lanes swap precedence. `DotnsGateway::reserve_name` now claims a
+  row as soon as intake or the queue advancer puts it in `RESERVED`, and
+  `PeopleLite.attest` is claimable only once `dotns_status` reaches `RESERVED`, so
+  the consumer record is never written against a name the gateway refused. The
+  cross-lane abandonment reverses with it: a terminal dotNS outcome
+  (`FAILED_TERMINAL`/`EXPIRED`) closes an open People half in the same guarded
+  UPDATE, and `status` gains **`ABANDONED`** to say so. `DOTNS_ABANDONED` is now
+  legacy — no new row can reach it. `SUBMITTING` and `ASSIGNED` are excluded from
+  the sweep: one has an extrinsic in flight and is left for reconciliation, the
+  other has already landed. The device record follows the lane that commits the
+  claim, so Widevine consumption moves to the dotNS reservation; a People failure
+  afterwards deliberately does **not** release the device, because the label is
+  already claimed globally and freeing the handset would let it take a second
+  name while the first stays burned.
+
+  `device-attestation-api` now opens its own **read-only** Asset Hub connection
+  and blocks on it at startup exactly as it does on the People RPC.
+  `ASSET_HUB_RPC_URL` is therefore required on the API as well as the writer —
+  *required*, with no default: an API that guessed PreviewNet while
+  `PEOPLE_RPC_URL` named another network would answer availability from a gateway
+  nobody is registering against, silently. `verify_compose_boundaries.sh`
+  enforces it on both. `POST
+  /api/v1/usernames/available`, the registration digit selection, and the payment
+  lane's confirmation-time re-selection all read
+  `DotnsGateway::LiteLabelOwner` for `base.00`..`base.99` in one
+  `state_queryStorageAt`, so the three can no longer disagree about what is taken.
+  `EXHAUSTED` consequently means only "no free discriminator": dotNS has no
+  reservation queue to be full and no bare-base ownership that closes the whole
+  space, so the two extra conditions the People-chain read folded in have no
+  equivalent.
+
+  **The `dotns` block is now required on `POST /api/v1/usernames`.** *Breaking:*
+  a body without one is a `400` on `dotns` rather than a `202`. It was optional
+  while People was the authority and a claim could complete on People alone; with
+  the lanes swapped such a row is claimable by neither — the dotNS half has
+  nothing to reserve, and the People half waits on a `dotns_status` that never
+  arrives — so accepting it would hand back a `202` for a registration that can
+  never land, while holding its discriminator and its device record forever.
+  `dotns_status` `NULL` consequently means one thing only now: the row predates
+  the cutover. `claim_due` still admits those, so they drain on People as they
+  were accepted to, and for them People is the leading lane — it consumes the
+  Widevine device on success and releases it on terminal failure, the role the
+  dotNS lane takes for every new row.
+
+  `dotns.reservedUsername` is passed through to `reserve_name` as
+  `reserved_base_label` (it is still carried into `attest` as well), and the
+  backend no longer arbitrates it. The gateway holds the only authoritative view of the full-label
+  space, so a claim on a taken full name surfaces as a deterministic dotNS
+  rejection rather than a `409 FullNameUnavailable` at intake.
+
+  **`DOTNS_GATEWAY_ENABLED` is removed.** *Breaking:* the variable is no longer
+  read, and an environment still setting it is ignored rather than warned about —
+  there is nothing left for either value to select. It gated a lane that was
+  optional when People was the authority; now that dotNS *is* the authority there
+  is no People-only mode to fall back to, and a deployment with the gateway off
+  could not complete a single registration. What used to be the flag's off-state
+  is now simply a missing `ASSET_HUB_RPC_URL`, which aborts the writer at startup.
+  The `dotns_lane` label is gone from `dub_writer_info`, and the
+  `dotNS gateway is not enabled in this environment.` 400 on `POST
+  /api/v1/usernames` can no longer occur. A *parked* lane — Asset Hub configured
+  but unreachable — is unchanged, and now holds the payment pass too, since
+  confirmation re-selects a discriminator and must not pick one the gateway has
+  not been asked about.
+
+  Two consequences worth watching. `EXPIRED` is much more expensive: it was
+  terminal for the name only, and is now terminal for the whole registration, so a
+  `QUEUED` backlog deeper than the chain's `MaxValiditySeconds` will expire claims
+  wholesale — see the runbook. And existing rows are untouched: there is still no
+  backfill, so names written while People was the authority keep `dotns_status`
+  `NULL` and stay People-only.
+
+- **`username-indexer` projects usernames from Asset Hub, with People kept as the
+  legacy half.** The search index is now built from `DotnsGateway` — the name
+  authority — while the People ingest stays connected for accounts registered
+  before the cutover, which are never re-registered and so can never appear on
+  the gateway. Every `assigned_usernames` row carries a new `source` column
+  (`people` | `asset-hub`, migration `20260908000000_assigned_usernames_source.sql`)
+  and precedence is one-way: a gateway row replaces a People row for the same
+  account, and the People ingest may neither overwrite nor retract a gateway row.
+  The rule lives in the upsert's `ON CONFLICT` clause and the delete's `WHERE`,
+  so it holds whichever pass runs first. There is still no backfill in either
+  direction.
+
+  The gateway ingest is shaped by what the pallet stores, which is less than it
+  emits. `LiteLabelOwner` is keyed by label rather than account and holds only
+  the owner; the chat key is never written to pallet storage at all; and
+  full-person label strings are not stored either (`AliasRegistration` is
+  `{ collection, account }`). The People pattern — an event points at an
+  account, storage is re-read for the truth — therefore does not transfer.
+  Instead `NameReserved` and `NameRegistered` carry the values, storage confirms
+  only who owns the label at that block, and a census (`LiteLabelOwner` scan)
+  rebuilds the lite population after a wipe. A census fills chat keys from the
+  People consumer record for the same account and skips a label whose owner has
+  none rather than inventing one; it cannot recover full-person names at all, so
+  a census-built row shows its lite label until that account's next
+  `NameRegistered`. Closing that gap needs the gateway's Lens contract
+  (`nameDetail(label)`), which this workspace has no contract-call path to.
+
+  The two ingests advance on separate cursors (`sync_state.ah_last_finalized_number`,
+  `ah_last_finalized_hash`, `ah_genesis_hash`) and separate loops, because the
+  chains finalize independently and driving one off the other's headers would
+  stall it whenever that chain went quiet. They share only the projection lock.
+  A broken Asset Hub connection degrades the projection to its legacy half
+  rather than stopping it, and an Asset Hub genesis change discards only the
+  `asset-hub` rows. New metrics `dub_gateway_checkpoint_block`,
+  `dub_gateway_accounts_upserted_total`, `dub_gateway_observations_skipped_total`
+  and `dub_gateway_pass_failures_total`.
+
+  **`ASSET_HUB_RPC_URL` is now required on `username-indexer`** as well as the
+  API, the writer and `registration-queue`, and `verify_compose_boundaries.sh`
+  enforces it on all four. It is required rather than defaulted because an indexer without it
+  would serve only the pre-cutover population while every health signal stayed
+  green. Asset Hub events are decoded dynamically, so no second vendored
+  metadata blob is introduced.
+
+- **The registration queue now schedules against the dotNS reservation deadline.**
+  Intake stamps a new `username_reservations.dotns_expires_at` (migration
+  `0010_dotns_expiry.sql`) as `dotns_signed_at + DotnsGateway::MaxValiditySeconds`,
+  the window read from Asset Hub rather than configured. It is advisory — the
+  writer still enforces the live window before spending an extrinsic — but it is
+  what lets the queue see an expiry coming instead of discovering it when the
+  writer finally claims the row, which since dotNS became the name authority is
+  too late: an expired reservation abandons the whole claim, and only the client
+  can re-sign.
+
+  Two behaviours follow, neither configured. The advancer **sweeps** rows already
+  past their deadline before handing out slots, marking them `EXPIRED` +
+  `ABANDONED` and releasing each one's Widevine device record in the same
+  transaction, so a doomed claim stops inflating queue depth, stops displacing a
+  live claim from a slot, never costs an extrinsic to be told what the deadline
+  already said, and leaves the handset free to make the fresh claim the error
+  message asks the client for. (The device is *not* released when the People
+  half fails after a reservation has landed — there the label is already claimed
+  globally.) And a row whose deadline falls inside the **current
+  drain time** (`ceil(depth / 4) × interval`) is promoted ahead of the balance
+  groups, out of the same four-slot budget — throughput is unchanged, the
+  ordering is not. Balance priority decides who goes first among claims that will
+  survive either way; it should decide nothing for a claim about to stop
+  existing. The horizon is the measured depth and the advancer's own cadence, so
+  it tightens by itself as a backlog grows.
+
+  New gauges `dub_queue_depth`, `dub_queue_drain_seconds` and
+  `dub_queue_safe_depth`, plus the counter `dub_queue_expired_total`. The safe
+  depth is the derivation itself,
+  `4 × floor((MaxValiditySeconds − 300) / QUEUE_ADVANCE_INTERVAL_SECS)` — roughly
+  170,000 rows at the shipped 3-day window and 6-second cadence, which is the
+  useful part of the answer: backlog depth is not what expires claims, a stalled
+  advancer or writer is. Publishing it keeps that true after a cadence change or
+  a runtime upgrade that shortens the window. None of it costs the advancer a chain
+  read: the deadline is on the row, and the gauge recovers the window from the
+  most recently stamped row, where `dotns_expires_at − dotns_signed_at` is the
+  constant that was in force.
+
+- **Balances are read from Asset Hub, on both paths that read one.** The payment
+  lane's deposit detection (`payment::watch_pass`) and the queue's
+  balance-priority grouping (`queue::intake_group` / `refresh_groups`) both now
+  call `AssetHub::free_balance` instead of the People Chain's. DOT lives on
+  Asset Hub, and the two had to move together: a queue that ranked claims by a
+  People balance while the payment lane watched deposits on Asset Hub would
+  price and prioritise the same account off two different numbers. The deposit
+  address itself is unchanged — it is derived from the subject and is
+  chain-agnostic. **`ASSET_HUB_RPC_URL` is therefore required on
+  `registration-queue` too**, which no longer reads `PEOPLE_RPC_URL` at all;
+  `verify_compose_boundaries.sh` requires it there rather than forbidding it.
+  The advancer connects read-only, skipping the `reserve_name` shape assertion:
+  it submits nothing, and a runtime that moved that call is the writer's lane to
+  park, not a reason to stop promoting.
+
 - **`username-indexer` indexes the unfinalized window speculatively.** The sync
   loop now subscribes to **best** block headers rather than finalized ones, and
   each pass reconciles the finalized range first (unchanged, authoritative) and

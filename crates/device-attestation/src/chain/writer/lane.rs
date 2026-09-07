@@ -59,6 +59,18 @@ fn row_backoff(attempt: i32) -> time::Duration {
     time::Duration::seconds(2i64.saturating_pow(attempt.clamp(0, 6) as u32))
 }
 
+/// Whether the People lane is the one that commits this claim.
+///
+/// Normally it is not: dotNS leads, so the Widevine device is consumed when
+/// the reservation lands and released when it fails. A row carrying no dotNS
+/// signature has no such lane — it is pre-cutover, written while People *was*
+/// the name authority, and intake refuses new ones — so for those the device
+/// still belongs to this half. `dotns_signature` is the same predicate the
+/// insert used to derive `dotns_status`, so the two can never disagree.
+fn leads(r: &Reservation) -> bool {
+    r.dotns_signature.is_none()
+}
+
 pub(super) struct People;
 
 impl Lane for People {
@@ -72,16 +84,24 @@ impl Lane for People {
     ) -> Result<()> {
         match outcome {
             Outcome::Landed | Outcome::Observed => {
-                // Assignment and device consumption commit together under the lease.
-                let mut tx = pool.begin().await?;
-                if !lease::fence(&mut tx, &guard.lease_name, &guard.holder_id, guard.epoch).await? {
+                if leads(r) {
+                    // Pre-cutover row: no dotNS half ever ran, so this lane is
+                    // the one that commits the claim and owes the device the
+                    // same treatment `Dotns` gives a row it leads.
+                    let mut tx = pool.begin().await?;
+                    if !lease::fence(&mut tx, &guard.lease_name, &guard.holder_id, guard.epoch)
+                        .await?
+                    {
+                        anyhow::bail!("lease lost while assigning");
+                    }
+                    if !outbox::mark_assigned(&mut *tx, guard, r.id).await? {
+                        anyhow::bail!("lease lost while assigning");
+                    }
+                    crate::widevine::store::consume_for_reservation(&mut *tx, r.id).await?;
+                    tx.commit().await?;
+                } else if !outbox::mark_assigned(pool, guard, r.id).await? {
                     anyhow::bail!("lease lost while assigning");
                 }
-                if !outbox::mark_assigned(&mut *tx, guard, r.id).await? {
-                    anyhow::bail!("lease lost while assigning");
-                }
-                crate::widevine::store::consume_for_reservation(&mut *tx, r.id).await?;
-                tx.commit().await?;
                 record_submit_outcome(Self::NAME, "ok");
                 let waited = (OffsetDateTime::now_utc() - r.created_at).as_seconds_f64();
                 if outcome == Outcome::Landed {
@@ -138,28 +158,50 @@ impl Lane for People {
                 }
             }
             Outcome::Failed(reason) | Outcome::Expired(reason) => {
-                let mut tx = pool.begin().await?;
-                // Fence takeover before locking the reservation. A replacement
-                // writer cannot acquire this lease until both terminal writes
-                // commit or roll back, so it never observes an active claim
-                // whose device was released.
-                if !lease::fence(&mut tx, &guard.lease_name, &guard.holder_id, guard.epoch).await? {
-                    anyhow::bail!("lease lost while failing");
-                }
-                if !outbox::mark_failed(&mut *tx, guard, r.id, reason).await? {
-                    anyhow::bail!("lease lost while failing");
-                }
-                let released =
-                    crate::widevine::store::release_for_reservation(&mut *tx, r.id).await?;
-                tx.commit().await?;
+                // For a row the dotNS lane led, the device record is
+                // deliberately NOT released: by the time this half runs the
+                // name is already reserved on Asset Hub and cannot be
+                // reclaimed, so freeing the device would let it claim a second
+                // name while the first stays burned. A pre-cutover row has no
+                // such claim behind it, so it releases like any terminal
+                // failure used to.
+                let released = if leads(r) {
+                    let mut tx = pool.begin().await?;
+                    // Fence takeover before locking the reservation, so a
+                    // replacement writer never observes an active claim whose
+                    // device was released.
+                    if !lease::fence(&mut tx, &guard.lease_name, &guard.holder_id, guard.epoch)
+                        .await?
+                    {
+                        anyhow::bail!("lease lost while failing");
+                    }
+                    if !outbox::mark_failed(&mut *tx, guard, r.id, reason).await? {
+                        anyhow::bail!("lease lost while failing");
+                    }
+                    let released =
+                        crate::widevine::store::release_for_reservation(&mut *tx, r.id).await?;
+                    tx.commit().await?;
+                    released
+                } else {
+                    if !outbox::mark_failed(pool, guard, r.id, reason).await? {
+                        anyhow::bail!("lease lost while failing");
+                    }
+                    false
+                };
+                record_submit_outcome(Self::NAME, "terminal");
                 if released {
                     tracing::info!(
                         id = r.id,
                         "widevine device record released with the failed claim"
                     );
                 }
-                record_submit_outcome(Self::NAME, "terminal");
-                tracing::warn!(id = r.id, username = %r.full_username, reason, "registration failed terminally");
+                tracing::warn!(
+                    id = r.id,
+                    username = %r.full_username,
+                    reason,
+                    dotns_led = !leads(r),
+                    "registration failed terminally"
+                );
             }
         }
         Ok(())
@@ -179,9 +221,15 @@ impl Lane for Dotns {
     ) -> Result<()> {
         match outcome {
             Outcome::Landed | Outcome::Observed => {
-                if !outbox::mark_dotns_reserved(pool, guard, r.id).await? {
+                let mut tx = pool.begin().await?;
+                if !lease::fence(&mut tx, &guard.lease_name, &guard.holder_id, guard.epoch).await? {
                     anyhow::bail!("lease lost while reserving dotns name");
                 }
+                if !outbox::mark_dotns_reserved(&mut *tx, guard, r.id).await? {
+                    anyhow::bail!("lease lost while reserving dotns name");
+                }
+                crate::widevine::store::consume_for_reservation(&mut *tx, r.id).await?;
+                tx.commit().await?;
                 record_submit_outcome(Self::NAME, "ok");
                 tracing::info!(id = r.id, username = %r.full_username, "dotns reserved on-chain");
             }
@@ -247,30 +295,57 @@ impl Lane for Dotns {
                     ),
                 }
             }
-            Outcome::Failed(reason) => {
-                if !outbox::mark_dotns_failed(pool, guard, r.id, reason).await? {
-                    anyhow::bail!("lease lost while failing dotns reservation");
-                }
-                record_submit_outcome(Self::NAME, "terminal");
-                tracing::warn!(
-                    id = r.id,
-                    username = %r.full_username,
-                    reason,
-                    "dotns reservation failed terminally; the People registration is unaffected"
-                );
-            }
-            Outcome::Expired(reason) => {
-                if !outbox::mark_dotns_expired(pool, guard, r.id, reason).await? {
-                    anyhow::bail!("lease lost while expiring dotns reservation");
-                }
-                record_submit_outcome(Self::NAME, "terminal");
-                tracing::warn!(
-                    id = r.id,
-                    username = %r.full_username,
-                    reason,
-                    "dotns reservation signature expired before submission"
-                );
-            }
+            Outcome::Failed(reason) => Self::terminal(pool, guard, r, reason, false).await?,
+            Outcome::Expired(reason) => Self::terminal(pool, guard, r, reason, true).await?,
+        }
+        Ok(())
+    }
+}
+
+impl Dotns {
+    async fn terminal(
+        pool: &PgPool,
+        guard: &Guard,
+        r: &Reservation,
+        reason: &str,
+        expired: bool,
+    ) -> Result<()> {
+        let mut tx = pool.begin().await?;
+        if !lease::fence(&mut tx, &guard.lease_name, &guard.holder_id, guard.epoch).await? {
+            anyhow::bail!("lease lost while failing dotns reservation");
+        }
+        let marked = if expired {
+            outbox::mark_dotns_expired(&mut *tx, guard, r.id, reason).await?
+        } else {
+            outbox::mark_dotns_failed(&mut *tx, guard, r.id, reason).await?
+        };
+        if !marked {
+            anyhow::bail!("lease lost while failing dotns reservation");
+        }
+        let released = crate::widevine::store::release_for_reservation(&mut *tx, r.id).await?;
+        tx.commit().await?;
+        if released {
+            tracing::info!(
+                id = r.id,
+                "widevine device record released with the failed claim"
+            );
+        }
+        record_submit_outcome(Self::NAME, "terminal");
+        if expired {
+            tracing::warn!(
+                id = r.id,
+                username = %r.full_username,
+                reason,
+                "dotns reservation signature expired before submission; \
+                 the claim is abandoned and the client must re-sign"
+            );
+        } else {
+            tracing::warn!(
+                id = r.id,
+                username = %r.full_username,
+                reason,
+                "dotns reservation failed terminally; the claim is abandoned"
+            );
         }
         Ok(())
     }

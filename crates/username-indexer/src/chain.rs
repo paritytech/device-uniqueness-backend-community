@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use chain_types::PeopleConfig;
+use chain_types::{AssetHubConfig, PeopleConfig};
 use subxt::{backend::LegacyBackend, client::Blocks, config::RpcConfigFor, OnlineClient};
 use subxt_rpcs::client::{ReconnectingRpcClient, RpcClient};
 use subxt_rpcs::LegacyRpcMethods;
@@ -11,22 +11,23 @@ use subxt_rpcs::LegacyRpcMethods;
 /// Boxed chain transport or metadata error.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// People Chain connection or query failure.
+/// Chain connection or query failure. Shared by both connections; the message
+/// names the chain so an operator does not have to infer it from the caller.
 #[derive(Debug, thiserror::Error)]
 pub enum ChainError {
-    #[error("connecting to People Chain at {url}: {source}")]
+    #[error("connecting to chain at {url}: {source}")]
     Connect {
         url: String,
         #[source]
         source: BoxError,
     },
     /// Online client metadata initialization failed.
-    #[error("initializing People Chain client: {0}")]
+    #[error("initializing chain client: {0}")]
     Initialize(#[source] BoxError),
-    #[error("querying People Chain finalized snapshot: {0}")]
+    #[error("querying chain finalized snapshot: {0}")]
     Query(#[source] BoxError),
     /// `chain_getHeader` answered, but with no header at all.
-    #[error("People Chain reported no best header")]
+    #[error("chain reported no best header")]
     NoBestHeader,
 }
 
@@ -70,6 +71,78 @@ impl PeopleChain {
     }
 
     pub async fn best_blocks(&self) -> Result<Blocks<PeopleConfig>, ChainError> {
+        self.client
+            .stream_best_blocks()
+            .await
+            .map_err(|source| ChainError::Query(Box::new(source)))
+    }
+
+    pub async fn finalized_head_number(&self) -> Result<u64, ChainError> {
+        Ok(self
+            .client
+            .at_current_block()
+            .await
+            .map_err(|source| ChainError::Query(Box::new(source)))?
+            .block_number())
+    }
+
+    pub async fn best_head_number(&self) -> Result<u64, ChainError> {
+        let header = self
+            .rpc
+            .chain_get_header(None)
+            .await
+            .map_err(|source| ChainError::Query(Box::new(source)))?
+            .ok_or(ChainError::NoBestHeader)?;
+        Ok(header.number)
+    }
+
+    /// Verify that a current finalized block is reachable.
+    pub async fn health(&self) -> Result<(), ChainError> {
+        self.client
+            .at_current_block()
+            .await
+            .map_err(|source| ChainError::Query(Box::new(source)))?;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct AssetHubChain {
+    client: OnlineClient<AssetHubConfig>,
+    rpc: LegacyRpcMethods<RpcConfigFor<AssetHubConfig>>,
+}
+
+impl AssetHubChain {
+    pub async fn connect(url: &str, storage_page_size: u32) -> Result<Self, ChainError> {
+        let reconnecting = ReconnectingRpcClient::builder()
+            .build(url)
+            .await
+            .map_err(|source| ChainError::Connect {
+                url: url.to_string(),
+                source: Box::new(source),
+            })?;
+        let rpc_client = RpcClient::new(reconnecting);
+        let backend = LegacyBackend::<AssetHubConfig>::builder()
+            .storage_page_size(storage_page_size)
+            .build(rpc_client.clone());
+        let client = OnlineClient::from_backend(Arc::new(backend))
+            .await
+            .map_err(|source| ChainError::Initialize(Box::new(source)))?;
+        Ok(Self::from_parts(client, rpc_client))
+    }
+
+    pub fn from_parts(client: OnlineClient<AssetHubConfig>, rpc: RpcClient) -> Self {
+        Self {
+            client,
+            rpc: LegacyRpcMethods::new(rpc),
+        }
+    }
+
+    pub fn online(&self) -> &OnlineClient<AssetHubConfig> {
+        &self.client
+    }
+
+    pub async fn best_blocks(&self) -> Result<Blocks<AssetHubConfig>, ChainError> {
         self.client
             .stream_best_blocks()
             .await

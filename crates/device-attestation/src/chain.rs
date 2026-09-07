@@ -8,4 +8,5 @@ pub mod people;
 pub(crate) mod registry;
 pub mod writer;
 
+pub use asset_hub::AssetHub;
 pub use people::PeopleChain;

@@ -118,3 +118,21 @@ pub async fn probe(
     }
     Ok(&["db", "chain"])
 }
+
+/// The same probe for a process whose only chain dependency is Asset Hub —
+/// `registration-queue`, whose chain read is the balance that decides a
+/// claim's priority group.
+pub async fn probe_asset_hub(
+    pool: sqlx::PgPool,
+    chain: crate::AssetHub,
+) -> http_common::health::Readiness {
+    if let Err(err) = sqlx::query("SELECT 1").execute(&pool).await {
+        tracing::warn!(error = ?err, "readiness check failed: database unavailable");
+        return Err("db");
+    }
+    if let Err(err) = chain.health().await {
+        tracing::warn!(error = ?err, "readiness check failed: Asset Hub unavailable");
+        return Err("chain");
+    }
+    Ok(&["db", "chain"])
+}

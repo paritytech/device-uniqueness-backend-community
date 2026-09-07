@@ -20,6 +20,9 @@ pub struct Config {
     pub jwt_issuer: String,
     /// People Chain RPC endpoint for read-path chain queries.
     pub people_rpc_url: String,
+    /// Asset Hub RPC. dotNS is the name authority, so the API reads
+    /// availability from the gateway rather than from People storage.
+    pub asset_hub_rpc_url: String,
     /// Attester authority: published by `GET /api/v1/attester` as `0x`+hex and
     /// attested as by device-attestation-chain-writer, from one shared value.
     pub attester_account: [u8; 32],
@@ -43,9 +46,6 @@ pub struct Config {
     /// `true` recognises `lifetimePoUDVoucher` on `POST /api/v1/usernames`;
     /// `false` (default) ignores the field, keeping the frozen wire.
     pub registration_vouchers_enabled: bool,
-    /// Whether registration accepts the optional `dotns` block (mirrors the
-    /// legacy `DOTNS_GATEWAY_ENABLED` gate and its captured 400 message).
-    pub dotns_gateway_enabled: bool,
     /// Max age, in seconds, of `dotns.signedAt` (the intake freshness bound).
     pub dotns_intake_freshness_max_age_secs: u32,
     /// Max future skew, in seconds, tolerated on `dotns.signedAt`.
@@ -149,8 +149,9 @@ pub enum ConfigError {
 impl Config {
     /// Read and validate configuration from the environment.
     ///
-    /// Fails (rather than defaulting) for `DEVICE_ATTESTATION_DATABASE_URL`
-    /// and `JWT_ED25519_SECRET`; everything else has a safe local default.
+    /// Fails (rather than defaulting) for `DEVICE_ATTESTATION_DATABASE_URL`,
+    /// `JWT_ED25519_SECRET` and `ASSET_HUB_RPC_URL`; everything else has a safe
+    /// local default.
     pub fn from_env() -> Result<Self, ConfigError> {
         let bind_addr = parse_var("BIND_ADDR", "0.0.0.0:8080")?;
         let database_url = std::env::var("DEVICE_ATTESTATION_DATABASE_URL")
@@ -200,6 +201,19 @@ impl Config {
         }
 
         let enforce_auth = env_bool("ENFORCE_AUTH", false)?;
+        // Required, not defaulted. dotNS is the name authority: availability,
+        // the registration digit selection and the payment lane's re-selection
+        // are all decided against this endpoint. A default would let an
+        // environment that repoints PEOPLE_RPC_URL at another network keep
+        // answering from PreviewNet's gateway, silently — which is exactly the
+        // split-network pairing every comment around ASSET_HUB_RPC_URL warns
+        // about. The writer aborts without it and username-indexer refuses to
+        // start; the API matches them.
+        let asset_hub_rpc_url = std::env::var("ASSET_HUB_RPC_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or(ConfigError::Missing("ASSET_HUB_RPC_URL"))?;
         let widevine = parse_widevine()?;
         // Warn, not fatal: an advisory rollout stage is deliberate.
         if widevine.as_ref().is_some_and(|w| w.enforce) && !(auth_enabled && enforce_auth) {
@@ -219,6 +233,7 @@ impl Config {
             jwt_issuer: std::env::var("JWT_ISSUER").unwrap_or_else(|_| "polkadot-app".to_string()),
             people_rpc_url: std::env::var("PEOPLE_RPC_URL")
                 .unwrap_or_else(|_| "wss://previewnet.substrate.dev/people".to_string()),
+            asset_hub_rpc_url,
             attester_account: attester_account_from_env()?,
             access_ttl: Duration::from_secs(parse_var("ACCESS_TOKEN_TTL_SECS", "86400")?),
             refresh_ttl: Duration::from_secs(parse_var("REFRESH_TOKEN_TTL_SECS", "2592000")?),
@@ -229,11 +244,6 @@ impl Config {
             enforce_auth,
             queue_enabled: env_bool("QUEUE_ENABLED", false)?,
             registration_vouchers_enabled: env_bool("REGISTRATION_VOUCHERS_ENABLED", false)?,
-            // Defaults off in code while `.env.example` and `docker-compose.yml` ship it
-            // on: their PEOPLE_RPC_URL and ASSET_HUB_RPC_URL name the same network, which
-            // is what makes the lane safe. A bare process has no such pairing, so the
-            // fallback stays conservative. Must match the writer's default.
-            dotns_gateway_enabled: env_bool("DOTNS_GATEWAY_ENABLED", false)?,
             dotns_intake_freshness_max_age_secs: parse_var(
                 "DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS",
                 "600",
@@ -276,6 +286,7 @@ impl Config {
             jwt_secret: SecretBox::new(Box::new([7u8; 32])),
             jwt_issuer: "polkadot-app".to_string(),
             people_rpc_url: "unused".to_string(),
+            asset_hub_rpc_url: "unused".to_string(),
             attester_account: [0xaa; 32],
             access_ttl: Duration::from_secs(86_400),
             refresh_ttl: Duration::from_secs(2_592_000),
@@ -286,7 +297,6 @@ impl Config {
             enforce_auth: false,
             queue_enabled: false,
             registration_vouchers_enabled: false,
-            dotns_gateway_enabled: true,
             dotns_intake_freshness_max_age_secs: 600,
             dotns_max_future_skew_secs: 600,
             apple_app_attest_app_ids: Vec::new(),
@@ -894,6 +904,7 @@ mod tests {
         const VARS: &[&str] = &[
             "DEVICE_ATTESTATION_DATABASE_URL",
             "JWT_ED25519_SECRET",
+            "ASSET_HUB_RPC_URL",
             "ATTESTER_ACCOUNT",
             "AUTH_ENABLED",
             "APPLE_APP_ATTEST_APP_IDS",
@@ -919,6 +930,9 @@ mod tests {
         std::env::set_var("DEVICE_ATTESTATION_DATABASE_URL", "postgres://unused");
         missing("JWT_ED25519_SECRET");
         std::env::set_var("JWT_ED25519_SECRET", hex::encode([1u8; 32]));
+        // No default: the name authority is never guessed for a bare process.
+        missing("ASSET_HUB_RPC_URL");
+        std::env::set_var("ASSET_HUB_RPC_URL", "wss://example.invalid/asset-hub");
         missing("ATTESTER_ACCOUNT");
         std::env::set_var(
             "ATTESTER_ACCOUNT",
@@ -929,10 +943,6 @@ mod tests {
         assert_eq!(config.bind_addr.to_string(), "0.0.0.0:8080");
         assert_eq!(config.jwt_issuer, "polkadot-app");
         assert!(!config.auth_enabled);
-        assert!(
-            !config.dotns_gateway_enabled,
-            "the gateway is opt-in; a minimal environment must not claim dotNS labels"
-        );
         let alice: [u8; 32] =
             hex::decode("d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d")
                 .unwrap()

@@ -36,6 +36,7 @@ async fn every_outbox_status_remains_allocated() {
             identifier_key: vec![5; 65],
             dotns_signature: None,
             dotns_signed_at: None,
+            dotns_expires_at: None,
             reserved_username: None,
         };
         outbox::insert(&pool, &reservation).await.expect("insert");

@@ -15,7 +15,7 @@ use tower::ServiceExt as _;
 
 use device_attestation::config::{DeviceCheckConfig, PaymentConfig};
 use device_attestation::eligibility;
-use device_attestation::{AppState, Config, Jwt, PeopleChain};
+use device_attestation::{AppState, AssetHub, Config, Jwt, PeopleChain};
 
 const JWT_SEED: [u8; 32] = [7u8; 32];
 const SUBJECT: &str = "0xpaymenthttplive";
@@ -129,6 +129,15 @@ async fn missing_device_token_resolves_to_a_payment_quote_over_the_production_ro
     let rpc_url = std::env::var("PEOPLE_RPC_URL")
         .unwrap_or_else(|_| "wss://paseo-people-next-system-rpc.polkadot.io".to_string());
     let chain = PeopleChain::connect(&rpc_url).await.expect("live RPC");
+    let asset_hub_url = std::env::var("ASSET_HUB_RPC_URL")
+        .unwrap_or_else(|_| "wss://paseo-asset-hub-next-rpc.polkadot.io".to_string());
+    let asset_hub = AssetHub::connect(&asset_hub_url)
+        .await
+        .expect("live Asset Hub RPC");
+    let dotns_validity = asset_hub
+        .validity_window()
+        .await
+        .expect("live reservation window");
 
     let mut config = Config::test_default();
     config.enforce_auth = true;
@@ -141,7 +150,14 @@ async fn missing_device_token_resolves_to_a_payment_quote_over_the_production_ro
     };
     config.payment = Some(payment.clone());
     let jwt = Jwt::new(&JWT_SEED, config.jwt_issuer.clone());
-    let app = device_attestation::routes(AppState::new(pool.clone(), chain, jwt, config));
+    let app = device_attestation::routes(AppState::new(
+        pool.clone(),
+        chain,
+        asset_hub,
+        dotns_validity,
+        jwt,
+        config,
+    ));
     let token = mint_ios_token();
 
     let base = unique_base("payhttp");
@@ -193,8 +209,10 @@ async fn missing_device_token_resolves_to_a_payment_quote_over_the_production_ro
             .expect("row")
             .try_get("id")
             .unwrap();
-    let chain2 = PeopleChain::connect(&rpc_url).await.expect("live RPC");
-    device_attestation::payment::confirm_by_id(&pool, &chain2, request_id)
+    let asset_hub2 = AssetHub::connect(&asset_hub_url)
+        .await
+        .expect("live Asset Hub RPC");
+    device_attestation::payment::confirm_by_id(&pool, &asset_hub2, request_id)
         .await
         .expect("confirm")
         .expect("was pending");
@@ -262,6 +280,15 @@ async fn non_store_install_routes_to_payment_and_store_install_proceeds() {
     let rpc_url = std::env::var("PEOPLE_RPC_URL")
         .unwrap_or_else(|_| "wss://paseo-people-next-system-rpc.polkadot.io".to_string());
     let chain = PeopleChain::connect(&rpc_url).await.expect("live RPC");
+    let asset_hub_url = std::env::var("ASSET_HUB_RPC_URL")
+        .unwrap_or_else(|_| "wss://paseo-asset-hub-next-rpc.polkadot.io".to_string());
+    let asset_hub = AssetHub::connect(&asset_hub_url)
+        .await
+        .expect("live Asset Hub RPC");
+    let dotns_validity = asset_hub
+        .validity_window()
+        .await
+        .expect("live reservation window");
 
     let mut config = Config::test_default();
     config.payment = Some(PaymentConfig {
@@ -270,7 +297,14 @@ async fn non_store_install_routes_to_payment_and_store_install_proceeds() {
         request_ttl: Duration::from_secs(3600),
     });
     let jwt = Jwt::new(&JWT_SEED, config.jwt_issuer.clone());
-    let app = device_attestation::routes(AppState::new(pool.clone(), chain, jwt, config));
+    let app = device_attestation::routes(AppState::new(
+        pool.clone(),
+        chain,
+        asset_hub,
+        dotns_validity,
+        jwt,
+        config,
+    ));
 
     let vanilla = mint_android_token(vanilla_subject, false);
     let (status, body) = post_claim(&app, &vanilla, &claim_body(&vanilla_base)).await;
@@ -318,6 +352,15 @@ async fn a_valid_voucher_beats_the_non_store_payment_gate() {
     let rpc_url = std::env::var("PEOPLE_RPC_URL")
         .unwrap_or_else(|_| "wss://paseo-people-next-system-rpc.polkadot.io".to_string());
     let chain = PeopleChain::connect(&rpc_url).await.expect("live RPC");
+    let asset_hub_url = std::env::var("ASSET_HUB_RPC_URL")
+        .unwrap_or_else(|_| "wss://paseo-asset-hub-next-rpc.polkadot.io".to_string());
+    let asset_hub = AssetHub::connect(&asset_hub_url)
+        .await
+        .expect("live Asset Hub RPC");
+    let dotns_validity = asset_hub
+        .validity_window()
+        .await
+        .expect("live reservation window");
 
     let mut config = Config::test_default();
     config.registration_vouchers_enabled = true;
@@ -327,7 +370,14 @@ async fn a_valid_voucher_beats_the_non_store_payment_gate() {
         request_ttl: Duration::from_secs(3600),
     });
     let jwt = Jwt::new(&JWT_SEED, config.jwt_issuer.clone());
-    let app = device_attestation::routes(AppState::new(pool.clone(), chain, jwt, config));
+    let app = device_attestation::routes(AppState::new(
+        pool.clone(),
+        chain,
+        asset_hub,
+        dotns_validity,
+        jwt,
+        config,
+    ));
 
     let batch = base.clone();
     let key = format!("fr005-key-{}", std::process::id());

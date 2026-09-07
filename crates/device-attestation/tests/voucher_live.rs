@@ -21,6 +21,7 @@ fn reservation(base: &str, digits: &str) -> NewReservation {
         identifier_key: vec![5; 65],
         dotns_signature: None,
         dotns_signed_at: None,
+        dotns_expires_at: None,
         reserved_username: None,
     }
 }

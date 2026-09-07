@@ -107,3 +107,28 @@ where
     .await?;
     Ok(done.rows_affected() > 0)
 }
+
+/// [`release_for_reservation`] for a whole set, in one statement.
+///
+/// The queue's expiry sweep abandons every claim past its dotNS deadline in a
+/// single UPDATE; each of those devices has to come back with it, or the
+/// handset the client is told to re-register from stays `PENDING` forever and
+/// [`seen`] keeps refusing it. Returns how many records were released.
+pub async fn release_for_reservations<'e, E>(
+    executor: E,
+    reservation_ids: &[i64],
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    if reservation_ids.is_empty() {
+        return Ok(0);
+    }
+    let done = sqlx::query(
+        "DELETE FROM widevine_devices WHERE reservation_id = ANY($1) AND status = 'PENDING'",
+    )
+    .bind(reservation_ids)
+    .execute(executor)
+    .await?;
+    Ok(done.rows_affected())
+}

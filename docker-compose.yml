@@ -57,6 +57,12 @@ services:
       # here would aim every container at its own loopback.
       DEVICE_ATTESTATION_DATABASE_URL: postgres://${DEVICE_ATTESTATION_DB_USER:-device_attestation}:${DEVICE_ATTESTATION_DB_PASSWORD:-device_attestation}@postgres:5432/${DEVICE_ATTESTATION_DB_NAME:-device_attestation}
       PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      # dotNS is the name authority, so the API decides availability against
+      # DotnsGateway::LiteLabelOwner rather than People storage. Read-only
+      # here; the writer holds the only key that submits. The API blocks on
+      # this at startup exactly as it does on PEOPLE_RPC_URL: no reachable
+      # name authority, no working username surface.
+      ASSET_HUB_RPC_URL: ${ASSET_HUB_RPC_URL:-wss://previewnet.substrate.dev/asset-hub}
       # Dev-only 32-byte Ed25519 seed (0x + 64 hex). Replace in prod.
       JWT_ED25519_SECRET: ${JWT_ED25519_SECRET:-0x0101010101010101010101010101010101010101010101010101010101010101}
       # Dev default = //Alice, matching the writer SURI below (signer ==
@@ -76,16 +82,6 @@ services:
       ANDROID_SIGNING_DIGEST_PLAYSTORE: ${ANDROID_SIGNING_DIGEST_PLAYSTORE:-}
       ANDROID_SIGNING_DIGEST_WEBSITE: ${ANDROID_SIGNING_DIGEST_WEBSITE:-}
       QUEUE_ENABLED: ${QUEUE_ENABLED:-false}
-      # On by default: the PEOPLE_RPC_URL and ASSET_HUB_RPC_URL defaults both
-      # name PreviewNet. That pairing IS the safety property. Split
-      # across two networks, the writer would claim LiteLabelOwner on one for
-      # usernames attested on another: a global claim, and unrecoverable,
-      # because only the client can re-sign. An environment that overrides
-      # PEOPLE_RPC_URL to another network MUST also repoint ASSET_HUB_RPC_URL to
-      # that environment, or set DOTNS_GATEWAY_ENABLED=false in the same .env.
-      # Both halves move together; intake accepting blocks the writer never
-      # submits is the other gap this pair closes.
-      DOTNS_GATEWAY_ENABLED: ${DOTNS_GATEWAY_ENABLED:-true}
       DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS: ${DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS:-600}
       # Matches the gateway pallet's MaxFutureSkewSeconds; see .env.example.
       DOTNS_MAX_FUTURE_SKEW_SECS: ${DOTNS_MAX_FUTURE_SKEW_SECS:-30}
@@ -144,10 +140,8 @@ services:
       CHAIN_WRITER_BATCH_SIZE: ${CHAIN_WRITER_BATCH_SIZE:-25}
       CHAIN_WRITER_FINALIZE_SECS: ${CHAIN_WRITER_FINALIZE_SECS:-120}
       CHAIN_WRITER_MAX_ATTEMPTS: ${CHAIN_WRITER_MAX_ATTEMPTS:-8}
-      # dotNS gateway lane (Asset Hub). On by default, and must match
-      # device-attestation-api's DOTNS_GATEWAY_ENABLED. That side gates intake, this side
-      # submits. A split value means blocks are accepted that nothing ever
-      # writes. On + no ASSET_HUB_RPC_URL = startup abort, by design; every
+      # dotNS gateway lane (Asset Hub). Not optional: dotNS is the name
+      # authority, so an unset ASSET_HUB_RPC_URL is a startup abort. Every
       # other dotNS failure parks the lane rather than the writer, including a
       # reserve_name shape the connected runtime does not match.
       # ATTESTER_ACCOUNT above covers both chains: proxying is derived from it,
@@ -155,9 +149,7 @@ services:
       # signing origin by construction.
       # The URL below must name the Asset Hub of the same network PEOPLE_RPC_URL
       # points at, or the writer claims labels on the wrong chain. Both default
-      # to PreviewNet; an environment that moves one moves the other, or turns
-      # the lane off explicitly.
-      DOTNS_GATEWAY_ENABLED: ${DOTNS_GATEWAY_ENABLED:-true}
+      # to PreviewNet; an environment that moves one moves the other.
       ASSET_HUB_RPC_URL: ${ASSET_HUB_RPC_URL:-wss://previewnet.substrate.dev/asset-hub}
       # Must match device-attestation-api's QUEUE_ENABLED: on = QUEUED rows are never
       # drained here (stranded-queue warning only); off = janitor drain.
@@ -202,7 +194,11 @@ services:
     # balances and flips queue rows in the device-attestation DB.
     environment:
       DEVICE_ATTESTATION_DATABASE_URL: postgres://${DEVICE_ATTESTATION_DB_USER:-device_attestation}:${DEVICE_ATTESTATION_DB_PASSWORD:-device_attestation}@postgres:5432/${DEVICE_ATTESTATION_DB_NAME:-device_attestation}
-      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      # Balances live on Asset Hub, which is also where the payment lane
+      # watches deposits — grouping the queue off the other chain would rank
+      # claims by a balance nobody is being asked to hold. Read-only, and no
+      # reserve_name shape assertion: this service submits nothing.
+      ASSET_HUB_RPC_URL: ${ASSET_HUB_RPC_URL:-wss://previewnet.substrate.dev/asset-hub}
       QUEUE_ADVANCE_INTERVAL_SECS: ${QUEUE_ADVANCE_INTERVAL_SECS:-6}
       QUEUE_LEASE_TTL_SECS: ${QUEUE_LEASE_TTL_SECS:-30}
       # Prometheus exporter, scraped on the private metrics network only.
@@ -254,6 +250,11 @@ services:
       BIND_ADDR: 0.0.0.0:8080
       INDEXER_DATABASE_URL: postgres://username_indexer:username_indexer@username-indexer-postgres:5432/username_indexer
       PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      # The name authority. The indexer projects DotnsGateway reservations and
+      # registrations from here; People stays connected for the pre-cutover
+      # population and for the chat keys the gateway census recovers. Read-only
+      # on both. Same-network pairing applies as everywhere else.
+      ASSET_HUB_RPC_URL: ${ASSET_HUB_RPC_URL:-wss://previewnet.substrate.dev/asset-hub}
       STORAGE_PAGE_SIZE: ${STORAGE_PAGE_SIZE:-1000}
       SYNC_INTERVAL_SECS: ${SYNC_INTERVAL_SECS:-30}
       SPECULATIVE_INDEXING_ENABLED: ${SPECULATIVE_INDEXING_ENABLED:-true}

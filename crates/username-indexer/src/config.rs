@@ -18,8 +18,14 @@ pub struct Config {
     pub bind_addr: SocketAddr,
     /// Service-owned Postgres connection string.
     pub database_url: String,
-    /// People Chain WebSocket RPC endpoint.
+    /// People Chain WebSocket RPC endpoint. The legacy half of the projection:
+    /// names registered before the dotNS cutover, and the chat keys the gateway
+    /// census recovers.
     pub people_rpc_url: String,
+    /// Asset Hub WebSocket RPC endpoint — the name authority. Required: a
+    /// projection without it would serve only the legacy population while
+    /// reporting healthy.
+    pub asset_hub_rpc_url: String,
     /// Maximum number of storage entries requested and written per page.
     pub storage_page_size: u32,
     /// Longest the sync loop waits without a best-block header, in seconds,
@@ -55,6 +61,7 @@ impl Config {
     {
         let database_url = required(&get, "INDEXER_DATABASE_URL")?;
         let people_rpc_url = required(&get, "PEOPLE_RPC_URL")?;
+        let asset_hub_rpc_url = required(&get, "ASSET_HUB_RPC_URL")?;
         let bind_addr = parse(
             "BIND_ADDR",
             get("BIND_ADDR").as_deref().unwrap_or(DEFAULT_BIND_ADDR),
@@ -148,6 +155,7 @@ impl Config {
             bind_addr,
             database_url,
             people_rpc_url,
+            asset_hub_rpc_url,
             storage_page_size,
             sync_interval_secs,
             search_rate_limit,
@@ -218,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn requires_database_and_people_rpc_urls() {
+    fn requires_database_and_both_chain_rpc_urls() {
         assert!(matches!(
             config(&[]),
             Err(ConfigError::Missing("INDEXER_DATABASE_URL"))
@@ -227,6 +235,13 @@ mod tests {
             config(&[("INDEXER_DATABASE_URL", "postgres://localhost/read")]),
             Err(ConfigError::Missing("PEOPLE_RPC_URL"))
         ));
+        assert!(matches!(
+            config(&[
+                ("INDEXER_DATABASE_URL", "postgres://localhost/read"),
+                ("PEOPLE_RPC_URL", "ws://localhost:9944"),
+            ]),
+            Err(ConfigError::Missing("ASSET_HUB_RPC_URL"))
+        ));
     }
 
     #[test]
@@ -234,6 +249,7 @@ mod tests {
         let defaults = config(&[
             ("INDEXER_DATABASE_URL", "postgres://localhost/read"),
             ("PEOPLE_RPC_URL", "ws://localhost:9944"),
+            ("ASSET_HUB_RPC_URL", "ws://localhost:9955"),
         ])
         .expect("valid defaults");
         assert_eq!(defaults.bind_addr.to_string(), "0.0.0.0:8080");
@@ -247,6 +263,7 @@ mod tests {
         let overridden = config(&[
             ("INDEXER_DATABASE_URL", "postgres://localhost/read"),
             ("PEOPLE_RPC_URL", "ws://localhost:9944"),
+            ("ASSET_HUB_RPC_URL", "ws://localhost:9955"),
             ("BIND_ADDR", "127.0.0.1:9000"),
             ("STORAGE_PAGE_SIZE", "250"),
             ("SYNC_INTERVAL_SECS", "5"),
@@ -267,6 +284,7 @@ mod tests {
             let error = config(&[
                 ("INDEXER_DATABASE_URL", "postgres://localhost/read"),
                 ("PEOPLE_RPC_URL", "ws://localhost:9944"),
+                ("ASSET_HUB_RPC_URL", "ws://localhost:9955"),
                 ("STORAGE_PAGE_SIZE", value),
             ])
             .expect_err("invalid page size");
@@ -286,6 +304,7 @@ mod tests {
             let error = config(&[
                 ("INDEXER_DATABASE_URL", "postgres://localhost/read"),
                 ("PEOPLE_RPC_URL", "ws://localhost:9944"),
+                ("ASSET_HUB_RPC_URL", "ws://localhost:9955"),
                 ("SYNC_INTERVAL_SECS", value),
             ])
             .expect_err("invalid sync interval");
@@ -304,6 +323,7 @@ mod tests {
         let error = config(&[
             ("INDEXER_DATABASE_URL", "postgres://localhost/read"),
             ("PEOPLE_RPC_URL", "ws://localhost:9944"),
+            ("ASSET_HUB_RPC_URL", "ws://localhost:9955"),
             ("SEARCH_RATE_LIMIT", "0"),
         ])
         .expect_err("invalid search rate limit");
@@ -321,8 +341,9 @@ mod tests {
         let base = [
             ("INDEXER_DATABASE_URL", "postgres://localhost/read"),
             ("PEOPLE_RPC_URL", "ws://localhost:9944"),
+            ("ASSET_HUB_RPC_URL", "ws://localhost:9955"),
         ];
-        let enabled_without_secret = config(&[base[0], base[1], ("POC_ENABLED", "true")])
+        let enabled_without_secret = config(&[base[0], base[1], base[2], ("POC_ENABLED", "true")])
             .expect_err("secret is required with the gate on");
         assert!(matches!(
             enabled_without_secret,
@@ -332,6 +353,7 @@ mod tests {
         let enabled = config(&[
             base[0],
             base[1],
+            base[2],
             ("POC_ENABLED", "true"),
             ("POC_HMAC_SECRET", POC_SECRET),
             ("POC_DIFFICULTY_BITS", "8"),
@@ -346,11 +368,13 @@ mod tests {
         let base = [
             ("INDEXER_DATABASE_URL", "postgres://localhost/read"),
             ("PEOPLE_RPC_URL", "ws://localhost:9944"),
+            ("ASSET_HUB_RPC_URL", "ws://localhost:9955"),
         ];
         assert!(matches!(
             config(&[
                 base[0],
                 base[1],
+                base[2],
                 ("POC_ENABLED", "true"),
                 ("POC_HMAC_SECRET", "too-short"),
             ]),
@@ -363,6 +387,7 @@ mod tests {
             config(&[
                 base[0],
                 base[1],
+                base[2],
                 ("POC_ENABLED", "true"),
                 ("POC_HMAC_SECRET", "   "),
             ]),
@@ -376,6 +401,7 @@ mod tests {
             config(&[
                 ("INDEXER_DATABASE_URL", "postgres://localhost/read"),
                 ("PEOPLE_RPC_URL", "ws://localhost:9944"),
+                ("ASSET_HUB_RPC_URL", "ws://localhost:9955"),
                 ("POC_ENABLED", ""),
             ]),
             Err(ConfigError::Invalid {
@@ -390,9 +416,10 @@ mod tests {
         let base = [
             ("INDEXER_DATABASE_URL", "postgres://localhost/read"),
             ("PEOPLE_RPC_URL", "ws://localhost:9944"),
+            ("ASSET_HUB_RPC_URL", "ws://localhost:9955"),
         ];
         assert!(matches!(
-            config(&[base[0], base[1], ("POC_ENABLED", "treu")]),
+            config(&[base[0], base[1], base[2], ("POC_ENABLED", "treu")]),
             Err(ConfigError::Invalid {
                 key: "POC_ENABLED",
                 ..
@@ -400,7 +427,7 @@ mod tests {
         ));
         for value in ["0", "33"] {
             assert!(matches!(
-                config(&[base[0], base[1], ("POC_DIFFICULTY_BITS", value)]),
+                config(&[base[0], base[1], base[2], ("POC_DIFFICULTY_BITS", value)]),
                 Err(ConfigError::Invalid {
                     key: "POC_DIFFICULTY_BITS",
                     ..

@@ -285,7 +285,7 @@ pub async fn expire_pending(pool: &PgPool) -> Result<u64, sqlx::Error> {
 /// balance ≥ required** (the plan's recorded divergence from exact-transfer
 /// matching); an unreadable balance skips the row — never confirms, never
 /// errors the pass (fail closed on money).
-pub async fn watch_pass(pool: &PgPool, chain: &crate::PeopleChain) -> anyhow::Result<WatchStats> {
+pub async fn watch_pass(pool: &PgPool, chain: &crate::AssetHub) -> anyhow::Result<WatchStats> {
     use std::str::FromStr as _;
 
     let mut stats = WatchStats {
@@ -364,20 +364,28 @@ pub enum ConfirmOutcome {
 }
 
 /// Hand a paid request to the outbox: re-select the discriminator against
-/// current chain + outbox state (a paid registration is never failed for digit
-/// contention short of exhaustion), then flip PENDING → CONFIRMED and insert
-/// the `RESERVED` row in one transaction. The flip is guarded by status AND
+/// current gateway + outbox state (a paid registration is never failed for
+/// digit contention short of exhaustion), then flip PENDING → CONFIRMED and
+/// insert the `RESERVED` row in one transaction.
+///
+/// The re-selection reads Asset Hub, the same authority intake used, so a
+/// paid claim can never be handed a label the gateway already owns. The flip is guarded by status AND
 /// the snapshot's `updated_at`, so it is idempotent and a concurrent re-claim
 /// makes a stale-payload flip lose cleanly.
 async fn confirm_request(
     pool: &PgPool,
-    chain: &crate::PeopleChain,
+    chain: &crate::AssetHub,
     row: &PendingRequest,
 ) -> anyhow::Result<ConfirmOutcome> {
     use rand::seq::SliceRandom as _;
 
     let (on_chain, in_outbox) = tokio::try_join!(
-        async { chain.taken_discriminators(&row.base).await },
+        async {
+            chain
+                .base_labels(&row.base)
+                .await
+                .map(|labels| labels.taken)
+        },
         async {
             crate::chain::outbox::allocated_discriminators(pool, &row.base)
                 .await
@@ -417,6 +425,13 @@ async fn confirm_request(
     };
     let digits = format!("{digit:02}");
 
+    let max_validity = chain.validity_window().await?.max_validity();
+    let dotns_expires_at = row.dotns_signed_at.and_then(|signed_at| {
+        time::OffsetDateTime::from_unix_timestamp(signed_at)
+            .ok()
+            .and_then(|signed| signed.checked_add(time::Duration::try_from(max_validity).ok()?))
+    });
+
     let new = NewReservation {
         account_id: row.account_id.clone(),
         candidate_account_id: row.candidate_account_id.clone(),
@@ -430,6 +445,7 @@ async fn confirm_request(
         identifier_key: row.identifier_key.clone(),
         dotns_signature: row.dotns_signature.clone(),
         dotns_signed_at: row.dotns_signed_at,
+        dotns_expires_at,
         reserved_username: row.reserved_username.clone(),
     };
 
@@ -462,7 +478,7 @@ async fn confirm_request(
 /// is not a PENDING request.
 pub async fn confirm_by_id(
     pool: &PgPool,
-    chain: &crate::PeopleChain,
+    chain: &crate::AssetHub,
     id: i64,
 ) -> anyhow::Result<Option<ConfirmOutcome>> {
     let Some(row) = fetch_pending(pool)
