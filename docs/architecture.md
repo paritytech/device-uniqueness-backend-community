@@ -212,24 +212,26 @@ process, or a database blip becomes a crash loop.
 Operational invariants an agent must respect when touching the code.
 
 - **Registration is an outbox.** `POST /api/v1/usernames` inserts a `RESERVED` row in
-  `username_reservations` and returns `202`; `device-attestation-chain-writer` claims rows and submits the
-  People Chain calls (`PeopleLite.attest` / `Resources.register_lite_person`), advancing
-  `RESERVED → SUBMITTING → ASSIGNED | RETRY_AFTER | FAILED_TERMINAL`. The DB row is source of truth;
-  chain is reconciled to it. No service reads another service's tables.
-- **A claim's optional full-name reservation is checked before it is accepted, because it cannot be
-  dropped afterwards.** `dotns.reservedUsername` is relayed into `attest`'s `reserved_username` — the
-  bare, undiscriminated *full-person* name. It is **its own name**: `attest` takes it as a separate
-  argument from the lite username, and nothing requires it to be that username's base, so the
-  preflight reads the reservation state of the reserved name — not of the base being claimed under —
-  and only skips the extra read when the two are equal. The runtime validates that leg **before** it
-  writes the lite username, so a name already owned (`Resources::UsernameReservationTaken`), a
-  reservation queue at `Resources::MaxReservationQueueLength` (`QueueFull`), or an account that
-  already reserved (`AlreadyHasReservation`) costs the caller the **whole** registration, not just
-  the reservation.
-  The writer cannot resubmit without the reservation: the consumer signature covers
-  `reserved_username`, so only the client can re-sign. Intake therefore refuses such a claim with a
-  `409` before a row or a fee exists, and the writer treats all three as deterministic rejections so
-  anything that races the check costs one fee rather than `CHAIN_WRITER_MAX_ATTEMPTS`.
+  `username_reservations` and returns `202`; `device-attestation-chain-writer` claims rows and drains
+  them onto two chains in order — `DotnsGateway::reserve_name` on Asset Hub first, then
+  `PeopleLite.attest` on People — advancing `RESERVED → SUBMITTING → ASSIGNED | RETRY_AFTER |
+  FAILED_TERMINAL | ABANDONED`. The DB row is source of truth; chain is reconciled to it. No service
+  reads another service's tables.
+- **Asset Hub is the name authority; People holds the consumer record.** Which usernames exist and
+  who owns them is decided by `DotnsGateway::LiteLabelOwner` on Asset Hub. People is still written,
+  because `Resources::Consumers` is where the chat `identifier_key` lives, but its username bytes are
+  no longer read by anything. Availability (`POST /api/v1/usernames/available`), the registration
+  digit selection, and the payment lane's confirmation-time re-selection all read the gateway, so
+  the three cannot disagree about what is taken.
+- **The full-person name is passed through, not arbitrated.** `dotns.reservedUsername` travels to
+  `DotnsGateway::reserve_name` as `reserved_base_label` — the bare, undiscriminated *full-person*
+  name. It is **its own name**: `reserve_name` takes it as a separate argument from the lite label,
+  and nothing requires it to be that label's base. The gateway holds the only authoritative view of
+  the full-label space and validates the leg itself, so the backend makes no preflight judgement
+  about it; a claim on a taken full name surfaces as a deterministic dotNS rejection rather than a
+  `409` at intake. The client, not the backend, later registers the full name against that
+  reservation: `DotnsGateway::register_name` carries a ring-VRF proof over the full-person People
+  ring, which the backend can never produce because it never holds the candidate key.
 - **Availability answers for the whole claim, not just the discriminators.** `EXHAUSTED` means
   nothing claimable under this base — no free discriminator (the offered pool is `01..=99`; `00` is
   never allocated), **or** a reservation leg that would reject the claim. Both the bare-name owner
@@ -313,20 +315,44 @@ Operational invariants an agent must respect when touching the code.
   Never run two writers / never scale it. The writer owns **two** lanes on one account, People
   and Asset Hub. That is safe because nonces are per chain. Both sit behind the same single
   lease, so one lease still means one submitter on each.
-- **The dotNS gateway lane is a second state machine on the same row.** Usernames
-  live in two independent stores with no bridge between them. People
-  `Resources::UsernameOwnerOf` is written by `PeopleLite.attest`. The Asset Hub dotNS contracts
-  are written **only** by `DotnsGateway::reserve_name`. There is no bridge between them.
-  A row therefore carries `status` (People) and `dotns_status` (Asset Hub). The two advance
-  independently through `PENDING → SUBMITTING → RESERVED | RETRY_AFTER | FAILED_TERMINAL |
-  EXPIRED`. **A dotNS failure never changes `status`.** `ASSIGNED` + `DOTNS_FAILED_TERMINAL` is a
-  legitimate resting state: the username works, the dotNS name does not. The dependency runs one
-  way only: a People `FAILED_TERMINAL` closes an open dotNS half as `ABANDONED`, since a name with
-  no username behind it can never be submitted. Ordering is not free.
-  `reserve_name` writes `LiteLabelOwner`, a global claim on the label. Asset Hub is therefore
-  attempted **only** for rows already `ASSIGNED` on People. `dotns_status` `NULL` means the
-  request carried no `dotns` block *or* the row predates the lane. There is no backfill, so
-  pre-existing rows are never submitted.
+- **The row carries two lanes, and the dotNS one leads.** A row carries `status` (People) and
+  `dotns_status` (Asset Hub), written to two stores with no bridge between them:
+  `DotnsGateway::LiteLabelOwner` by `reserve_name`, `Resources::Consumers` by `PeopleLite.attest`.
+  Because Asset Hub decides the name, the dotNS half runs first — it claims a row as soon as intake
+  or the queue advancer puts it in `RESERVED` — and the People half is claimable only once
+  `dotns_status` reaches `RESERVED`. The consumer record is therefore never written against a name
+  the gateway refused. The dependency runs one way: a terminal dotNS outcome
+  (`FAILED_TERMINAL`/`EXPIRED`) closes an open People half as `ABANDONED`, in the same guarded
+  UPDATE. `SUBMITTING` is excluded from that sweep — a row with an extrinsic in flight is left for
+  reconciliation rather than moved underneath — and so is `ASSIGNED`, which is already landed.
+  The claim is committed by the leading lane: the device record is consumed when the dotNS
+  reservation lands, and released when it fails terminally. A People failure *after* that point
+  deliberately does **not** release the device, because the label is already claimed globally and
+  freeing the handset would let it take a second name while the first stays burned.
+  `dotns_status` `NULL` means the request carried no `dotns` block *or* the row predates the lane.
+  There is no backfill, so pre-existing rows are never submitted, and legacy rows whose names were
+  written while People was the authority keep `dotns_status` `NULL` for good.
+- **The queue schedules against the reservation deadline, and the bound is derived.** Intake stamps
+  `dotns_expires_at` = `dotns_signed_at + DotnsGateway::MaxValiditySeconds`, the window read from
+  chain, so the queue can see a claim's expiry instead of discovering it when the writer finally
+  picks the row up — which, now that an expired reservation abandons the whole claim, is too late to
+  be useful. Three things follow from it, none of them configured. A row already past its deadline is
+  **swept** before slots are handed out (`EXPIRED` + `ABANDONED`), so a doomed claim neither inflates
+  queue depth nor takes a slot from a live one nor costs an extrinsic to be told what the deadline
+  already said. A row whose deadline falls inside the **current drain time**
+  (`ceil(depth / 4) × interval`) is promoted ahead of the balance groups, out of the same four-slot
+  budget: priority decides who goes first among claims that will survive either way, and should
+  decide nothing for a claim that is about to stop existing. The horizon is the measured depth and
+  the advancer's own cadence, so it tightens by itself as a backlog grows.
+  The derived ceiling is `4 × floor((max_validity − headroom) / interval)` — around 170,000 rows at
+  the shipped 3-day window and 6-second cadence, which is the useful part of the answer: **backlog
+  depth is not what expires claims; a stalled advancer or writer is.** It is published as
+  `dub_queue_safe_depth` against `dub_queue_depth` so that stays true after someone changes the
+  cadence or a runtime upgrade shortens the window.
+  The advancer opens no Asset Hub connection for any of this — the compose boundaries deny it one,
+  and it does not need one: the deadline is already on the row, and the gauge recovers the window
+  from the most recently stamped row, where `dotns_expires_at − dotns_signed_at` *is* the constant
+  that was in force.
 - **The gateway lane's freshness bounds come from the chain, not from config.** `reserve_name`
   enforces `MaxValiditySeconds`/`MaxFutureSkewSeconds` against the client's `signedAt`, and the
   writer enforces **both** before spending an extrinsic — device-attestation-api's
@@ -343,11 +369,14 @@ Operational invariants an agent must respect when touching the code.
   client can re-sign. The mirror of that rule is the other direction: a rejection that cannot come
   out differently for the same call (`DETERMINISTIC_REJECTIONS`) is terminal on the *first* pass
   rather than paying its fee eight times over.
-- **A dotNS problem parks the dotNS lane; it never stops the writer.** Only one dotNS condition is
-  a startup abort: `DOTNS_GATEWAY_ENABLED` on with no `ASSET_HUB_RPC_URL`, a config error knowable
-  before any row is claimed. Everything else is runtime. Asset Hub is connected lazily on the
-  first pass, not at boot, so an unreachable endpoint — an RPC bounce, a DNS blip, maintenance —
-  leaves rows in `PENDING` and keeps People attesting, instead of crash-looping the process. The
+- **A dotNS problem parks the lane; it never crash-loops the writer.** One dotNS condition is a
+  startup abort, a config error knowable before any row is claimed: no `ASSET_HUB_RPC_URL`. There is
+  no People-only mode to degrade to and no switch that would select one — without the gateway the
+  People lane waits on a reservation nothing would submit, so every claim would stall in a process
+  that looked healthy. Everything else is runtime. Asset Hub is connected lazily on the first pass, not at boot, so an unreachable
+  endpoint — an RPC bounce, a DNS blip, maintenance — leaves rows in `PENDING` and retries, instead
+  of crash-looping the process. A parked lane now holds the payment pass too, since confirmation
+  re-selects a discriminator and must not pick one nothing has checked. The
   `DotnsGateway::reserve_name` shape assertion sits on that same path. Both target Asset Hubs
   currently expose the supported `signed_at` shape, but a runtime upgrade can change it at any
   time, so it is asserted per connect and parks the lane rather than the writer.
@@ -401,6 +430,32 @@ Operational invariants an agent must respect when touching the code.
   **derived, not configured**: `INVITER_ADDRESS` names the account holding the invites, and a
   signing key whose own account differs from it wraps the batch in
   `Proxy.proxy(real = INVITER_ADDRESS, force_proxy_type = Any)`.
+- **The projection has two ingests and one precedence rule.** Asset Hub `DotnsGateway` is the name
+  authority, so the indexer reads it; People `Resources::Consumers` stays connected for the
+  pre-cutover population, which is never re-registered and cannot be conjured onto the gateway.
+  Every row carries `source` (`people` | `asset-hub`), and precedence is one-way: a gateway row
+  replaces a People row for the same account, and the People ingest may neither overwrite nor
+  retract a gateway row. That rule lives in the upsert's `ON CONFLICT` clause and the delete's
+  `WHERE`, so it holds for whichever pass runs first rather than depending on ordering.
+- **The gateway ingest is shaped by what the pallet stores, which is less than it emits.**
+  `LiteLabelOwner` is keyed by **label**, not account, and holds only the owner; the chat key is
+  never written to pallet storage (`reserve_name` forwards it to the contract and emits it); and
+  full-person label strings are not stored either — `AliasRegistration` is `{ collection, account }`.
+  So the People pattern of "event points at an account, re-read storage for the truth" does not
+  transfer. Instead `NameReserved` and `NameRegistered` carry the values, storage confirms only the
+  label's owner at the block, and a census (`LiteLabelOwner` scan) recovers the lite population
+  after a wipe. A census cannot recover chat keys — it fills them from the People consumer record
+  for the same account, the same key the client registered on both chains, and skips a label whose
+  owner has none rather than inventing one — and it cannot recover full-person names at all, so a
+  census-built row shows its lite label until that account's next `NameRegistered`. Closing that
+  gap needs the gateway's Lens contract (`nameDetail(label)`), which this workspace has no
+  contract-call path to.
+- **The two ingests advance on separate cursors and separate loops.** `sync_state` carries a second
+  `ah_*` checkpoint and genesis stamp, and the gateway pass runs as its own task on its own cadence:
+  the chains finalize independently, and driving one off the other's headers would stall it whenever
+  that chain went quiet. They share only the projection lock. A broken Asset Hub connection
+  therefore degrades the projection to its legacy half rather than stopping it — and, symmetrically,
+  an Asset Hub genesis change discards only the `asset-hub` rows.
 - **`username-indexer` serializes projection writes on one Postgres advisory lock.** Bootstrap and
   the incremental sync loop share one lock id; a full snapshot bootstrap runs **only when there is no
   usable `sync_state` checkpoint**, and each sync pass takes the lock with `pg_try_advisory_lock`
