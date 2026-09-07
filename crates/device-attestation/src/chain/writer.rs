@@ -212,7 +212,7 @@ pub async fn run(config: WriterConfig) -> anyhow::Result<()> {
                 asset_hub_rpc = %url,
                 "dotns lane enabled; Asset Hub connects on the first pass"
             );
-            DotnsLane::Enabled {
+            DotnsLane {
                 rpc_url: url.clone(),
                 connected: None,
                 last_error: None,
@@ -224,10 +224,11 @@ pub async fn run(config: WriterConfig) -> anyhow::Result<()> {
              accept dotns blocks that nothing ever submits — set the RPC URL, or turn the \
              gateway off for this environment."
         ),
-        (false, _) => {
-            tracing::info!("dotns lane disabled");
-            DotnsLane::Disabled
-        }
+        (false, _) => anyhow::bail!(
+            "DOTNS_GATEWAY_ENABLED is off. dotNS is the name authority, so no registration can \
+             complete without it — the People lane waits on a dotNS reservation that would never \
+             be submitted. Turn the gateway on and set ASSET_HUB_RPC_URL."
+        ),
     };
     tracing::info!(
         signer = %hex_account(&signer_account.0),
@@ -378,14 +379,11 @@ impl BatchLane {
 
 const DOTNS_RECONNECT_INTERVAL: Duration = Duration::from_secs(30);
 
-enum DotnsLane {
-    Disabled,
-    Enabled {
-        rpc_url: String,
-        connected: Option<(AssetHub, ValidityWindow)>,
-        last_error: Option<String>,
-        retry_at: Option<Instant>,
-    },
+struct DotnsLane {
+    rpc_url: String,
+    connected: Option<(AssetHub, ValidityWindow)>,
+    last_error: Option<String>,
+    retry_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -397,45 +395,28 @@ enum DotnsDial {
 
 impl DotnsLane {
     fn dial_state(&self, now: Instant) -> DotnsDial {
-        match self {
-            DotnsLane::Disabled => DotnsDial::Skip,
-            DotnsLane::Enabled { connected, .. } if connected.is_some() => DotnsDial::Ready,
-            DotnsLane::Enabled { retry_at, .. } => match retry_at {
-                Some(at) if now < *at => DotnsDial::Skip,
-                _ => DotnsDial::Dial,
-            },
+        if self.connected.is_some() {
+            return DotnsDial::Ready;
+        }
+        match self.retry_at {
+            Some(at) if now < at => DotnsDial::Skip,
+            _ => DotnsDial::Dial,
         }
     }
 
     fn record_dial_failure(&mut self, reason: String, now: Instant) -> bool {
-        let DotnsLane::Enabled {
-            last_error,
-            retry_at,
-            ..
-        } = self
-        else {
-            return false;
-        };
-        *retry_at = Some(now + DOTNS_RECONNECT_INTERVAL);
-        let is_new = last_error.as_deref() != Some(reason.as_str());
+        self.retry_at = Some(now + DOTNS_RECONNECT_INTERVAL);
+        let is_new = self.last_error.as_deref() != Some(reason.as_str());
         if is_new {
-            *last_error = Some(reason);
+            self.last_error = Some(reason);
         }
         is_new
     }
 
     fn record_dial_success(&mut self, up: (AssetHub, ValidityWindow)) {
-        if let DotnsLane::Enabled {
-            connected,
-            last_error,
-            retry_at,
-            ..
-        } = self
-        {
-            *connected = Some(up);
-            *last_error = None;
-            *retry_at = None;
-        }
+        self.connected = Some(up);
+        self.last_error = None;
+        self.retry_at = None;
     }
 }
 
@@ -686,9 +667,15 @@ impl Writer {
                     Err(e) => tracing::warn!(error = %e, "queue janitor drain failed"),
                 }
             }
-            if last_payment_pass.is_none_or(|t| t.elapsed() >= self.config.payment_poll_interval) {
+            let payment_due =
+                last_payment_pass.is_none_or(|t| t.elapsed() >= self.config.payment_poll_interval);
+            if let Some((asset_hub, _)) = if payment_due {
+                self.dotns_client().await
+            } else {
+                None
+            } {
                 last_payment_pass = Some(std::time::Instant::now());
-                match crate::payment::watch_pass(&self.pool, &self.chain).await {
+                match crate::payment::watch_pass(&self.pool, &asset_hub).await {
                     Ok(stats) if stats.acted() => tracing::info!(
                         expired = stats.expired,
                         confirmed = stats.confirmed,
@@ -700,12 +687,12 @@ impl Writer {
                     Err(e) => tracing::warn!(error = %e, "payment watch pass failed"),
                 }
             }
+            let dotns_worked = self.dotns_pass(guard).await?;
             let due = outbox::claim_due(&self.pool, i64::from(self.people_batch.size)).await?;
             if !due.is_empty() {
                 self.people_pass(guard, &due).await?;
             }
-            self.dotns_pass(guard).await?;
-            if due.is_empty() {
+            if due.is_empty() && !dotns_worked {
                 tokio::time::sleep(self.config.poll_interval).await;
             }
         }
@@ -1342,22 +1329,10 @@ impl Writer {
         let now = Instant::now();
         match self.dotns_lane.dial_state(now) {
             DotnsDial::Skip => return None,
-            DotnsDial::Ready => {
-                let DotnsLane::Enabled {
-                    connected: Some(up),
-                    ..
-                } = &self.dotns_lane
-                else {
-                    return None;
-                };
-                return Some(up.clone());
-            }
+            DotnsDial::Ready => return self.dotns_lane.connected.clone(),
             DotnsDial::Dial => {}
         }
-        let DotnsLane::Enabled { rpc_url, .. } = &self.dotns_lane else {
-            return None;
-        };
-        let rpc_url = rpc_url.clone();
+        let rpc_url = self.dotns_lane.rpc_url.clone();
         match connect_asset_hub(&rpc_url).await {
             Ok(up) => {
                 tracing::info!(
@@ -1386,30 +1361,31 @@ impl Writer {
         }
     }
 
-    async fn dotns_pass(&mut self, guard: &Guard) -> anyhow::Result<()> {
+    async fn dotns_pass(&mut self, guard: &Guard) -> anyhow::Result<bool> {
         let Some((asset_hub, window)) = self.dotns_client().await else {
-            return Ok(());
+            return Ok(false);
         };
         let due = outbox::claim_dotns_due(&self.pool, i64::from(self.dotns_batch.size)).await?;
         if due.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         if !self.heartbeat(guard).await? {
             anyhow::bail!("lost writer lease");
         }
         let submittable = self.triage_dotns(guard, &asset_hub, window, &due).await?;
         match submittable.len() {
-            0 => Ok(()),
+            0 => {}
             1 => {
                 let (r, candidate) = submittable[0];
                 self.process_dotns_one(guard, &asset_hub, r, candidate)
-                    .await
+                    .await?;
             }
             _ => {
                 self.process_dotns_batch(guard, &asset_hub, &submittable)
-                    .await
+                    .await?;
             }
         }
+        Ok(true)
     }
 
     /// Resolve every dotNS row that can be decided without submitting anything.
@@ -2488,7 +2464,7 @@ mod tests {
     #[test]
     fn a_parked_dotns_lane_backs_off_and_logs_each_cause_once() {
         let t0 = Instant::now();
-        let mut lane = DotnsLane::Enabled {
+        let mut lane = DotnsLane {
             rpc_url: "wss://example.invalid".to_string(),
             connected: None,
             last_error: None,
@@ -2513,9 +2489,6 @@ mod tests {
         assert!(lane.record_dial_failure("reserve_name shape mismatch".to_string(), t2));
         let t3 = t2 + DOTNS_RECONNECT_INTERVAL;
         assert!(lane.record_dial_failure("unreachable".to_string(), t3));
-
-        assert_eq!(DotnsLane::Disabled.dial_state(t0), DotnsDial::Skip);
-        assert!(!DotnsLane::Disabled.record_dial_failure("ignored".to_string(), t0));
     }
 
     #[test]

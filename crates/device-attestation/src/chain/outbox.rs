@@ -23,16 +23,22 @@ pub enum Status {
     RetryAfter,
     /// Permanent failure (bad input, unrecoverable dispatch). Terminal.
     FailedTerminal,
+    /// The dotNS half failed terminally, so this half was never attempted.
+    /// Terminal. Distinct from `FailedTerminal`: nothing is wrong with the
+    /// People registration, there is just no authoritative name for the
+    /// consumer record to carry.
+    Abandoned,
 }
 
 impl Status {
-    pub const ALL: [Status; 6] = [
+    pub const ALL: [Status; 7] = [
         Status::Queued,
         Status::Reserved,
         Status::Submitting,
         Status::Assigned,
         Status::RetryAfter,
         Status::FailedTerminal,
+        Status::Abandoned,
     ];
 
     /// The stored `status` string.
@@ -44,6 +50,7 @@ impl Status {
             Status::Assigned => "ASSIGNED",
             Status::RetryAfter => "RETRY_AFTER",
             Status::FailedTerminal => "FAILED_TERMINAL",
+            Status::Abandoned => "ABANDONED",
         }
     }
 }
@@ -65,8 +72,10 @@ pub enum DotnsStatus {
     /// The reservation signature aged out before submission. Terminal. Not
     /// recoverable by the backend. Only the client can re-sign.
     Expired,
-    /// The People half failed terminally, so the dotNS half was never
-    /// attempted. Terminal.
+    /// Legacy. Written while People was the name authority and the dotNS lane
+    /// ran second: the People half failed terminally, so this half was never
+    /// attempted. No longer reachable now that dotNS gates the row, but rows
+    /// written before the cutover still carry it, so it stays decodable.
     Abandoned,
 }
 
@@ -146,6 +155,7 @@ pub struct NewReservation {
     pub identifier_key: Vec<u8>,
     pub dotns_signature: Option<Vec<u8>>,
     pub dotns_signed_at: Option<i64>,
+    pub dotns_expires_at: Option<OffsetDateTime>,
     pub reserved_username: Option<String>,
 }
 
@@ -194,8 +204,8 @@ where
             candidate_signature, ring_vrf_key, proof_of_ownership, \
             consumer_registration_signature, identifier_key, \
             dotns_signature, dotns_signed_at, reserved_username, \
-            status, queue_group, dotns_status) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) \
+            status, queue_group, dotns_status, dotns_expires_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) \
          RETURNING id",
     )
     .bind(&r.account_id)
@@ -214,6 +224,7 @@ where
     .bind(status.as_str())
     .bind(queue_group)
     .bind(dotns_status)
+    .bind(r.dotns_expires_at)
     .fetch_one(executor)
     .await
     .map_err(|e| match &e {
@@ -291,8 +302,9 @@ fn row_to_reservation(row: &sqlx::postgres::PgRow) -> Result<Reservation, sqlx::
 pub async fn claim_due(pool: &PgPool, limit: i64) -> Result<Vec<Reservation>, sqlx::Error> {
     let rows = sqlx::query(&format!(
         "SELECT {SELECT_COLS} FROM username_reservations \
-         WHERE status = 'RESERVED' \
-            OR (status = 'RETRY_AFTER' AND (not_before IS NULL OR not_before <= now())) \
+         WHERE dotns_status = 'RESERVED' \
+           AND (status = 'RESERVED' \
+                OR (status = 'RETRY_AFTER' AND (not_before IS NULL OR not_before <= now()))) \
          ORDER BY created_at ASC LIMIT $1"
     ))
     .bind(limit)
@@ -304,7 +316,7 @@ pub async fn claim_due(pool: &PgPool, limit: i64) -> Result<Vec<Reservation>, sq
 pub async fn claim_dotns_due(pool: &PgPool, limit: i64) -> Result<Vec<Reservation>, sqlx::Error> {
     let rows = sqlx::query(&format!(
         "SELECT {SELECT_COLS} FROM username_reservations \
-         WHERE status = 'ASSIGNED' \
+         WHERE status = 'RESERVED' \
            AND (dotns_status = 'PENDING' \
                 OR (dotns_status = 'RETRY_AFTER' \
                     AND (dotns_not_before IS NULL OR dotns_not_before <= now()))) \
@@ -470,12 +482,15 @@ pub async fn mark_dotns_submitting(
     Ok(done.rows_affected() == 1)
 }
 
-pub async fn mark_dotns_reserved(
-    pool: &PgPool,
+pub async fn mark_dotns_reserved<'e, E>(
+    executor: E,
     guard: &Guard,
     id: i64,
-) -> Result<bool, sqlx::Error> {
-    guarded_dotns_status(pool, guard, id, DotnsStatus::Reserved, None, None).await
+) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    guarded_dotns_status(executor, guard, id, DotnsStatus::Reserved, None, None).await
 }
 
 pub async fn mark_dotns_retry(
@@ -497,14 +512,17 @@ pub async fn mark_dotns_retry(
     .await
 }
 
-pub async fn mark_dotns_failed(
-    pool: &PgPool,
+pub async fn mark_dotns_failed<'e, E>(
+    executor: E,
     guard: &Guard,
     id: i64,
     err: &str,
-) -> Result<bool, sqlx::Error> {
+) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     guarded_dotns_status(
-        pool,
+        executor,
         guard,
         id,
         DotnsStatus::FailedTerminal,
@@ -514,35 +532,51 @@ pub async fn mark_dotns_failed(
     .await
 }
 
-pub async fn mark_dotns_expired(
-    pool: &PgPool,
+pub async fn mark_dotns_expired<'e, E>(
+    executor: E,
     guard: &Guard,
     id: i64,
     err: &str,
-) -> Result<bool, sqlx::Error> {
-    guarded_dotns_status(pool, guard, id, DotnsStatus::Expired, None, Some(err)).await
+) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    guarded_dotns_status(executor, guard, id, DotnsStatus::Expired, None, Some(err)).await
 }
 
-async fn guarded_dotns_status(
-    pool: &PgPool,
+async fn guarded_dotns_status<'e, E>(
+    executor: E,
     guard: &Guard,
     id: i64,
     status: DotnsStatus,
     retry: Option<(OffsetDateTime, i32)>,
     err: Option<&str>,
-) -> Result<bool, sqlx::Error> {
+) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let (not_before, attempt) = match retry {
         Some((nb, a)) => (Some(nb), Some(a)),
         None => (None, None),
     };
+    let closes_people =
+        format!("$2 IN ('FAILED_TERMINAL', 'EXPIRED') AND status IN {PEOPLE_OPEN_STATES}");
     let sql = format!(
         "UPDATE username_reservations \
          SET dotns_status=$2, \
              dotns_not_before = CASE WHEN $2 = 'RETRY_AFTER' THEN $3 ELSE dotns_not_before END, \
              dotns_attempt = COALESCE($4, dotns_attempt), \
              dotns_last_error = COALESCE($8, dotns_last_error), \
+             status = CASE WHEN {closes_people} \
+                 THEN '{abandoned}' ELSE status END, \
+             last_error = CASE WHEN {closes_people} \
+                 THEN '{reason}' ELSE last_error END, \
+             not_before = CASE WHEN {closes_people} \
+                 THEN NULL ELSE not_before END, \
              updated_at = now() \
-         WHERE id=$1{LEASE_HELD}"
+         WHERE id=$1{LEASE_HELD}",
+        abandoned = Status::Abandoned.as_str(),
+        reason = PEOPLE_ABANDONED_REASON,
     );
     let done = sqlx::query(&sql)
         .bind(id)
@@ -553,15 +587,18 @@ async fn guarded_dotns_status(
         .bind(&guard.holder_id)
         .bind(guard.epoch)
         .bind(err)
-        .execute(pool)
+        .execute(executor)
         .await?;
     Ok(done.rows_affected() == 1)
 }
 
-const DOTNS_ABANDONED_REASON: &str =
-    "People registration failed terminally; dotNS reservation never attempted";
+const PEOPLE_ABANDONED_REASON: &str =
+    "dotNS reservation failed terminally; People registration never attempted";
 
-const DOTNS_OPEN_STATES: &str = "('PENDING', 'RETRY_AFTER')";
+/// The People-lane states the dotNS half may close out. `SUBMITTING` is
+/// excluded deliberately: that row has an extrinsic in flight, and the writer
+/// reconciles it against chain state rather than having it moved underneath.
+const PEOPLE_OPEN_STATES: &str = "('QUEUED', 'RESERVED', 'RETRY_AFTER')";
 
 async fn guarded_status<'e, E>(
     executor: E,
@@ -578,23 +615,14 @@ where
         Some((nb, a)) => (Some(nb), Some(a)),
         None => (None, None),
     };
-    let closes_dotns = format!("$2 = 'FAILED_TERMINAL' AND dotns_status IN {DOTNS_OPEN_STATES}");
     let sql = format!(
         "UPDATE username_reservations \
          SET status=$2, \
              not_before = CASE WHEN $2 = 'RETRY_AFTER' THEN $3 ELSE not_before END, \
              attempt = COALESCE($4, attempt), \
              last_error = COALESCE($8, last_error), \
-             dotns_status = CASE WHEN {closes_dotns} \
-                 THEN '{abandoned}' ELSE dotns_status END, \
-             dotns_last_error = CASE WHEN {closes_dotns} \
-                 THEN '{reason}' ELSE dotns_last_error END, \
-             dotns_not_before = CASE WHEN {closes_dotns} \
-                 THEN NULL ELSE dotns_not_before END, \
              updated_at = now() \
-         WHERE id=$1{LEASE_HELD}",
-        abandoned = DotnsStatus::Abandoned.as_str(),
-        reason = DOTNS_ABANDONED_REASON,
+         WHERE id=$1{LEASE_HELD}"
     );
     let done = sqlx::query(&sql)
         .bind(id)
@@ -623,7 +651,8 @@ mod tests {
                 | Status::Submitting
                 | Status::Assigned
                 | Status::RetryAfter
-                | Status::FailedTerminal => {}
+                | Status::FailedTerminal
+                | Status::Abandoned => {}
             }
         }
         let distinct: std::collections::BTreeSet<_> =

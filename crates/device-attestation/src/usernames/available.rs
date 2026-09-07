@@ -21,7 +21,7 @@ use super::{
     error::{FieldError, UsernamesError, UsernamesResult},
     is_valid_base,
 };
-use crate::chain::people::BaseState;
+use crate::chain::asset_hub::BaseLabels;
 
 const MAX_USERNAMES: usize = 100;
 
@@ -167,10 +167,15 @@ async fn availability_for(state: &AppState, base: &str) -> UsernamesResult<NameA
 }
 
 /// The availability verdict for one base, given everything read about it.
-fn availability_of(state: &BaseState) -> NameAvailability {
+///
+/// `EXHAUSTED` now means only "no free discriminator". The gateway has no
+/// reservation queue to be full, and no bare-base ownership that blocks the
+/// whole space, so the two conditions the People-chain version also folded in
+/// here have no dotNS equivalent.
+fn availability_of(state: &BaseLabels) -> NameAvailability {
     // Pool is 01..=99 (00 is never offered); available = pool minus taken.
     let digits = available_digits(&state.taken);
-    if digits.is_empty() || state.rejects_reservations() {
+    if digits.is_empty() {
         return NameAvailability {
             status: "EXHAUSTED",
             available_digits: None,
@@ -232,12 +237,9 @@ mod tests {
         );
     }
 
-    fn base_state(taken: impl IntoIterator<Item = u8>) -> BaseState {
-        BaseState {
+    fn base_state(taken: impl IntoIterator<Item = u8>) -> BaseLabels {
+        BaseLabels {
             taken: taken.into_iter().collect(),
-            full_name_owned: false,
-            queue_len: 0,
-            queue_capacity: 10,
         }
     }
 
@@ -258,24 +260,12 @@ mod tests {
     }
 
     #[test]
-    fn a_base_whose_reservation_leg_would_be_rejected_is_exhausted() {
-        let owned = BaseState {
-            full_name_owned: true,
-            ..base_state([])
-        };
-        assert_eq!(availability_of(&owned).status, "EXHAUSTED");
-
-        let queue_full = BaseState {
-            queue_len: 10,
-            ..base_state([])
-        };
-        assert_eq!(availability_of(&queue_full).status, "EXHAUSTED");
-
-        let queue_nearly_full = BaseState {
-            queue_len: 9,
-            ..base_state([])
-        };
-        assert_eq!(availability_of(&queue_nearly_full).status, "AVAILABLE");
+    fn only_a_full_discriminator_space_exhausts_a_base() {
+        // dotNS has no reservation queue and no bare-base ownership that
+        // closes the whole space, so the discriminator set is the only input.
+        assert_eq!(availability_of(&base_state([])).status, "AVAILABLE");
+        assert_eq!(availability_of(&base_state(1..=98)).status, "AVAILABLE");
+        assert_eq!(availability_of(&base_state(1..=99)).status, "EXHAUSTED");
     }
 
     #[test]

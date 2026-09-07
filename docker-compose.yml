@@ -57,6 +57,12 @@ services:
       # here would aim every container at its own loopback.
       DEVICE_ATTESTATION_DATABASE_URL: postgres://${DEVICE_ATTESTATION_DB_USER:-device_attestation}:${DEVICE_ATTESTATION_DB_PASSWORD:-device_attestation}@postgres:5432/${DEVICE_ATTESTATION_DB_NAME:-device_attestation}
       PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      # dotNS is the name authority, so the API decides availability against
+      # DotnsGateway::LiteLabelOwner rather than People storage. Read-only
+      # here; the writer holds the only key that submits. The API blocks on
+      # this at startup exactly as it does on PEOPLE_RPC_URL: no reachable
+      # name authority, no working username surface.
+      ASSET_HUB_RPC_URL: ${ASSET_HUB_RPC_URL:-wss://previewnet.substrate.dev/asset-hub}
       # Dev-only 32-byte Ed25519 seed (0x + 64 hex). Replace in prod.
       JWT_ED25519_SECRET: ${JWT_ED25519_SECRET:-0x0101010101010101010101010101010101010101010101010101010101010101}
       # Dev default = //Alice, matching the writer SURI below (signer ==
@@ -254,6 +260,11 @@ services:
       BIND_ADDR: 0.0.0.0:8080
       INDEXER_DATABASE_URL: postgres://username_indexer:username_indexer@username-indexer-postgres:5432/username_indexer
       PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      # The name authority. The indexer projects DotnsGateway reservations and
+      # registrations from here; People stays connected for the pre-cutover
+      # population and for the chat keys the gateway census recovers. Read-only
+      # on both. Same-network pairing applies as everywhere else.
+      ASSET_HUB_RPC_URL: ${ASSET_HUB_RPC_URL:-wss://previewnet.substrate.dev/asset-hub}
       STORAGE_PAGE_SIZE: ${STORAGE_PAGE_SIZE:-1000}
       SYNC_INTERVAL_SECS: ${SYNC_INTERVAL_SECS:-30}
       SPECULATIVE_INDEXING_ENABLED: ${SPECULATIVE_INDEXING_ENABLED:-true}

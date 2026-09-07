@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::{collections::BTreeSet, str::FromStr as _};
+use std::{collections::BTreeSet, str::FromStr as _, time::Duration};
 
 use axum::{
     body::Bytes,
@@ -26,7 +26,7 @@ use crate::{
 };
 
 use super::error::{FieldError, UsernamesError, UsernamesResult};
-use super::{available_digits, base_state, reservation_state, MAX_BASE_LEN};
+use super::{available_digits, base_state, MAX_BASE_LEN};
 
 /// The flat registration request (documentation mirror — the handler
 /// validates raw JSON so it can report every failing field).
@@ -254,18 +254,7 @@ pub async fn register(
     let mut parsed = validate_register(&value, &state.config)?;
 
     let base = base_state(&state, &parsed.username).await?;
-    if let Some(reserved) = reserved_name(&parsed) {
-        let reservation = if reserved == parsed.username {
-            base.reservation()
-        } else {
-            reservation_state(&state, reserved).await?
-        };
-        if reservation.rejects() {
-            return Err(UsernamesError::FullNameUnavailable {
-                reserved: reserved.to_string(),
-            });
-        }
-    }
+    // The reserved full-person label is no longer arbitrated here.
     let digit = select_digit(
         &base.taken,
         parsed.preferred_digits.as_deref(),
@@ -275,7 +264,13 @@ pub async fn register(
     let full_username = format!("{}.{digits}", parsed.username);
     let voucher = parsed.voucher.take();
     let preferred_digits = parsed.preferred_digits.clone();
-    let new = build_reservation(&auth, parsed, &digits, &full_username);
+    let new = build_reservation(
+        &auth,
+        parsed,
+        &digits,
+        &full_username,
+        state.dotns_validity.max_validity(),
+    );
 
     // Voucher precedence (spec order): a submitted
     // voucher resolves the claim before the DeviceCheck/PoUD gate ever runs —
@@ -829,12 +824,23 @@ struct ParsedRegister {
 
 /// Assemble the outbox row from the validated request (shared by the voucher
 /// INSTANT path and the standard gate/queue path).
+/// Stamp the row, including the deadline its dotNS reservation dies at.
+///
+/// `max_validity` is `DotnsGateway::MaxValiditySeconds`, read from chain — the
+/// bound is never configured. A claim with no dotns block gets no deadline,
+/// matching its `NULL` `dotns_status`.
 fn build_reservation(
     auth: &AuthSubject,
     parsed: ParsedRegister,
     digits: &str,
     full_username: &str,
+    max_validity: Duration,
 ) -> NewReservation {
+    let dotns_expires_at = parsed.dotns.as_ref().and_then(|d| {
+        time::OffsetDateTime::from_unix_timestamp(d.signed_at)
+            .ok()
+            .and_then(|signed| signed.checked_add(time::Duration::try_from(max_validity).ok()?))
+    });
     NewReservation {
         account_id: auth.subject.clone(),
         candidate_account_id: parsed.candidate_account_id,
@@ -848,6 +854,7 @@ fn build_reservation(
         identifier_key: parsed.identifier_key,
         dotns_signature: parsed.dotns.as_ref().map(|d| d.signature.clone()),
         dotns_signed_at: parsed.dotns.as_ref().map(|d| d.signed_at),
+        dotns_expires_at,
         reserved_username: parsed.dotns.and_then(|d| d.reserved_username),
     }
 }
@@ -856,11 +863,6 @@ struct ParsedDotns {
     signature: Vec<u8>,
     signed_at: i64,
     reserved_username: Option<String>,
-}
-
-/// The full-person name this claim asks to reserve, if it asks for one.
-fn reserved_name(parsed: &ParsedRegister) -> Option<&str> {
-    parsed.dotns.as_ref()?.reserved_username.as_deref()
 }
 
 /// Validate `Device-Token-iOS`: base64, when present.
@@ -1610,36 +1612,41 @@ mod tests {
         assert_eq!(dotns.reserved_username.as_deref(), Some("reservedname"));
     }
 
+    /// Only a claim that carries the field asks for a full name. The value
+    /// travels to `DotnsGateway::reserve_name` as `reserved_base_label`, so
+    /// absent must stay absent rather than defaulting to the lite base.
     #[test]
-    fn only_a_claim_that_asks_for_the_full_name_is_preflighted() {
+    fn only_a_claim_that_asks_for_the_full_name_carries_a_reserved_label() {
         let config = config();
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
 
         let plain = validate_register(&valid_body(), &config).expect("valid");
-        assert_eq!(
-            reserved_name(&plain),
-            None,
+        assert!(
+            plain.dotns.is_none(),
             "no dotns block means no reservation leg"
         );
 
         let mut without = valid_body();
         without["dotns"] = dotns_block(now, None, &config);
-        assert_eq!(
-            reserved_name(&validate_register(&without, &config).expect("valid")),
-            None
-        );
+        let parsed = validate_register(&without, &config).expect("valid");
+        assert_eq!(parsed.dotns.expect("dotns parsed").reserved_username, None);
 
         let mut with = valid_body();
         with["dotns"] = dotns_block(now, Some("aliceuser"), &config);
+        let parsed = validate_register(&with, &config).expect("valid");
         assert_eq!(
-            reserved_name(&validate_register(&with, &config).expect("valid")),
+            parsed
+                .dotns
+                .expect("dotns parsed")
+                .reserved_username
+                .as_deref(),
             Some("aliceuser")
         );
     }
 
-    /// The name the preflight gates on is the one the runtime reserves, not
-    /// the base of the lite username — `attest` takes them as separate
-    /// arguments and nothing requires them to agree.
+    /// The reserved label is the one the gateway registers, not the base of
+    /// the lite username — `reserve_name` takes them as separate arguments
+    /// and nothing requires them to agree.
     #[test]
     fn the_reserved_name_is_read_from_the_dotns_block_not_the_username() {
         let config = config();
@@ -1650,7 +1657,14 @@ mod tests {
         body["dotns"] = dotns_block(now, Some("reservedname"), &config);
 
         let parsed = validate_register(&body, &config).expect("valid");
-        assert_eq!(reserved_name(&parsed), Some("reservedname"));
+        assert_eq!(
+            parsed
+                .dotns
+                .expect("dotns parsed")
+                .reserved_username
+                .as_deref(),
+            Some("reservedname")
+        );
     }
 
     /// The 409 names the name that was actually checked — the reserved one,

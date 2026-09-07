@@ -25,10 +25,7 @@ use serde_json::Value;
 use utoipa::ToSchema;
 
 use crate::{
-    chain::{
-        outbox,
-        people::{BaseState, ReservationState},
-    },
+    chain::{asset_hub::BaseLabels, outbox},
     http::state::AppState,
 };
 
@@ -59,12 +56,12 @@ fn merge_discriminators(mut chain: BTreeSet<u8>, outbox: BTreeSet<u8>) -> BTreeS
     chain
 }
 
-pub(crate) async fn base_state(state: &AppState, base: &str) -> UsernamesResult<BaseState> {
+pub(crate) async fn base_state(state: &AppState, base: &str) -> UsernamesResult<BaseLabels> {
     let (chain, pending) = tokio::try_join!(
         async {
             state
-                .chain
-                .base_state(base)
+                .asset_hub
+                .base_labels(base)
                 .await
                 .map_err(UsernamesError::from)
         },
@@ -74,21 +71,9 @@ pub(crate) async fn base_state(state: &AppState, base: &str) -> UsernamesResult<
                 .map_err(UsernamesError::from)
         },
     )?;
-    Ok(BaseState {
+    Ok(BaseLabels {
         taken: merge_discriminators(chain.taken, pending),
-        ..chain
     })
-}
-
-pub(crate) async fn reservation_state(
-    state: &AppState,
-    name: &str,
-) -> UsernamesResult<ReservationState> {
-    state
-        .chain
-        .reservation_state(name)
-        .await
-        .map_err(UsernamesError::from)
 }
 
 /// Subject-keyed rate limit for the authenticated usernames surface (never

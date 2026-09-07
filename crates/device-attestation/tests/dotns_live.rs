@@ -36,6 +36,7 @@ fn reservation(base: &str, digits: &str, with_dotns: bool) -> NewReservation {
         identifier_key: vec![5; 65],
         dotns_signature: with_dotns.then(|| vec![6; 64]),
         dotns_signed_at: with_dotns.then_some(1_750_000_000),
+        dotns_expires_at: None,
         reserved_username: None,
     }
 }
@@ -60,17 +61,18 @@ async fn people_status(pool: &PgPool, id: i64) -> String {
         .expect("decode status")
 }
 
-async fn assign_on_people(pool: &PgPool, id: i64) {
-    sqlx::query("UPDATE username_reservations SET status = 'ASSIGNED' WHERE id = $1")
+async fn set_people_status(pool: &PgPool, id: i64, status: Status) {
+    sqlx::query("UPDATE username_reservations SET status = $1 WHERE id = $2")
+        .bind(status.as_str())
         .bind(id)
         .execute(pool)
         .await
-        .expect("assign");
+        .expect("set people status");
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres; set DEVICE_ATTESTATION_TEST_DATABASE_URL and run with --ignored"]
-async fn the_dotns_lane_claims_only_assigned_rows_and_never_touches_people_status() {
+async fn the_dotns_lane_leads_and_claims_reserved_rows() {
     let database_url = std::env::var("DEVICE_ATTESTATION_TEST_DATABASE_URL")
         .expect("DEVICE_ATTESTATION_TEST_DATABASE_URL is required");
     let _exclusive = lock_exclusive(&database_url).await;
@@ -95,9 +97,9 @@ async fn the_dotns_lane_claims_only_assigned_rows_and_never_touches_people_statu
     let no_block = outbox::insert(&pool, &reservation(&base, "12", false))
         .await
         .expect("insert without dotns");
-    let not_yet_assigned = outbox::insert(&pool, &reservation(&base, "13", true))
+    let still_queued = outbox::insert_queued(&pool, &reservation(&base, "13", true), 1)
         .await
-        .expect("insert with dotns");
+        .expect("insert queued with dotns");
 
     assert_eq!(
         dotns_status(&pool, in_lane).await.as_deref(),
@@ -105,23 +107,19 @@ async fn the_dotns_lane_claims_only_assigned_rows_and_never_touches_people_statu
     );
     assert_eq!(dotns_status(&pool, no_block).await, None);
 
-    assert!(outbox::claim_dotns_due(&pool, 50)
-        .await
-        .expect("claim")
-        .is_empty());
-
-    assign_on_people(&pool, in_lane).await;
-    assign_on_people(&pool, no_block).await;
-
     let due = outbox::claim_dotns_due(&pool, 50).await.expect("claim");
     assert_eq!(due.iter().map(|r| r.id).collect::<Vec<_>>(), vec![in_lane]);
     assert!(!due.iter().any(|r| r.id == no_block));
-    assert!(!due.iter().any(|r| r.id == not_yet_assigned));
+    assert!(!due.iter().any(|r| r.id == still_queued));
 
     let claimed = &due[0];
     assert_eq!(claimed.dotns_signature.as_deref(), Some(&[6u8; 64][..]));
     assert_eq!(claimed.dotns_signed_at, Some(1_750_000_000));
     assert_eq!(claimed.dotns_attempt, 0);
+    assert_eq!(
+        people_status(&pool, in_lane).await,
+        Status::Reserved.as_str()
+    );
 
     let epoch = lease::try_acquire(&pool, LEASE, "holder-a", Duration::from_secs(30))
         .await
@@ -163,7 +161,8 @@ async fn the_dotns_lane_claims_only_assigned_rows_and_never_touches_people_statu
     );
     assert_eq!(
         people_status(&pool, in_lane).await,
-        Status::Assigned.as_str()
+        Status::Abandoned.as_str(),
+        "no authoritative name means the People half is never attempted"
     );
     assert!(outbox::claim_dotns_due(&pool, 50)
         .await
@@ -183,15 +182,20 @@ async fn the_dotns_lane_claims_only_assigned_rows_and_never_touches_people_statu
         Some(DotnsStatus::FailedTerminal.as_str())
     );
 
-    assign_on_people(&pool, not_yet_assigned).await;
+    set_people_status(&pool, still_queued, Status::Reserved).await;
     assert!(
-        outbox::mark_dotns_expired(&pool, &guard, not_yet_assigned, "signature expired")
+        outbox::mark_dotns_expired(&pool, &guard, still_queued, "signature expired")
             .await
             .expect("mark expired")
     );
     assert_eq!(
-        dotns_status(&pool, not_yet_assigned).await.as_deref(),
+        dotns_status(&pool, still_queued).await.as_deref(),
         Some(DotnsStatus::Expired.as_str())
+    );
+    assert_eq!(
+        people_status(&pool, still_queued).await,
+        Status::Abandoned.as_str(),
+        "an expired reservation abandons the claim outright"
     );
 
     let depths = outbox::dotns_depth_by_status(&pool)
@@ -215,7 +219,7 @@ async fn the_dotns_lane_claims_only_assigned_rows_and_never_touches_people_statu
 
 #[tokio::test]
 #[ignore = "requires Postgres; set DEVICE_ATTESTATION_TEST_DATABASE_URL and run with --ignored"]
-async fn a_terminal_people_failure_abandons_the_dotns_lane() {
+async fn a_terminal_dotns_failure_abandons_every_open_people_state() {
     let database_url = std::env::var("DEVICE_ATTESTATION_TEST_DATABASE_URL")
         .expect("DEVICE_ATTESTATION_TEST_DATABASE_URL is required");
     let _exclusive = lock_exclusive(&database_url).await;
@@ -234,21 +238,21 @@ async fn a_terminal_people_failure_abandons_the_dotns_lane() {
         .await
         .expect("pre-clean lease");
 
-    let pending = outbox::insert(&pool, &reservation(&base, "31", true))
+    let queued = outbox::insert_queued(&pool, &reservation(&base, "31", true), 1)
         .await
-        .expect("insert pending");
-    let retrying = outbox::insert(&pool, &reservation(&base, "32", true))
-        .await
-        .expect("insert retrying");
-    let submitting = outbox::insert(&pool, &reservation(&base, "33", true))
-        .await
-        .expect("insert submitting");
-    let reserved = outbox::insert(&pool, &reservation(&base, "34", true))
+        .expect("insert queued");
+    let reserved = outbox::insert(&pool, &reservation(&base, "32", true))
         .await
         .expect("insert reserved");
-    let no_block = outbox::insert(&pool, &reservation(&base, "35", false))
+    let retrying = outbox::insert(&pool, &reservation(&base, "33", true))
         .await
-        .expect("insert without dotns");
+        .expect("insert retrying");
+    let submitting = outbox::insert(&pool, &reservation(&base, "34", true))
+        .await
+        .expect("insert submitting");
+    let assigned = outbox::insert(&pool, &reservation(&base, "35", true))
+        .await
+        .expect("insert assigned");
 
     let epoch = lease::try_acquire(&pool, LEASE, "holder-a", Duration::from_secs(30))
         .await
@@ -260,92 +264,82 @@ async fn a_terminal_people_failure_abandons_the_dotns_lane() {
         epoch,
     };
 
-    for id in [retrying, submitting, reserved] {
-        assign_on_people(&pool, id).await;
-    }
-    let later = time::OffsetDateTime::now_utc() + Duration::from_secs(600);
-    assert!(
-        outbox::mark_dotns_retry(&pool, &guard, retrying, later, 1, "transient")
-            .await
-            .expect("mark retry")
-    );
-    assert!(
-        outbox::mark_dotns_submitting(&pool, &guard, submitting, "0xfeed", 1)
-            .await
-            .expect("mark submitting")
-    );
-    assert!(outbox::mark_dotns_reserved(&pool, &guard, reserved)
-        .await
-        .expect("mark reserved"));
+    set_people_status(&pool, retrying, Status::RetryAfter).await;
+    set_people_status(&pool, submitting, Status::Submitting).await;
+    set_people_status(&pool, assigned, Status::Assigned).await;
+    sqlx::query(
+        "UPDATE username_reservations SET not_before = now() + interval '1 hour' WHERE id = $1",
+    )
+    .bind(retrying)
+    .execute(&pool)
+    .await
+    .expect("gate the retry");
 
-    for id in [pending, retrying, submitting, reserved, no_block] {
+    for id in [queued, reserved, retrying, submitting, assigned] {
         assert!(
-            outbox::mark_failed(&pool, &guard, id, "candidate signature rejected on chain")
+            outbox::mark_dotns_failed(&pool, &guard, id, "label owned by another account")
                 .await
-                .expect("fail on people")
+                .expect("fail on dotns")
         );
         assert_eq!(
-            people_status(&pool, id).await,
-            Status::FailedTerminal.as_str()
+            dotns_status(&pool, id).await.as_deref(),
+            Some(DotnsStatus::FailedTerminal.as_str())
         );
     }
 
+    for id in [queued, reserved, retrying] {
+        assert_eq!(
+            people_status(&pool, id).await,
+            Status::Abandoned.as_str(),
+            "an open People state is closed out with the dotNS failure"
+        );
+    }
     assert_eq!(
-        dotns_status(&pool, pending).await.as_deref(),
-        Some(DotnsStatus::Abandoned.as_str())
+        people_status(&pool, submitting).await,
+        Status::Submitting.as_str(),
+        "a row with an extrinsic in flight is left for reconciliation"
     );
     assert_eq!(
-        dotns_status(&pool, retrying).await.as_deref(),
-        Some(DotnsStatus::Abandoned.as_str())
+        people_status(&pool, assigned).await,
+        Status::Assigned.as_str(),
+        "a landed consumer record is never rewritten"
     );
+
     let reason: Option<String> =
-        sqlx::query("SELECT dotns_last_error FROM username_reservations WHERE id = $1")
-            .bind(pending)
+        sqlx::query("SELECT last_error FROM username_reservations WHERE id = $1")
+            .bind(queued)
             .fetch_one(&pool)
             .await
-            .expect("read dotns_last_error")
-            .try_get("dotns_last_error")
-            .expect("decode dotns_last_error");
+            .expect("read last_error")
+            .try_get("last_error")
+            .expect("decode last_error");
     assert_eq!(
         reason.as_deref(),
-        Some("People registration failed terminally; dotNS reservation never attempted")
+        Some("dotNS reservation failed terminally; People registration never attempted")
     );
     let not_before: Option<time::OffsetDateTime> =
-        sqlx::query("SELECT dotns_not_before FROM username_reservations WHERE id = $1")
+        sqlx::query("SELECT not_before FROM username_reservations WHERE id = $1")
             .bind(retrying)
             .fetch_one(&pool)
             .await
-            .expect("read dotns_not_before")
-            .try_get("dotns_not_before")
-            .expect("decode dotns_not_before");
+            .expect("read not_before")
+            .try_get("not_before")
+            .expect("decode not_before");
     assert!(
         not_before.is_none(),
         "an abandoned row is not waiting on a backoff"
     );
 
-    assert_eq!(
-        dotns_status(&pool, submitting).await.as_deref(),
-        Some(DotnsStatus::Submitting.as_str())
-    );
-    assert_eq!(
-        dotns_status(&pool, reserved).await.as_deref(),
-        Some(DotnsStatus::Reserved.as_str())
-    );
-    assert_eq!(dotns_status(&pool, no_block).await, None);
-
-    let depths = outbox::dotns_depth_by_status(&pool)
-        .await
-        .expect("dotns depths");
-    let depth_of = |status: DotnsStatus| {
+    let depths = outbox::depth_by_status(&pool).await.expect("people depths");
+    let depth_of = |status: Status| {
         depths
             .iter()
             .find(|(s, _)| *s == status)
             .map(|(_, d)| d.depth)
             .expect("every status is reported")
     };
-    assert_eq!(depth_of(DotnsStatus::Pending), 0);
-    assert_eq!(depth_of(DotnsStatus::RetryAfter), 0);
-    assert_eq!(depth_of(DotnsStatus::Abandoned), 2);
+    assert_eq!(depth_of(Status::Abandoned), 3);
+    assert_eq!(depth_of(Status::Queued), 0);
 
     sqlx::query("DELETE FROM username_reservations WHERE base = $1")
         .bind(&base)

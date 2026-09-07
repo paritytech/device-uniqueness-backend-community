@@ -29,6 +29,7 @@ fn reservation(base: &str, digits: &str) -> NewReservation {
         identifier_key: vec![5; 65],
         dotns_signature: None,
         dotns_signed_at: None,
+        dotns_expires_at: None,
         reserved_username: None,
     }
 }
@@ -40,6 +41,14 @@ async fn set_status(pool: &sqlx::PgPool, full_username: &str, status: &str) {
         .execute(pool)
         .await
         .expect("set status");
+}
+
+async fn dotns_reserved(pool: &sqlx::PgPool, base: &str) {
+    sqlx::query("UPDATE username_reservations SET dotns_status = 'RESERVED' WHERE base = $1")
+        .bind(base)
+        .execute(pool)
+        .await
+        .expect("set dotns reserved");
 }
 
 async fn status_of(pool: &sqlx::PgPool, id: i64) -> String {
@@ -121,6 +130,7 @@ async fn claim_due_picks_reserved_and_gate_passed_retries_oldest_first() {
     .await
     .expect("gate 14");
     set_status(&pool, &format!("{base}.15"), "SUBMITTING").await;
+    dotns_reserved(&pool, &base).await;
 
     let due: Vec<String> = outbox::claim_due(&pool, 10_000)
         .await
@@ -588,6 +598,7 @@ async fn a_whole_batch_retry_gives_back_the_attempt_it_did_not_spend() {
         }
         ids
     };
+    dotns_reserved(&pool, &base).await;
     let claimed = outbox::claim_due(&pool, 10)
         .await
         .expect("claim")
@@ -632,4 +643,111 @@ async fn attempt_of(pool: &sqlx::PgPool, id: i64) -> i32 {
         .fetch_one(pool)
         .await
         .expect("read attempt")
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres; set DEVICE_ATTESTATION_TEST_DATABASE_URL and run with --ignored"]
+async fn the_people_lane_waits_for_the_dotns_half_to_land() {
+    let pool = test_pool().await;
+    let base = format!("outboxgate{}", std::process::id());
+
+    for digits in ["31", "32", "33"] {
+        outbox::insert(&pool, &reservation(&base, digits))
+            .await
+            .expect("insert");
+    }
+    for (digits, dotns) in [("31", "PENDING"), ("32", "RETRY_AFTER")] {
+        sqlx::query("UPDATE username_reservations SET dotns_status = $1 WHERE full_username = $2")
+            .bind(dotns)
+            .bind(format!("{base}.{digits}"))
+            .execute(&pool)
+            .await
+            .expect("set dotns status");
+    }
+    sqlx::query(
+        "UPDATE username_reservations SET dotns_status = 'RESERVED' WHERE full_username = $1",
+    )
+    .bind(format!("{base}.33"))
+    .execute(&pool)
+    .await
+    .expect("set dotns reserved");
+
+    let due: Vec<String> = outbox::claim_due(&pool, 10_000)
+        .await
+        .expect("claim due")
+        .into_iter()
+        .map(|r| r.full_username)
+        .filter(|u| u.starts_with(&base))
+        .collect();
+    assert_eq!(
+        due,
+        vec![format!("{base}.33")],
+        "only the row whose name Asset Hub confirmed is claimable"
+    );
+
+    cleanup(&pool, &base, "unused").await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres; set DEVICE_ATTESTATION_TEST_DATABASE_URL and run with --ignored"]
+async fn a_terminal_dotns_failure_abandons_the_people_half() {
+    let pool = test_pool().await;
+    let pid = std::process::id();
+    let base = format!("outboxabandon{pid}");
+    let lease_name = format!("outbox-live-abandon-{pid}");
+
+    let epoch = lease::try_acquire(&pool, &lease_name, "holder-a", Duration::from_secs(60))
+        .await
+        .expect("acquire")
+        .expect("lease free");
+    let guard = Guard {
+        lease_name: lease_name.clone(),
+        holder_id: "holder-a".to_string(),
+        epoch,
+    };
+
+    let failed = outbox::insert(&pool, &reservation(&base, "41"))
+        .await
+        .expect("insert");
+    let expired = outbox::insert(&pool, &reservation(&base, "42"))
+        .await
+        .expect("insert");
+    let submitting = outbox::insert(&pool, &reservation(&base, "43"))
+        .await
+        .expect("insert");
+    set_status(&pool, &format!("{base}.43"), "SUBMITTING").await;
+
+    assert!(
+        outbox::mark_dotns_failed(&pool, &guard, failed, "bad signature")
+            .await
+            .expect("mark dotns failed")
+    );
+    assert!(
+        outbox::mark_dotns_expired(&pool, &guard, expired, "aged out")
+            .await
+            .expect("mark dotns expired")
+    );
+    assert!(
+        outbox::mark_dotns_failed(&pool, &guard, submitting, "bad signature")
+            .await
+            .expect("mark dotns failed")
+    );
+
+    assert_eq!(
+        status_of(&pool, failed).await,
+        Status::Abandoned.as_str(),
+        "a terminal dotNS failure abandons the People half"
+    );
+    assert_eq!(
+        status_of(&pool, expired).await,
+        Status::Abandoned.as_str(),
+        "an expired reservation abandons it too"
+    );
+    assert_eq!(
+        status_of(&pool, submitting).await,
+        "SUBMITTING",
+        "a People row with an extrinsic in flight is left for reconciliation"
+    );
+
+    cleanup(&pool, &base, &lease_name).await;
 }

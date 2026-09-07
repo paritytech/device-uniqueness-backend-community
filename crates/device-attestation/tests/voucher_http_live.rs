@@ -11,7 +11,7 @@ use sqlx::Row as _;
 use tower::ServiceExt as _;
 
 use device_attestation::eligibility;
-use device_attestation::{AppState, Config, Jwt, PeopleChain};
+use device_attestation::{AppState, AssetHub, Config, Jwt, PeopleChain};
 
 const JWT_SEED: [u8; 32] = [7u8; 32];
 const SUBJECT: &str = "0xvoucherhttplive";
@@ -109,12 +109,28 @@ async fn voucher_claim_is_instant_over_the_production_router() {
     let rpc_url = std::env::var("PEOPLE_RPC_URL")
         .unwrap_or_else(|_| "wss://paseo-people-next-system-rpc.polkadot.io".to_string());
     let chain = PeopleChain::connect(&rpc_url).await.expect("live RPC");
+    let asset_hub_url = std::env::var("ASSET_HUB_RPC_URL")
+        .unwrap_or_else(|_| "wss://paseo-asset-hub-next-rpc.polkadot.io".to_string());
+    let asset_hub = AssetHub::connect(&asset_hub_url)
+        .await
+        .expect("live Asset Hub RPC");
+    let dotns_validity = asset_hub
+        .validity_window()
+        .await
+        .expect("live reservation window");
 
     let mut config = Config::test_default();
     config.queue_enabled = true;
     config.registration_vouchers_enabled = true;
     let jwt = Jwt::new(&JWT_SEED, config.jwt_issuer.clone());
-    let app = device_attestation::routes(AppState::new(pool.clone(), chain, jwt, config));
+    let app = device_attestation::routes(AppState::new(
+        pool.clone(),
+        chain,
+        asset_hub,
+        dotns_validity,
+        jwt,
+        config,
+    ));
     let token = mint_token();
 
     let base = unique_base("vhttp");

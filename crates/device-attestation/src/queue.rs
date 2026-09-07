@@ -18,6 +18,17 @@ use crate::usernames::error::{UsernamesError, UsernamesResult};
 /// Queue promotions per advancer iteration (the spec's four slots).
 pub const SLOTS_PER_ITERATION: usize = 4;
 
+pub fn drain_duration(depth: u64, interval: Duration) -> Duration {
+    let iterations = depth.div_ceil(SLOTS_PER_ITERATION as u64);
+    interval.saturating_mul(u32::try_from(iterations).unwrap_or(u32::MAX))
+}
+
+pub fn max_safe_depth(max_validity: Duration, headroom: Duration, interval: Duration) -> u64 {
+    let usable = max_validity.saturating_sub(headroom).as_secs();
+    let interval_secs = interval.as_secs().max(1);
+    (usable / interval_secs).saturating_mul(SLOTS_PER_ITERATION as u64)
+}
+
 /// Planck per DOT (10-decimal token, shared by Polkadot and Paseo).
 const PLANCK_PER_DOT: u128 = 10_000_000_000;
 
@@ -218,8 +229,42 @@ pub struct Promoted {
 /// it: the row leaves `QUEUED`). `FOR UPDATE SKIP LOCKED` keeps promotion
 /// exactly-once even if a second advancer ever runs concurrently.
 pub async fn advance_iteration(pool: &PgPool) -> Result<Vec<Promoted>, sqlx::Error> {
+    advance_iteration_within(pool, Duration::ZERO).await
+}
+
+pub async fn advance_iteration_within(
+    pool: &PgPool,
+    horizon: Duration,
+) -> Result<Vec<Promoted>, sqlx::Error> {
     let mut promoted = Vec::new();
+    let horizon_secs = f64::from(u32::try_from(horizon.as_secs()).unwrap_or(u32::MAX));
     for slot in 1..=SLOTS_PER_ITERATION {
+        if horizon.is_zero() {
+            break;
+        }
+        let row = sqlx::query(
+            "UPDATE username_reservations SET status = 'RESERVED', updated_at = now() \
+             WHERE id = (SELECT id FROM username_reservations \
+                         WHERE status = 'QUEUED' \
+                           AND dotns_expires_at IS NOT NULL \
+                           AND dotns_expires_at > now() \
+                           AND dotns_expires_at <= now() + make_interval(secs => $1) \
+                         ORDER BY dotns_expires_at ASC, created_at ASC, id ASC \
+                         LIMIT 1 \
+                         FOR UPDATE SKIP LOCKED) \
+             RETURNING id, full_username",
+        )
+        .bind(horizon_secs)
+        .fetch_optional(pool)
+        .await?;
+        let Some(row) = row else { break };
+        promoted.push(Promoted {
+            id: row.try_get("id")?,
+            full_username: row.try_get("full_username")?,
+            slot,
+        });
+    }
+    for slot in (promoted.len() + 1)..=SLOTS_PER_ITERATION {
         let min_group = (5 - slot) as i32;
         let row = sqlx::query(
             "UPDATE username_reservations SET status = 'RESERVED', updated_at = now() \
@@ -376,6 +421,60 @@ pub async fn fallback_drain(pool: &PgPool, grace: Duration) -> Result<u64, sqlx:
     Ok(done.rows_affected())
 }
 
+/// Current `QUEUED` depth.
+pub async fn queued_depth(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let depth: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM username_reservations WHERE status = 'QUEUED'")
+            .fetch_one(pool)
+            .await?;
+    Ok(depth.max(0) as u64)
+}
+
+fn record_queue_headroom(depth: u64, window: Option<Duration>, interval: Duration) {
+    metrics::gauge!("dub_queue_depth").set(depth as f64);
+    metrics::gauge!("dub_queue_drain_seconds")
+        .set(drain_duration(depth, interval).as_secs() as f64);
+    if let Some(window) = window {
+        metrics::gauge!("dub_queue_safe_depth").set(max_safe_depth(
+            window,
+            WRITER_HEADROOM,
+            interval,
+        ) as f64);
+    }
+}
+
+const WRITER_HEADROOM: Duration = Duration::from_secs(300);
+
+pub async fn stamped_validity_window(pool: &PgPool) -> Result<Option<Duration>, sqlx::Error> {
+    let secs: Option<f64> = sqlx::query_scalar(
+        "SELECT extract(epoch from dotns_expires_at - to_timestamp(dotns_signed_at))::float8 \
+         FROM username_reservations \
+         WHERE dotns_expires_at IS NOT NULL AND dotns_signed_at IS NOT NULL \
+         ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+    Ok(secs.filter(|s| *s > 0.0).map(Duration::from_secs_f64))
+}
+
+pub async fn expire_queued(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let done = sqlx::query(
+        "UPDATE username_reservations          SET dotns_status = 'EXPIRED',              status = 'ABANDONED',              dotns_last_error = $1,              last_error = $2,              not_before = NULL,              dotns_not_before = NULL,              updated_at = now()          WHERE status = 'QUEUED'            AND dotns_expires_at IS NOT NULL            AND dotns_expires_at <= now()",
+    )
+    .bind(EXPIRED_IN_QUEUE_REASON)
+    .bind(ABANDONED_IN_QUEUE_REASON)
+    .execute(pool)
+    .await?;
+    Ok(done.rows_affected())
+}
+
+const EXPIRED_IN_QUEUE_REASON: &str =
+    "dotNS reservation signature expired while queued; only the client can re-sign";
+
+const ABANDONED_IN_QUEUE_REASON: &str =
+    "dotNS reservation expired in the queue; People registration never attempted";
+
 /// The `registration-queue` service loop: hold the advancer lease, then every
 /// `interval` renew it, refresh groups, and run one promotion iteration.
 ///
@@ -464,7 +563,30 @@ pub async fn run_advancer(pool: PgPool, chain: PeopleChain, config: AdvancerConf
                         "queue group refresh timed out; advancing with current groups"
                     ),
                 }
-                match advance_iteration(&pool).await {
+                match expire_queued(&pool).await {
+                    Ok(0) => {}
+                    Ok(expired) => {
+                        metrics::counter!("dub_queue_expired_total").increment(expired);
+                        tracing::warn!(
+                            expired,
+                            "queued claims abandoned: dotNS reservation expired before promotion"
+                        );
+                    }
+                    Err(error) => tracing::warn!(error = %error, "queue expiry sweep failed"),
+                }
+
+                let horizon = match queued_depth(&pool).await {
+                    Ok(depth) => {
+                        let window = stamped_validity_window(&pool).await.unwrap_or(None);
+                        record_queue_headroom(depth, window, config.interval);
+                        drain_duration(depth, config.interval)
+                    }
+                    Err(error) => {
+                        tracing::warn!(error = %error, "queue depth read failed");
+                        Duration::ZERO
+                    }
+                };
+                match advance_iteration_within(&pool, horizon).await {
                     Ok(promoted) => {
                         for p in &promoted {
                             tracing::info!(id = p.id, username = %p.full_username, slot = p.slot, "queued claim promoted");
@@ -583,6 +705,46 @@ pub async fn status(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_safe_depth_derivation_follows_the_window_and_the_cadence() {
+        let three_days = Duration::from_secs(3 * 24 * 60 * 60);
+        let headroom = Duration::from_secs(300);
+        let interval = Duration::from_secs(6);
+
+        assert_eq!(max_safe_depth(three_days, headroom, interval), 172_600);
+
+        assert_eq!(
+            max_safe_depth(three_days, headroom, Duration::from_secs(3)),
+            345_200
+        );
+        assert_eq!(
+            max_safe_depth(Duration::from_secs(3600), headroom, interval),
+            2_200
+        );
+        assert_eq!(max_safe_depth(headroom, headroom, interval), 0);
+        assert_eq!(
+            max_safe_depth(Duration::from_secs(60), headroom, interval),
+            0
+        );
+    }
+
+    #[test]
+    fn drain_duration_rounds_up_to_whole_iterations() {
+        let interval = Duration::from_secs(6);
+        assert_eq!(drain_duration(0, interval), Duration::ZERO);
+        assert_eq!(drain_duration(1, interval), interval);
+        assert_eq!(drain_duration(4, interval), interval);
+        assert_eq!(drain_duration(5, interval), interval * 2);
+        assert_eq!(drain_duration(400, interval), interval * 100);
+    }
+
+    #[test]
+    fn the_at_risk_horizon_widens_with_the_backlog() {
+        let interval = Duration::from_secs(6);
+        assert!(drain_duration(1_000, interval) > drain_duration(100, interval));
+        assert_eq!(drain_duration(1_000, interval), Duration::from_secs(1_500));
+    }
     use super::*;
     use serde_json::json;
 

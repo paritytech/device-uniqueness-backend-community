@@ -381,7 +381,9 @@ pub async fn index_speculative_window(
                 if decode_failed {
                     report.decode_failures += 1;
                 }
-                if projection::delete_if_speculative(&mut tx, account).await? {
+                if projection::delete_if_speculative(&mut tx, account, projection::Source::People)
+                    .await?
+                {
                     report.accounts_retracted += 1;
                 }
             }
@@ -462,14 +464,15 @@ async fn index_block(
                         block_upserts += 1;
                     }
                     Err(error) => {
-                        projection::delete_account(&mut tx, account).await?;
+                        projection::delete_account(&mut tx, account, projection::Source::People)
+                            .await?;
                         block_failures += 1;
                         tracing::warn!(stage = "username", account = ?account, error = ?error, "deleting now-malformed consumer");
                     }
                 }
             }
             None => {
-                projection::delete_account(&mut tx, account).await?;
+                projection::delete_account(&mut tx, account, projection::Source::People).await?;
                 block_deletes += 1;
             }
         }

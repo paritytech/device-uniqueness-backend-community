@@ -4,7 +4,7 @@
 use anyhow::Context as _;
 use secrecy::ExposeSecret as _;
 
-use device_attestation::{db, routes, AppState, Config, Jwt, PeopleChain};
+use device_attestation::{db, routes, AppState, AssetHub, Config, Jwt, PeopleChain};
 
 pub async fn run() -> anyhow::Result<()> {
     http_common::telemetry::init("device-attestation-api");
@@ -15,6 +15,7 @@ pub async fn run() -> anyhow::Result<()> {
         bind = %config.bind_addr,
         issuer = %config.jwt_issuer,
         people_rpc = %config.people_rpc_url,
+        asset_hub_rpc = %config.asset_hub_rpc_url,
         attestation = config.attestation_mode(),
         "starting device-attestation-api"
     );
@@ -23,9 +24,16 @@ pub async fn run() -> anyhow::Result<()> {
     let pool = db::connect(config.database_url.expose_secret()).await?;
     let chain = PeopleChain::connect(&config.people_rpc_url).await?;
     tracing::info!("connected to People Chain");
+    let asset_hub = AssetHub::connect(&config.asset_hub_rpc_url).await?;
+    let dotns_validity = asset_hub.validity_window().await?;
+    tracing::info!(
+        max_validity_secs = dotns_validity.max_validity_secs,
+        max_future_skew_secs = dotns_validity.max_future_skew_secs,
+        "connected to Asset Hub"
+    );
 
     let bind_addr = config.bind_addr;
-    let state = AppState::new(pool, chain, jwt, config);
+    let state = AppState::new(pool, chain, asset_hub, dotns_validity, jwt, config);
     let (probe_pool, probe_chain) = (state.pool.clone(), state.chain.clone());
     http_common::metrics::spawn_readiness_probe(
         "device-attestation-api",

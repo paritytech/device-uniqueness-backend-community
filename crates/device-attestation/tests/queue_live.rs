@@ -4,7 +4,21 @@
 use device_attestation::chain::lease;
 use device_attestation::chain::outbox::{self, NewReservation};
 use device_attestation::queue;
-use sqlx::Row as _;
+use sqlx::{Connection as _, PgConnection, Row as _};
+
+const EXCLUSIVE_LOCK: i64 = 0x0d07_15e0;
+
+async fn lock_exclusive(database_url: &str) -> PgConnection {
+    let mut conn = PgConnection::connect(database_url)
+        .await
+        .expect("connect for advisory lock");
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(EXCLUSIVE_LOCK)
+        .execute(&mut conn)
+        .await
+        .expect("take the exclusive test lock");
+    conn
+}
 
 fn reservation(base: &str, digits: &str, account: &str) -> NewReservation {
     NewReservation {
@@ -20,6 +34,7 @@ fn reservation(base: &str, digits: &str, account: &str) -> NewReservation {
         identifier_key: vec![5; 65],
         dotns_signature: None,
         dotns_signed_at: None,
+        dotns_expires_at: None,
         reserved_username: None,
     }
 }
@@ -29,6 +44,7 @@ fn reservation(base: &str, digits: &str, account: &str) -> NewReservation {
 async fn advancer_promotes_by_slot_rules_until_the_queue_drains() {
     let database_url = std::env::var("DEVICE_ATTESTATION_TEST_DATABASE_URL")
         .expect("DEVICE_ATTESTATION_TEST_DATABASE_URL is required");
+    let _exclusive = lock_exclusive(&database_url).await;
     let pool = device_attestation::db::connect(&database_url)
         .await
         .expect("connect and migrate");
@@ -233,4 +249,164 @@ async fn advancer_promotes_by_slot_rules_until_the_queue_drains() {
         .execute(&pool)
         .await
         .expect("clean test rows");
+}
+
+/// A dotns-carrying reservation whose signature dies `validity` from now.
+fn expiring(base: &str, digits: &str, account: &str, validity: time::Duration) -> NewReservation {
+    let now = time::OffsetDateTime::now_utc();
+    NewReservation {
+        dotns_signature: Some(vec![6; 64]),
+        dotns_signed_at: Some(now.unix_timestamp()),
+        dotns_expires_at: Some(now + validity),
+        ..reservation(base, digits, account)
+    }
+}
+
+async fn statuses(pool: &sqlx::PgPool, id: i64) -> (String, Option<String>) {
+    let row = sqlx::query("SELECT status, dotns_status FROM username_reservations WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("read row");
+    (
+        row.try_get("status").expect("status"),
+        row.try_get("dotns_status").expect("dotns_status"),
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres; set DEVICE_ATTESTATION_TEST_DATABASE_URL and run with --ignored"]
+async fn a_reservation_that_died_in_the_queue_is_swept_not_promoted() {
+    let database_url = std::env::var("DEVICE_ATTESTATION_TEST_DATABASE_URL")
+        .expect("DEVICE_ATTESTATION_TEST_DATABASE_URL is required");
+    let _exclusive = lock_exclusive(&database_url).await;
+    let pool = device_attestation::db::connect(&database_url)
+        .await
+        .expect("connect and migrate");
+    let base = format!("queueexpiry{}", std::process::id());
+
+    sqlx::query(
+        "DELETE FROM username_reservations WHERE status = 'QUEUED' OR base LIKE 'queueexpiry%'",
+    )
+    .execute(&pool)
+    .await
+    .expect("pre-clean");
+
+    let dead = outbox::insert_queued(
+        &pool,
+        &expiring(&base, "11", "sub-dead", time::Duration::seconds(-1)),
+        4,
+    )
+    .await
+    .expect("insert dead");
+    let live = outbox::insert_queued(
+        &pool,
+        &expiring(&base, "12", "sub-live", time::Duration::hours(48)),
+        4,
+    )
+    .await
+    .expect("insert live");
+    let undated = outbox::insert_queued(&pool, &reservation(&base, "13", "sub-undated"), 4)
+        .await
+        .expect("insert undated");
+
+    let swept = queue::expire_queued(&pool).await.expect("sweep");
+    assert_eq!(swept, 1, "only the row past its deadline");
+
+    assert_eq!(
+        statuses(&pool, dead).await,
+        ("ABANDONED".to_string(), Some("EXPIRED".to_string())),
+        "an expired reservation is terminal for the whole claim"
+    );
+    assert_eq!(
+        statuses(&pool, live).await.0,
+        "QUEUED",
+        "a live claim keeps its place"
+    );
+    assert_eq!(
+        statuses(&pool, undated).await.0,
+        "QUEUED",
+        "a row carrying no dotns block has no deadline to miss"
+    );
+
+    // The swept row must not consume a promotion slot.
+    let promoted = queue::advance_iteration(&pool).await.expect("advance");
+    let ids: Vec<i64> = promoted.iter().map(|p| p.id).collect();
+    assert!(!ids.contains(&dead), "a doomed row never takes a slot");
+    assert!(ids.contains(&live) && ids.contains(&undated));
+
+    sqlx::query("DELETE FROM username_reservations WHERE base = $1")
+        .bind(&base)
+        .execute(&pool)
+        .await
+        .expect("clean up");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres; set DEVICE_ATTESTATION_TEST_DATABASE_URL and run with --ignored"]
+async fn a_claim_about_to_expire_outranks_balance_priority() {
+    let database_url = std::env::var("DEVICE_ATTESTATION_TEST_DATABASE_URL")
+        .expect("DEVICE_ATTESTATION_TEST_DATABASE_URL is required");
+    let _exclusive = lock_exclusive(&database_url).await;
+    let pool = device_attestation::db::connect(&database_url)
+        .await
+        .expect("connect and migrate");
+    let base = format!("queueatrisk{}", std::process::id());
+
+    sqlx::query(
+        "DELETE FROM username_reservations WHERE status = 'QUEUED' OR base LIKE 'queueatrisk%'",
+    )
+    .execute(&pool)
+    .await
+    .expect("pre-clean");
+
+    // Enqueued first, richest group: without the deadline rule these would
+    // take every slot.
+    let mut wealthy = Vec::new();
+    for digits in ["21", "22", "23", "24"] {
+        wealthy.push(
+            outbox::insert_queued(&pool, &reservation(&base, digits, "sub-wealthy"), 4)
+                .await
+                .expect("insert wealthy"),
+        );
+    }
+    // Enqueued last, poorest group, but minutes from expiry.
+    let at_risk = outbox::insert_queued(
+        &pool,
+        &expiring(&base, "25", "sub-atrisk", time::Duration::minutes(5)),
+        1,
+    )
+    .await
+    .expect("insert at risk");
+
+    let promoted = queue::advance_iteration_within(&pool, std::time::Duration::from_secs(3600))
+        .await
+        .expect("advance");
+    let ids: Vec<i64> = promoted.iter().map(|p| p.id).collect();
+
+    assert_eq!(
+        ids.first().copied(),
+        Some(at_risk),
+        "the claim about to stop existing goes first"
+    );
+    assert_eq!(promoted.len(), 4, "the budget is reordered, not widened");
+    assert_eq!(
+        ids.iter().filter(|id| wealthy.contains(id)).count(),
+        3,
+        "the at-risk row took one of the four slots"
+    );
+
+    // With no horizon the ordering is the original balance-priority FIFO.
+    let promoted = queue::advance_iteration(&pool).await.expect("advance");
+    assert_eq!(
+        promoted.first().map(|p| p.id),
+        Some(wealthy[3]),
+        "without a horizon the deadline rule is inert"
+    );
+
+    sqlx::query("DELETE FROM username_reservations WHERE base = $1")
+        .bind(&base)
+        .execute(&pool)
+        .await
+        .expect("clean up");
 }

@@ -11,7 +11,8 @@ use secrecy::ExposeSecret as _;
 use super::middleware::RateLimiter;
 use crate::auth::key_attest::crl::CrlCache;
 use crate::auth::play_integrity::google::GoogleDecoder;
-use crate::chain::PeopleChain;
+use crate::chain::asset_hub::ValidityWindow;
+use crate::chain::{AssetHub, PeopleChain};
 use crate::config::Config;
 use crate::device_check;
 
@@ -19,8 +20,17 @@ use crate::device_check;
 pub struct AppState {
     /// Postgres pool (challenges, refresh tokens).
     pub pool: PgPool,
-    /// People Chain read client.
+    /// People Chain read client. Consumer records and balances only — names
+    /// are no longer read from here.
     pub chain: PeopleChain,
+    /// Asset Hub read client. The dotNS gateway is the name authority, so
+    /// username availability is decided against `LiteLabelOwner`.
+    pub asset_hub: AssetHub,
+    /// `DotnsGateway`'s reservation bounds, read from chain at startup. Used
+    /// to stamp each claim's `dotns_expires_at` so the queue can schedule
+    /// against the deadline. Advisory: the writer re-reads the live window
+    /// before it spends an extrinsic.
+    pub dotns_validity: ValidityWindow,
     /// JWT issuer (Ed25519).
     pub jwt: Arc<Jwt>,
     pub config: Arc<Config>,
@@ -44,7 +54,14 @@ impl http_common::HasJwtVerifier for AppState {
 }
 
 impl AppState {
-    pub fn new(pool: PgPool, chain: PeopleChain, jwt: Jwt, config: Config) -> Self {
+    pub fn new(
+        pool: PgPool,
+        chain: PeopleChain,
+        asset_hub: AssetHub,
+        dotns_validity: ValidityWindow,
+        jwt: Jwt,
+        config: Config,
+    ) -> Self {
         let limiter = RateLimiter::new(config.auth_rate_limit, config.auth_rate_window);
         let crl = CrlCache::new(
             config.android_crl_url.clone(),
@@ -70,6 +87,8 @@ impl AppState {
         Self {
             pool,
             chain,
+            asset_hub,
+            dotns_validity,
             jwt: Arc::new(jwt),
             config: Arc::new(config),
             limiter,

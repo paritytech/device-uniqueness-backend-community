@@ -59,12 +59,20 @@ pub async fn run() -> anyhow::Result<()> {
 
     let attestation_chain =
         device_attestation::PeopleChain::connect(&attestation_config.people_rpc_url).await?;
+    let attestation_asset_hub =
+        device_attestation::AssetHub::connect(&attestation_config.asset_hub_rpc_url).await?;
+    let attestation_dotns_validity = attestation_asset_hub.validity_window().await?;
     let indexer_chain = username_indexer::PeopleChain::connect(
         &indexer_config.people_rpc_url,
         indexer_config.storage_page_size,
     )
     .await?;
-    tracing::info!("connected to People Chain");
+    let indexer_asset_hub = username_indexer::AssetHubChain::connect(
+        &indexer_config.asset_hub_rpc_url,
+        indexer_config.storage_page_size,
+    )
+    .await?;
+    tracing::info!("connected to People Chain and Asset Hub");
 
     let jwt = device_attestation::Jwt::new(
         attestation_config.jwt_secret.expose_secret(),
@@ -73,6 +81,8 @@ pub async fn run() -> anyhow::Result<()> {
     let attestation_state = device_attestation::AppState::new(
         attestation_pool.clone(),
         attestation_chain.clone(),
+        attestation_asset_hub,
+        attestation_dotns_validity,
         jwt,
         attestation_config,
     );
@@ -83,6 +93,7 @@ pub async fn run() -> anyhow::Result<()> {
         &indexer_config,
         indexer_pool.clone(),
         indexer_chain.clone(),
+        indexer_asset_hub,
     )
     .await?;
 

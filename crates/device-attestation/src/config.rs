@@ -20,6 +20,9 @@ pub struct Config {
     pub jwt_issuer: String,
     /// People Chain RPC endpoint for read-path chain queries.
     pub people_rpc_url: String,
+    /// Asset Hub RPC. dotNS is the name authority, so the API reads
+    /// availability from the gateway rather than from People storage.
+    pub asset_hub_rpc_url: String,
     /// Attester authority: published by `GET /api/v1/attester` as `0x`+hex and
     /// attested as by device-attestation-chain-writer, from one shared value.
     pub attester_account: [u8; 32],
@@ -219,6 +222,8 @@ impl Config {
             jwt_issuer: std::env::var("JWT_ISSUER").unwrap_or_else(|_| "polkadot-app".to_string()),
             people_rpc_url: std::env::var("PEOPLE_RPC_URL")
                 .unwrap_or_else(|_| "wss://previewnet.substrate.dev/people".to_string()),
+            asset_hub_rpc_url: std::env::var("ASSET_HUB_RPC_URL")
+                .unwrap_or_else(|_| "wss://previewnet.substrate.dev/asset-hub".to_string()),
             attester_account: attester_account_from_env()?,
             access_ttl: Duration::from_secs(parse_var("ACCESS_TOKEN_TTL_SECS", "86400")?),
             refresh_ttl: Duration::from_secs(parse_var("REFRESH_TOKEN_TTL_SECS", "2592000")?),
@@ -276,6 +281,7 @@ impl Config {
             jwt_secret: SecretBox::new(Box::new([7u8; 32])),
             jwt_issuer: "polkadot-app".to_string(),
             people_rpc_url: "unused".to_string(),
+            asset_hub_rpc_url: "unused".to_string(),
             attester_account: [0xaa; 32],
             access_ttl: Duration::from_secs(86_400),
             refresh_ttl: Duration::from_secs(2_592_000),
