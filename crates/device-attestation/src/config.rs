@@ -149,8 +149,9 @@ pub enum ConfigError {
 impl Config {
     /// Read and validate configuration from the environment.
     ///
-    /// Fails (rather than defaulting) for `DEVICE_ATTESTATION_DATABASE_URL`
-    /// and `JWT_ED25519_SECRET`; everything else has a safe local default.
+    /// Fails (rather than defaulting) for `DEVICE_ATTESTATION_DATABASE_URL`,
+    /// `JWT_ED25519_SECRET` and `ASSET_HUB_RPC_URL`; everything else has a safe
+    /// local default.
     pub fn from_env() -> Result<Self, ConfigError> {
         let bind_addr = parse_var("BIND_ADDR", "0.0.0.0:8080")?;
         let database_url = std::env::var("DEVICE_ATTESTATION_DATABASE_URL")
@@ -200,6 +201,19 @@ impl Config {
         }
 
         let enforce_auth = env_bool("ENFORCE_AUTH", false)?;
+        // Required, not defaulted. dotNS is the name authority: availability,
+        // the registration digit selection and the payment lane's re-selection
+        // are all decided against this endpoint. A default would let an
+        // environment that repoints PEOPLE_RPC_URL at another network keep
+        // answering from PreviewNet's gateway, silently — which is exactly the
+        // split-network pairing every comment around ASSET_HUB_RPC_URL warns
+        // about. The writer aborts without it and username-indexer refuses to
+        // start; the API matches them.
+        let asset_hub_rpc_url = std::env::var("ASSET_HUB_RPC_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or(ConfigError::Missing("ASSET_HUB_RPC_URL"))?;
         let widevine = parse_widevine()?;
         // Warn, not fatal: an advisory rollout stage is deliberate.
         if widevine.as_ref().is_some_and(|w| w.enforce) && !(auth_enabled && enforce_auth) {
@@ -219,8 +233,7 @@ impl Config {
             jwt_issuer: std::env::var("JWT_ISSUER").unwrap_or_else(|_| "polkadot-app".to_string()),
             people_rpc_url: std::env::var("PEOPLE_RPC_URL")
                 .unwrap_or_else(|_| "wss://previewnet.substrate.dev/people".to_string()),
-            asset_hub_rpc_url: std::env::var("ASSET_HUB_RPC_URL")
-                .unwrap_or_else(|_| "wss://previewnet.substrate.dev/asset-hub".to_string()),
+            asset_hub_rpc_url,
             attester_account: attester_account_from_env()?,
             access_ttl: Duration::from_secs(parse_var("ACCESS_TOKEN_TTL_SECS", "86400")?),
             refresh_ttl: Duration::from_secs(parse_var("REFRESH_TOKEN_TTL_SECS", "2592000")?),
@@ -891,6 +904,7 @@ mod tests {
         const VARS: &[&str] = &[
             "DEVICE_ATTESTATION_DATABASE_URL",
             "JWT_ED25519_SECRET",
+            "ASSET_HUB_RPC_URL",
             "ATTESTER_ACCOUNT",
             "AUTH_ENABLED",
             "APPLE_APP_ATTEST_APP_IDS",
@@ -916,6 +930,9 @@ mod tests {
         std::env::set_var("DEVICE_ATTESTATION_DATABASE_URL", "postgres://unused");
         missing("JWT_ED25519_SECRET");
         std::env::set_var("JWT_ED25519_SECRET", hex::encode([1u8; 32]));
+        // No default: the name authority is never guessed for a bare process.
+        missing("ASSET_HUB_RPC_URL");
+        std::env::set_var("ASSET_HUB_RPC_URL", "wss://example.invalid/asset-hub");
         missing("ATTESTER_ACCOUNT");
         std::env::set_var(
             "ATTESTER_ACCOUNT",

@@ -299,10 +299,19 @@ fn row_to_reservation(row: &sqlx::postgres::PgRow) -> Result<Reservation, sqlx::
     })
 }
 
+/// Claim People-lane rows whose dotNS half has already landed.
+///
+/// `dotns_status IS NULL` is the **pre-cutover** allowance, not a second mode.
+/// Intake now refuses a claim carrying no `dotns` block, so no new row can
+/// reach here with a NULL: the only rows that do are ones written while People
+/// was the name authority, and stranding them would leave a client holding a
+/// 202 for a registration nothing would ever submit. They drain on People
+/// exactly as they were accepted to, and — having no reservation to make —
+/// never appear in `claim_dotns_due`.
 pub async fn claim_due(pool: &PgPool, limit: i64) -> Result<Vec<Reservation>, sqlx::Error> {
     let rows = sqlx::query(&format!(
         "SELECT {SELECT_COLS} FROM username_reservations \
-         WHERE dotns_status = 'RESERVED' \
+         WHERE (dotns_status = 'RESERVED' OR dotns_status IS NULL) \
            AND (status = 'RESERVED' \
                 OR (status = 'RETRY_AFTER' AND (not_before IS NULL OR not_before <= now()))) \
          ORDER BY created_at ASC LIMIT $1"

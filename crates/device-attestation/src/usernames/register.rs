@@ -93,11 +93,13 @@ pub struct RegisterRequest {
     #[serde(rename = "deviceId")]
     #[schema(rename = "deviceId", example = "base64-32-byte-device-id")]
     device_id: Option<String>,
-    /// Optional DotNS reservation block.
-    dotns: Option<Dotns>,
+    /// DotNS reservation block. Required: the gateway is the name authority,
+    /// so a claim without one has no name to reserve and cannot be registered.
+    dotns: Dotns,
 }
 
-/// Optional DotNS reservation, parking a base label for later full-person use.
+/// The DotNS reservation the gateway registers the lite label from, optionally
+/// parking a base label for later full-person use.
 #[derive(Deserialize, ToSchema)]
 #[allow(dead_code)]
 pub(crate) struct Dotns {
@@ -160,6 +162,9 @@ const MSG_HEX_65: &str = "Must be a hexadecimal string of exactly 65 bytes.";
 const MSG_DIGITS: &str = "Digits must be between 01-99";
 const MSG_INVALID_SS58: &str = "Invalid ss58 address.";
 const MSG_INVALID_SIGNATURE: &str = "Invalid signature.";
+const MSG_DOTNS_REQUIRED: &str =
+    "A dotns reservation block is required: the dotNS gateway is the name authority, \
+     and a claim without one cannot be registered.";
 /// `BaseLabel` is `BoundedVec<u8, ConstU32<32>>` in the dotns-gateway pallet.
 const MAX_DOTNS_LABEL_LEN: usize = 32;
 const PATTERN_BASE: &str = "^([a-z]{6,})$";
@@ -390,7 +395,7 @@ pub async fn register(
     // reopening the unthrottled direct path.
     let queue_lane = state.config.queue_enabled;
     let group = if queue_lane {
-        Some(queue::intake_group(&state.chain, &auth.subject).await)
+        Some(queue::intake_group(&state.asset_hub, &auth.subject).await)
     } else {
         None
     };
@@ -1068,8 +1073,20 @@ fn validate_register(
         MSG_HEX_65,
     );
 
+    // Required, not optional. dotNS is the name authority: the writer's dotNS
+    // lane leads and the People half is claimable only once `dotns_status`
+    // reaches `RESERVED`, so a claim carrying no block has nothing to reserve
+    // and would sit in the outbox unclaimable by either lane — a 202 for a
+    // registration that can never complete. Refuse it at intake instead.
     let dotns = match get("dotns") {
-        None => None,
+        None => {
+            errors.push(FieldError {
+                message: MSG_DOTNS_REQUIRED.to_string(),
+                field: "dotns".to_string(),
+            });
+            refine_skipped = true;
+            None
+        }
         Some(Value::Object(block)) => {
             let mut signature = None;
             match block.get("signature") {
@@ -1412,7 +1429,14 @@ mod tests {
             "ringVrfKey": format!("0x{}", hex::encode(ring)),
             "proofOfOwnership": format!("0x{}", "03".repeat(64)),
             "consumerRegistrationSignature": format!("0x{}", "04".repeat(64)),
-            "identifierKey": format!("0x{}", "05".repeat(65))
+            "identifierKey": format!("0x{}", "05".repeat(65)),
+            // Required: dotNS is the name authority, so every valid claim
+            // carries a reservation block. The signature is never verified at
+            // intake, so a structurally valid one is enough here.
+            "dotns": {
+                "signature": format!("0x{}", "06".repeat(64)),
+                "signedAt": time::OffsetDateTime::now_utc().unix_timestamp(),
+            }
         })
     }
 
@@ -1448,6 +1472,9 @@ mod tests {
                 "proofOfOwnership",
                 "consumerRegistrationSignature",
                 "identifierKey",
+                // dotNS is the name authority; a claim without a reservation
+                // block cannot be registered, so it is a required field.
+                "dotns",
             ]
         );
     }
@@ -1509,10 +1536,12 @@ mod tests {
             "consumerRegistrationSignature": 10, "identifierKey": 11
         });
         let errors = errors_of(body);
-        assert_eq!(errors.len(), 7);
+        assert_eq!(errors.len(), 8);
         assert!(errors
             .iter()
+            .take(7)
             .all(|(_, detail)| detail == "expected string, received number"));
+        assert_eq!(errors[7].0, "dotns");
     }
 
     #[test]
@@ -1600,12 +1629,6 @@ mod tests {
         let config = config();
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
 
-        let plain = validate_register(&valid_body(), &config).expect("valid");
-        assert!(
-            plain.dotns.is_none(),
-            "no dotns block means no reservation leg"
-        );
-
         let mut without = valid_body();
         without["dotns"] = dotns_block(now, None, &config);
         let parsed = validate_register(&without, &config).expect("valid");
@@ -1621,6 +1644,31 @@ mod tests {
                 .reserved_username
                 .as_deref(),
             Some("aliceuser")
+        );
+    }
+
+    /// A claim with no reservation block is refused at intake rather than
+    /// accepted and stranded. The writer's dotNS lane leads and the People
+    /// half waits on `dotns_status = 'RESERVED'`, so such a row would be
+    /// claimable by neither: a 202 for a registration that can never land.
+    #[test]
+    fn a_claim_without_a_dotns_block_is_refused() {
+        let mut body = valid_body();
+        body.as_object_mut().expect("object").remove("dotns");
+        assert_eq!(
+            errors_of(body),
+            [("dotns".to_string(), MSG_DOTNS_REQUIRED.to_string())]
+        );
+
+        // An explicit null is the same absence, not a differently-shaped block.
+        let mut null_block = valid_body();
+        null_block["dotns"] = json!(null);
+        assert_eq!(
+            errors_of(null_block)
+                .into_iter()
+                .map(|(field, _)| field)
+                .collect::<Vec<_>>(),
+            ["dotns".to_string()]
         );
     }
 

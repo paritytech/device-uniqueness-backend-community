@@ -52,6 +52,18 @@ impl AssetHub {
         Ok(this)
     }
 
+    /// Connect without asserting the `reserve_name` shape.
+    ///
+    /// The shape check exists so the writer never builds an extrinsic the
+    /// connected runtime cannot decode. `registration-queue` submits nothing —
+    /// it reads balances — so a runtime that moved `reserve_name` is the
+    /// writer's problem to park on, not a reason for the advancer to refuse to
+    /// promote anything.
+    pub async fn connect_read_only(url: &str) -> anyhow::Result<Self> {
+        let (client, rpc) = chain_client::connect_asset_hub_with_rpc(url).await?;
+        Ok(Self::from_parts(client, rpc))
+    }
+
     /// Wraps an already-constructed online client and the RPC client it was
     /// built on. For offline replay tests.
     pub fn from_parts(client: OnlineClient<AssetHubConfig>, rpc: RpcClient) -> Self {

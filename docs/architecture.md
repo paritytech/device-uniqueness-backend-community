@@ -232,16 +232,18 @@ Operational invariants an agent must respect when touching the code.
   `409` at intake. The client, not the backend, later registers the full name against that
   reservation: `DotnsGateway::register_name` carries a ring-VRF proof over the full-person People
   ring, which the backend can never produce because it never holds the candidate key.
-- **Availability answers for the whole claim, not just the discriminators.** `EXHAUSTED` means
-  nothing claimable under this base — no free discriminator (the offered pool is `01..=99`; `00` is
-  never allocated), **or** a reservation leg that would reject the claim. Both the bare-name owner
-  and the queue length are read in the same batched `state_queryStorageAt` as the 100 discriminator
-  keys, so they cost no extra round trip and cannot disagree about their block.
-  *Trade-off:* `base.NN` is genuinely claimable by a caller that sends no `dotns.reservedUsername`,
-  and reporting `EXHAUSTED` withholds it. That costs nothing in practice: every client reserves
-  unconditionally and no client is planned that can register without the reservation leg, so the
-  withheld case has no caller. Making the last two conditions contingent on the caller's declared
-  intent would only pay off if that changed.
+- **Availability answers only for the discriminators.** `EXHAUSTED` means no free discriminator
+  under this base (the offered pool is `01..=99`; `00` is never allocated), read as one batched
+  `state_queryStorageAt` over the 100 `DotnsGateway::LiteLabelOwner` keys. The two extra conditions
+  the People-chain version folded in — a bare-name owner, a full reservation queue — have no dotNS
+  equivalent: the gateway has no reservation queue to be full, and no bare-base ownership that
+  closes the whole discriminator space. The full-person label is arbitrated by the gateway itself,
+  not preflighted here.
+  *Carried over from the People era:* a name attested before the cutover has no `LiteLabelOwner`
+  entry, so the chain read alone would offer its discriminator again. What prevents that is
+  `outbox::allocated_discriminators`, which counts every row in `username_reservations` regardless
+  of status. For the pre-cutover population that local row is the **only** record of the
+  allocation — it is not recoverable from either chain, so the outbox table must not be truncated.
 - **The writer submits a whole pass as one extrinsic.** A claimed set becomes one
   `Utility.force_batch` of `attest` calls (proxied as a whole when the signer is a delegate), so N
   registrations cost one finalization rather than N. `force_batch`, never `batch_all`: one poison row
@@ -329,9 +331,13 @@ Operational invariants an agent must respect when touching the code.
   reservation lands, and released when it fails terminally. A People failure *after* that point
   deliberately does **not** release the device, because the label is already claimed globally and
   freeing the handset would let it take a second name while the first stays burned.
-  `dotns_status` `NULL` means the request carried no `dotns` block *or* the row predates the lane.
-  There is no backfill, so pre-existing rows are never submitted, and legacy rows whose names were
-  written while People was the authority keep `dotns_status` `NULL` for good.
+  `dotns_status` `NULL` now means one thing only: the row is **pre-cutover**. Intake refuses a
+  claim carrying no `dotns` block (a `400` on `dotns`), because such a row would be claimable by
+  neither lane — the dotNS half has nothing to reserve and the People half waits on a
+  `dotns_status` that never arrives. The rows that do carry `NULL` were written while People was
+  the name authority, and `claim_due` still admits them so they drain on People exactly as they
+  were accepted to; for those, People is the leading lane and owns the Widevine device record.
+  There is no backfill in either direction.
 - **The queue schedules against the reservation deadline, and the bound is derived.** Intake stamps
   `dotns_expires_at` = `dotns_signed_at + DotnsGateway::MaxValiditySeconds`, the window read from
   chain, so the queue can see a claim's expiry instead of discovering it when the writer finally
@@ -349,10 +355,16 @@ Operational invariants an agent must respect when touching the code.
   depth is not what expires claims; a stalled advancer or writer is.** It is published as
   `dub_queue_safe_depth` against `dub_queue_depth` so that stays true after someone changes the
   cadence or a runtime upgrade shortens the window.
-  The advancer opens no Asset Hub connection for any of this — the compose boundaries deny it one,
-  and it does not need one: the deadline is already on the row, and the gauge recovers the window
-  from the most recently stamped row, where `dotns_expires_at − dotns_signed_at` *is* the constant
-  that was in force.
+  None of this costs the advancer a chain read: the deadline is already on the row, and the gauge
+  recovers the window from the most recently stamped row, where `dotns_expires_at −
+  dotns_signed_at` *is* the constant that was in force. The one chain read it does make is the
+  balance behind a claim's priority group, and that goes to **Asset Hub** — the same endpoint the
+  payment lane watches deposits on, so the queue can never rank a claim by a balance the payer is
+  not being asked to hold.
+  The sweep releases the claim's Widevine device record in the same transaction, exactly as the
+  writer's terminal dotNS path does. An expired reservation is terminal for the *claim*, not for
+  the device; abandoning the row while leaving the record `PENDING` would tell the client to
+  re-register and then refuse the handset forever.
 - **The gateway lane's freshness bounds come from the chain, not from config.** `reserve_name`
   enforces `MaxValiditySeconds`/`MaxFutureSkewSeconds` against the client's `signedAt`, and the
   writer enforces **both** before spending an extrinsic — device-attestation-api's

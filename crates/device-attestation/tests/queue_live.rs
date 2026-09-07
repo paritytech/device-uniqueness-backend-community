@@ -310,8 +310,36 @@ async fn a_reservation_that_died_in_the_queue_is_swept_not_promoted() {
         .await
         .expect("insert undated");
 
+    // Each claim holds a Widevine device record, as intake reserves it.
+    for (id, tag) in [(dead, 1u8), (live, 2), (undated, 3)] {
+        device_attestation::widevine::store::insert_pending(
+            &pool,
+            &device_attestation::widevine::store::PendingDevice { hmac: [tag; 32] },
+            id,
+        )
+        .await
+        .expect("reserve device");
+    }
+
     let swept = queue::expire_queued(&pool).await.expect("sweep");
     assert_eq!(swept, 1, "only the row past its deadline");
+
+    // The abandoned claim gives its device back: the client is told to
+    // re-register, and the dedup gate must not refuse the same handset.
+    assert!(
+        !device_attestation::widevine::store::seen(&pool, &[1u8; 32])
+            .await
+            .expect("read device"),
+        "an expired claim releases its device record"
+    );
+    for tag in [2u8, 3] {
+        assert!(
+            device_attestation::widevine::store::seen(&pool, &[tag; 32])
+                .await
+                .expect("read device"),
+            "a surviving claim keeps its device record"
+        );
+    }
 
     assert_eq!(
         statuses(&pool, dead).await,
@@ -335,6 +363,14 @@ async fn a_reservation_that_died_in_the_queue_is_swept_not_promoted() {
     assert!(!ids.contains(&dead), "a doomed row never takes a slot");
     assert!(ids.contains(&live) && ids.contains(&undated));
 
+    sqlx::query(
+        "DELETE FROM widevine_devices WHERE reservation_id IN \
+         (SELECT id FROM username_reservations WHERE base = $1)",
+    )
+    .bind(&base)
+    .execute(&pool)
+    .await
+    .expect("clean up devices");
     sqlx::query("DELETE FROM username_reservations WHERE base = $1")
         .bind(&base)
         .execute(&pool)

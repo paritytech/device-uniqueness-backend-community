@@ -11,7 +11,7 @@ use serde::Serialize;
 use sqlx::{PgPool, Row as _};
 use utoipa::ToSchema;
 
-use crate::chain::{lease, PeopleChain};
+use crate::chain::{lease, AssetHub};
 use crate::http::state::AppState;
 use crate::usernames::error::{UsernamesError, UsernamesResult};
 
@@ -51,7 +51,7 @@ const INTAKE_BALANCE_TIMEOUT: Duration = Duration::from_secs(5);
 /// through [`group_for_balance`]. Fails open to group 1 — a chain hiccup,
 /// timeout, or malformed subject must never block intake, only deprioritise
 /// it (the next advancer refresh corrects the group).
-pub async fn intake_group(chain: &PeopleChain, subject: &str) -> u8 {
+pub async fn intake_group(chain: &AssetHub, subject: &str) -> u8 {
     let Some(account) = parse_subject(subject) else {
         tracing::warn!(subject, "queue intake: unparseable subject; using group 1");
         return 1;
@@ -160,7 +160,7 @@ const BALANCE_READ_CONCURRENCY: usize = 16;
 ///
 /// A failed balance read **keeps the current group**: unlike intake there is a
 /// known-good value, and failing open to 1 would demote the whole queue.
-pub async fn refresh_groups(pool: &PgPool, chain: &PeopleChain) -> Result<(), sqlx::Error> {
+pub async fn refresh_groups(pool: &PgPool, chain: &AssetHub) -> Result<(), sqlx::Error> {
     use futures::StreamExt as _;
 
     let rows = sqlx::query(
@@ -300,8 +300,11 @@ pub const ADVANCER_LEASE_NAME: &str = "registration-queue-advancer";
 pub struct AdvancerConfig {
     /// Postgres connection string (shared schema with device-attestation-api).
     pub database_url: String,
-    /// People Chain RPC endpoint (balance reads for group refresh).
-    pub people_rpc_url: String,
+    /// Asset Hub RPC endpoint (balance reads for the group refresh). Asset
+    /// Hub is where balances live now that the payment lane watches deposits
+    /// there; grouping off the other chain would rank the queue by a balance
+    /// nobody is being asked to hold.
+    pub asset_hub_rpc_url: String,
     /// Iteration interval (the spec's "every N seconds").
     pub interval: Duration,
     /// Lease TTL; must comfortably exceed `interval` so a live advancer's
@@ -322,8 +325,7 @@ impl AdvancerConfig {
         validate_cadence(interval, lease_ttl)?;
         Ok(Self {
             database_url,
-            people_rpc_url: std::env::var("PEOPLE_RPC_URL")
-                .unwrap_or_else(|_| "wss://previewnet.substrate.dev/people".to_string()),
+            asset_hub_rpc_url: http_common::config::required_var("ASSET_HUB_RPC_URL")?,
             interval,
             lease_ttl,
             // Unique per boot: in a container the PID is always 1, and equal
@@ -458,15 +460,49 @@ pub async fn stamped_validity_window(pool: &PgPool) -> Result<Option<Duration>, 
     Ok(secs.filter(|s| *s > 0.0).map(Duration::from_secs_f64))
 }
 
+/// Abandon every queued claim already past its dotNS deadline, and give each
+/// one's Widevine device record back.
+///
+/// The device release is the whole reason this is a transaction rather than a
+/// single UPDATE. Abandoning a claim is what the writer's `Dotns::terminal`
+/// does for a row it owns, and that path releases the device precisely so the
+/// handset can claim again — an expired reservation is terminal for the claim,
+/// not for the device. A sweep that abandoned the row and left the record
+/// `PENDING` would tell the client to re-register while
+/// [`crate::widevine::store::seen`] permanently refused it.
 pub async fn expire_queued(pool: &PgPool) -> Result<u64, sqlx::Error> {
-    let done = sqlx::query(
-        "UPDATE username_reservations          SET dotns_status = 'EXPIRED',              status = 'ABANDONED',              dotns_last_error = $1,              last_error = $2,              not_before = NULL,              dotns_not_before = NULL,              updated_at = now()          WHERE status = 'QUEUED'            AND dotns_expires_at IS NOT NULL            AND dotns_expires_at <= now()",
+    let mut tx = pool.begin().await?;
+    let expired: Vec<i64> = sqlx::query_scalar(
+        "UPDATE username_reservations \
+            SET dotns_status = 'EXPIRED', \
+                status = 'ABANDONED', \
+                dotns_last_error = $1, \
+                last_error = $2, \
+                not_before = NULL, \
+                dotns_not_before = NULL, \
+                updated_at = now() \
+          WHERE status = 'QUEUED' \
+            AND dotns_expires_at IS NOT NULL \
+            AND dotns_expires_at <= now() \
+          RETURNING id",
     )
     .bind(EXPIRED_IN_QUEUE_REASON)
     .bind(ABANDONED_IN_QUEUE_REASON)
-    .execute(pool)
+    .fetch_all(&mut *tx)
     .await?;
-    Ok(done.rows_affected())
+    if expired.is_empty() {
+        tx.rollback().await?;
+        return Ok(0);
+    }
+    let released = crate::widevine::store::release_for_reservations(&mut *tx, &expired).await?;
+    tx.commit().await?;
+    if released > 0 {
+        tracing::info!(
+            released,
+            "widevine device records released with the expired claims"
+        );
+    }
+    Ok(expired.len() as u64)
 }
 
 const EXPIRED_IN_QUEUE_REASON: &str =
@@ -481,7 +517,7 @@ const ABANDONED_IN_QUEUE_REASON: &str =
 /// Per-iteration errors are logged and the loop continues; a lost lease drops
 /// back to acquisition. If the process dies, claims park as `QUEUED` behind the
 /// throttle and the chain-writer raises the stranded-queue warning.
-pub async fn run_advancer(pool: PgPool, chain: PeopleChain, config: AdvancerConfig) {
+pub async fn run_advancer(pool: PgPool, chain: AssetHub, config: AdvancerConfig) {
     tracing::info!(
         interval_secs = config.interval.as_secs(),
         holder = %config.holder_id,
@@ -490,7 +526,7 @@ pub async fn run_advancer(pool: PgPool, chain: PeopleChain, config: AdvancerConf
     http_common::metrics::spawn_readiness_probe(
         "registration-queue",
         (pool.clone(), chain.clone()),
-        |(p, c)| crate::http::health::probe(p, c),
+        |(p, c)| crate::http::health::probe_asset_hub(p, c),
     );
     loop {
         let epoch = match lease::try_acquire(

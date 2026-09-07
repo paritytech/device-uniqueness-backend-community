@@ -672,6 +672,13 @@ async fn the_people_lane_waits_for_the_dotns_half_to_land() {
     .await
     .expect("set dotns reserved");
 
+    // A fourth row with no dotNS half at all: pre-cutover, written while
+    // People was the name authority. Intake refuses new ones, but the rows
+    // already in the outbox still have to drain rather than stall forever.
+    outbox::insert(&pool, &reservation(&base, "34"))
+        .await
+        .expect("insert");
+
     let due: Vec<String> = outbox::claim_due(&pool, 10_000)
         .await
         .expect("claim due")
@@ -681,8 +688,9 @@ async fn the_people_lane_waits_for_the_dotns_half_to_land() {
         .collect();
     assert_eq!(
         due,
-        vec![format!("{base}.33")],
-        "only the row whose name Asset Hub confirmed is claimable"
+        vec![format!("{base}.33"), format!("{base}.34")],
+        "the row Asset Hub confirmed, plus the pre-cutover row that has no \
+         dotNS half to wait on"
     );
 
     cleanup(&pool, &base, "unused").await;

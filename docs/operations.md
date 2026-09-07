@@ -107,7 +107,7 @@ The values you must decide, at minimum:
 | --- | --- |
 | `ENV_ID` | This environment's name; suffixes every network alias. |
 | `PEOPLE_RPC_URL` | People Chain RPC. Must be a **full** node serving the legacy `state_queryStorageAt` — see the availability failure mode below. |
-| `ASSET_HUB_RPC_URL` | Asset Hub RPC. Required on `device-attestation-api`, `device-attestation-chain-writer` and `username-indexer`. Same `state_queryStorageAt` requirement. **Must name the same network as `PEOPLE_RPC_URL`** — a split pair claims labels on the wrong chain, unrecoverably. |
+| `ASSET_HUB_RPC_URL` | Asset Hub RPC. Required — no default — on `device-attestation-api`, `device-attestation-chain-writer`, `username-indexer` and `registration-queue`. Same `state_queryStorageAt` requirement. **Must name the same network as `PEOPLE_RPC_URL`** — a split pair claims labels on the wrong chain, unrecoverably. |
 | `ATTESTER_ACCOUNT` | The on-chain attester authority (SS58). |
 | `CHAIN_WRITER_SIGNER_SURI` | The writer's signing key; must be an authorized attester or its proxy, and funded. |
 | `JWT_ED25519_SECRET` | 32 bytes. `device-attestation-api` only. |
@@ -371,6 +371,12 @@ sudo docker compose exec -T postgres psql -U device_attestation -d device_attest
   `dotns_last_error = "…expired while queued…"`; one that died later was the
   writer. Either way it means the claim sat for days.
 
+  A swept claim gives its Widevine device record back with it, so the client
+  the message tells to re-register can. (`FAILED_TERMINAL` on the People half
+  *after* a reservation landed deliberately does not — the label is claimed
+  globally by then, and releasing the handset would let it take a second name
+  while the first stays burned.)
+
   **The queue will not do this to you by depth alone.** Compare
   `dub_queue_depth` against `dub_queue_safe_depth`: the safe depth is
   `4 × floor((MaxValiditySeconds − 300) / QUEUE_ADVANCE_INTERVAL_SECS)`, about
@@ -429,7 +435,11 @@ always pin `chain="people"` or `chain="asset-hub"` in alerts and dashboards.
   rather than resubmitting.
 - **One dotNS condition refuses to start:** no `ASSET_HUB_RPC_URL`. That is a
   config error — the People lane waits on a gateway reservation nothing would
-  submit — and is not restart-fixable. Correct the `.env`.
+  submit — and is not restart-fixable. Correct the `.env`. `device-attestation-api`,
+  `username-indexer` and `registration-queue` refuse the same way, and for the
+  same reason: none of them may guess a name authority, because a guess that
+  landed on the wrong network would answer availability and rank the queue off
+  a chain nobody is registering on.
 - **Everything else dotNS parks the lane, not the writer.** Asset Hub is dialled
   on the first pass rather than at boot, and re-dialled every 30s while down, so
   an unreachable endpoint leaves rows in `PENDING` and keeps People registrations
@@ -589,7 +599,7 @@ you expect.
 |---|---|
 | `readyz`: `chain: down` | People Chain RPC unreachable or changed — check `PEOPLE_RPC_URL`. |
 | Writer: `registration parked without spending an attempt` / `dotns reservation parked …` | The signer cannot pay fees on that chain. Rows are held in `RETRY_AFTER` at an unchanged `attempt` and resume by themselves once funded — nothing is lost and no restart is needed. Fund the signer named in the accompanying `chain-writer signer balance below floor` warning (`ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK` is the threshold, and the two chains hold **separate** balances for the same account). A park that persists past a top-up is not a funding problem: read the `reason` field. |
-| Writer: `rejected deterministically, not retried` in `last_error` | Another submission would buy the same answer, so the row fails on the first pass instead of paying `CHAIN_WRITER_MAX_ATTEMPTS` fees. All three causes are the row's `reserved_username` (the full-person name) leg, which `attest` checks **before** it writes the lite username: `Resources::UsernameReservationTaken` (that name is owned by someone else), `Resources::QueueFull` (its reservation queue is at `MaxReservationQueueLength`, 10 on next-people-paseo), `Resources::AlreadyHasReservation` (the candidate already reserved another name). Intake refuses these claims with a `409` before a row exists, so a row that reaches here raced that check — a queue that filled in between. The writer **cannot** resubmit without the reservation: the consumer signature covers `reserved_username`, so only the client can re-sign. The client must re-register for another `dotns.reservedUsername` — dropping the reservation leg is not an option any client implements. Note `QueueFull` is not immutable in principle — entries expire and `remove_expired_username_reservation` is permissionless — but nothing drains within the seconds the backoff spans. The lite username is unaffected only if `status` is `ASSIGNED`; if it is `FAILED_TERMINAL` the discriminator that row holds stays consumed until the row is deleted. |
+| Writer: `rejected deterministically, not retried` in `last_error` | Another submission would buy the same answer, so the row fails on the first pass instead of paying `CHAIN_WRITER_MAX_ATTEMPTS` fees. All three causes are the row's `reserved_username` (the full-person name) leg, which `attest` checks **before** it writes the lite username: `Resources::UsernameReservationTaken` (that name is owned by someone else), `Resources::QueueFull` (its reservation queue is at `MaxReservationQueueLength`, 10 on next-people-paseo), `Resources::AlreadyHasReservation` (the candidate already reserved another name). Intake no longer preflights this leg — the gateway is the name authority and holds the only authoritative view of the full-label space — so a claim on a taken full name reaches the writer rather than being refused with a `409`. **It reaches it after the dotNS reservation has already landed**, so `status` goes `FAILED_TERMINAL` with the label claimed and (deliberately) the device record not released. The writer **cannot** resubmit without the reservation: the consumer signature covers `reserved_username`, so only the client can re-sign. The client must re-register for another `dotns.reservedUsername` — dropping the reservation leg is not an option any client implements. Note `QueueFull` is not immutable in principle — entries expire and `remove_expired_username_reservation` is permissionless — but nothing drains within the seconds the backoff spans. The lite username is unaffected only if `status` is `ASSIGNED`; if it is `FAILED_TERMINAL` the discriminator that row holds stays consumed until the row is deleted. |
 | Availability checks failing while `readyz` is green | The endpoint does not serve the legacy `state_queryStorageAt` method (a trimmed or `chainHead`-only RPC or proxy). Availability reads all 100 `{base}.{NN}` keys in one such request, and the writer resolves `UsernameOwnerOf` (People) and `LiteLabelOwner` (Asset Hub) for a whole claimed set the same way, so writer passes fail wholesale too — but `readyz` only probes it on People, so readiness can stay green. Repoint `PEOPLE_RPC_URL` (and `ASSET_HUB_RPC_URL`) at a full node. A response that is incomplete, doubled, or for another block also fails closed by design — never as "available". |
 | Claims returning `422 Pool exhausted` | The ticket pool drained. Check `invite-tickets-pool` logs: `ticket batch finalized … registered=0` means the inviter is out of `AvailableInvites` quota or unauthorized; `pool tick failed` means RPC or signer trouble. Pool size is logged each tick — treat sustained `available < ~10% of POOL_TARGET_SIZE` as the alert threshold. |
 | `invite-tickets-pool`: `another maintainer instance holds the pool lock` | A second replica or a stuck deploy overlap. Scale back to exactly one. |

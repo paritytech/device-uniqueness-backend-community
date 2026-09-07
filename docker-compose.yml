@@ -194,7 +194,11 @@ services:
     # balances and flips queue rows in the device-attestation DB.
     environment:
       DEVICE_ATTESTATION_DATABASE_URL: postgres://${DEVICE_ATTESTATION_DB_USER:-device_attestation}:${DEVICE_ATTESTATION_DB_PASSWORD:-device_attestation}@postgres:5432/${DEVICE_ATTESTATION_DB_NAME:-device_attestation}
-      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      # Balances live on Asset Hub, which is also where the payment lane
+      # watches deposits — grouping the queue off the other chain would rank
+      # claims by a balance nobody is being asked to hold. Read-only, and no
+      # reserve_name shape assertion: this service submits nothing.
+      ASSET_HUB_RPC_URL: ${ASSET_HUB_RPC_URL:-wss://previewnet.substrate.dev/asset-hub}
       QUEUE_ADVANCE_INTERVAL_SECS: ${QUEUE_ADVANCE_INTERVAL_SECS:-6}
       QUEUE_LEASE_TTL_SECS: ${QUEUE_LEASE_TTL_SECS:-30}
       # Prometheus exporter, scraped on the private metrics network only.

@@ -1249,7 +1249,7 @@
       },
       "Dotns": {
         "type": "object",
-        "description": "Optional DotNS reservation, parking a base label for later full-person use.",
+        "description": "The DotNS reservation the gateway registers the lite label from, optionally\nparking a base label for later full-person use.",
         "required": [
           "signature",
           "signedAt"
@@ -1397,7 +1397,8 @@
           "ringVrfKey",
           "proofOfOwnership",
           "consumerRegistrationSignature",
-          "identifierKey"
+          "identifierKey",
+          "dotns"
         ],
         "properties": {
           "candidateAccountId": {
@@ -1482,15 +1483,8 @@
             "example": "base64-32-byte-device-id"
           },
           "dotns": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Dotns",
-                "description": "Optional DotNS reservation block."
-              }
-            ]
+            "$ref": "#/components/schemas/Dotns",
+            "description": "DotNS reservation block. Required: the gateway is the name authority,\nso a claim without one has no name to reserve and cannot be registered."
           }
         }
       },

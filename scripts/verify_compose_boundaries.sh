@@ -116,10 +116,15 @@ require_key device-attestation-api ASSET_HUB_RPC_URL
 # every health signal stayed green, which is why its config requires the URL
 # rather than defaulting it.
 require_key username-indexer ASSET_HUB_RPC_URL
+# registration-queue reads it too, for one thing only: the free balance that
+# decides a queued claim's priority group. That is the same balance the payment
+# lane watches for deposits, so both halves have to name the same chain or the
+# queue ranks claims by a balance nobody is being asked to hold. It submits
+# nothing and holds no key.
+require_key registration-queue ASSET_HUB_RPC_URL
 require_key device-attestation-chain-writer ATTESTER_ACCOUNT
 require_key device-attestation-api ATTESTER_ACCOUNT
-for service in registration-queue \
-               invite-tickets-api invite-tickets-pool turn-api \
+for service in invite-tickets-api invite-tickets-pool turn-api \
                notify-relay; do
   forbid_key "$service" ASSET_HUB_RPC_URL
 done
