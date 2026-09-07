@@ -1,10 +1,11 @@
 -- Speculative rows: indexed from the best (unfinalized) chain so a newly
 -- registered username reaches search a finality trail earlier — measured at
--- 2–5 blocks on People, 5–14 on Asset Hub.
+-- 2–5 blocks on the People chain this indexer reads.
 --
 -- NULL means the row is confirmed: the finalized pass wrote it, and only the
 -- finalized pass may change or remove it. Non-NULL records the best-block
--- number a speculative pass read the row at, and marks the row as the only
+-- number the row was first admitted at — it is not refreshed on later passes,
+-- so the age of a pending row stays readable — and marks the row as the only
 -- kind speculation is allowed to touch. That asymmetry is the whole safety
 -- argument — speculation may add, and may retract what it added, but can never
 -- delete or overwrite finalized state on the strength of a fork that may lose.

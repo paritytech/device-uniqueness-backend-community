@@ -160,7 +160,7 @@
       "id": 15,
       "type": "timeseries",
       "title": "Indexer subscription",
-      "description": "dub_indexer_subscribed: 1 while the finalized-header subscription is live, 0 while the indexer is resubscribing. Zero does not mean search is stale — the SYNC_INTERVAL_SECS fallback still forces a pass — it means the projection is advancing at poll speed instead of block speed, so a newly registered username takes tens of seconds to appear. Resubscribes are plotted beside it: a flapping subscription is an RPC endpoint accepting and closing it.",
+      "description": "dub_indexer_subscribed: 1 while the best-block header subscription (chain_subscribeNewHeads) is live, 0 while the indexer is resubscribing. Zero does not mean search is stale — the SYNC_INTERVAL_SECS fallback still forces a pass — it means the projection is advancing at poll speed instead of block speed, so a newly registered username takes tens of seconds to appear. Resubscribes are plotted beside it: a flapping subscription is an RPC endpoint accepting and closing it.",
       "datasource": { "type": "prometheus", "uid": "dub-prometheus" },
       "gridPos": { "h": 8, "w": 6, "x": 18, "y": 6 },
       "targets": [

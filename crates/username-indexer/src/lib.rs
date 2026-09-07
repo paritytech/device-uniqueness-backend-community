@@ -19,8 +19,9 @@ pub use chain::{ChainError, PeopleChain};
 pub use config::{Config, ConfigError};
 pub use http::{routes, AppState};
 pub use incremental::{
-    index_finalized_range, index_finalized_range_to, index_speculative_window, IndexError,
-    IndexReport, SpeculativeReport,
+    index_finalized_range, index_finalized_range_to, index_speculative_window, try_projection_lock,
+    IndexError, IndexReport, ProjectionLock, SpeculativeCache, SpeculativeReport,
+    MAX_SPECULATIVE_WINDOW,
 };
 pub use projection::{clear_speculative, AssignedUsername};
 pub use sync::{run as run_sync, Freshness, FreshnessSnapshot};

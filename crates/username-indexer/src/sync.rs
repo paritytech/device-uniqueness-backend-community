@@ -13,7 +13,7 @@ use crate::chain::PeopleChain;
 use crate::config::Config;
 use crate::incremental::{
     index_finalized_range_locked, index_speculative_window, try_projection_lock, IndexError,
-    IndexReport, SpeculativeReport,
+    IndexReport, SpeculativeCache, SpeculativeReport, MAX_SPECULATIVE_WINDOW,
 };
 
 const BACKOFF_BASE_SECS: u64 = 1;
@@ -116,14 +116,16 @@ impl Wake {
     }
 }
 
-/// Run the incremental finalized resync loop until the task is dropped.
+/// Run the incremental resync loop until the task is dropped.
 ///
-/// Driven by a finalized-header subscription, so a registration reaches search
-/// within a block of finality instead of within `sync_interval_secs`. Headers
-/// are only a *signal*: every pass re-reads the checkpoint and indexes up to
-/// the head, so a coalesced or dropped header costs nothing. The interval
-/// survives as the fallback timer — the safety net for a subscription that goes
-/// quiet without erroring.
+/// Driven by a **best**-block header subscription, so a registration reaches
+/// search about a block after it is authored instead of within
+/// `sync_interval_secs`. Headers are only a *signal*: every pass re-reads the
+/// checkpoint, reads the finalized head from the chain, and indexes up to it, so
+/// a coalesced or dropped header costs nothing. The interval survives as the
+/// fallback timer — the safety net for a subscription that goes quiet without
+/// erroring, in which case the pass asks for the best head over RPC rather than
+/// leaving the speculative window unreconciled.
 ///
 /// A failed pass logs and waits a bounded exponential backoff, never advancing
 /// the checkpoint. A dropped subscription backs off on the same counter, so a
@@ -131,6 +133,9 @@ impl Wake {
 pub async fn run(pool: PgPool, chain: PeopleChain, config: Config, freshness: Freshness) {
     let fallback = Duration::from_secs(config.sync_interval_secs.into());
     let mut consecutive_failures = 0_u32;
+    // Outlives the subscription: a resubscribe does not invalidate what we
+    // already read from heights finality has yet to reach.
+    let mut cache = SpeculativeCache::new();
 
     loop {
         let blocks = match chain.best_blocks().await {
@@ -182,7 +187,15 @@ pub async fn run(pool: PgPool, chain: PeopleChain, config: Config, freshness: Fr
             }
 
             let started = Instant::now();
-            match pass(&pool, &chain, wake.best_head(), config.speculative_indexing).await {
+            match pass(
+                &pool,
+                &chain,
+                wake.best_head(),
+                config.speculative_indexing,
+                &mut cache,
+            )
+            .await
+            {
                 Ok(Some(report)) => {
                     consecutive_failures = 0;
                     let finalized = report.finalized;
@@ -305,27 +318,27 @@ struct PassReport {
 /// Record the lag gauges, index up to the finalized head, then reconcile the
 /// unfinalized window against the best head.
 ///
-/// `best_head` is the number the subscription delivered. The finalized head is
-/// *always* read from the chain rather than inferred from it — the one
-/// round-trip this design keeps, and the line that separates confirmed state
-/// from speculative state.
+/// `best_head` is the number the subscription delivered, if it delivered one.
+/// The finalized head is *always* read from the chain rather than inferred from
+/// it — the one round-trip this design keeps, and the line that separates
+/// confirmed state from speculative state.
 ///
 /// Both halves run under a single lock acquisition, so a second replica cannot
 /// slip between them and reconcile the same accounts against a different head.
+/// Only the finalized half can fail the pass; see [`reconcile_speculative`].
 async fn pass(
     pool: &PgPool,
     chain: &PeopleChain,
     best_head: Option<u64>,
     speculative_indexing: bool,
+    cache: &mut SpeculativeCache,
 ) -> Result<Option<PassReport>, IndexError> {
     let finalized = chain.finalized_head_number().await?;
     if let Err(error) = record_lag_gauges(pool, finalized).await {
         tracing::warn!(error = ?error, "checkpoint lag gauge pass failed");
     }
     if let Some(best) = best_head {
-        metrics::gauge!("dub_chain_best_head_block").set(best as f64);
-        metrics::gauge!("dub_chain_finality_trail_blocks")
-            .set(best.saturating_sub(finalized) as f64);
+        record_best_head_gauges(finalized, best);
     }
 
     let Some(_lock) = try_projection_lock(pool).await? else {
@@ -335,37 +348,78 @@ async fn pass(
         return Ok(None);
     };
 
-    let speculative = match best_head {
-        Some(best) if speculative_indexing && best > finalized => {
-            let report = index_speculative_window(pool, chain, finalized, best).await?;
-            metrics::gauge!("dub_indexer_speculative_window_blocks")
-                .set(report.blocks_scanned as f64);
-            if report.accounts_admitted > 0 {
-                metrics::counter!("dub_indexer_speculative_admitted_total")
-                    .increment(report.accounts_admitted);
-            }
-            if report.accounts_retracted > 0 {
-                metrics::counter!("dub_indexer_speculative_retracted_total")
-                    .increment(report.accounts_retracted);
-            }
-            if report.skipped_wide_window {
-                metrics::counter!("dub_indexer_speculative_stood_down_total").increment(1);
-                tracing::warn!(
-                    finalized,
-                    best,
-                    max_window = 64,
-                    "unfinalized window too wide; speculation standing down until finality catches up"
-                );
-            }
-            Some(report)
-        }
-        _ => None,
+    let speculative = if speculative_indexing {
+        reconcile_speculative(pool, chain, finalized, best_head, cache).await
+    } else {
+        None
     };
 
     Ok(Some(PassReport {
         finalized: finalized_report,
         speculative,
     }))
+}
+
+async fn reconcile_speculative(
+    pool: &PgPool,
+    chain: &PeopleChain,
+    finalized: u64,
+    best_head: Option<u64>,
+    cache: &mut SpeculativeCache,
+) -> Option<SpeculativeReport> {
+    let best = match best_head {
+        Some(best) => best,
+        None => match chain.best_head_number().await {
+            Ok(best) => {
+                record_best_head_gauges(finalized, best);
+                best
+            }
+            Err(error) => {
+                metrics::counter!("dub_indexer_speculative_failed_total").increment(1);
+                tracing::warn!(error = ?error, "reading the best head failed; skipping speculation this pass");
+                return None;
+            }
+        },
+    };
+
+    let report = match index_speculative_window(pool, chain, finalized, best, cache).await {
+        Ok(report) => report,
+        Err(error) => {
+            metrics::counter!("dub_indexer_speculative_failed_total").increment(1);
+            tracing::warn!(
+                error = ?error,
+                finalized,
+                best,
+                "speculative reconcile failed; the finalized projection is unaffected"
+            );
+            return None;
+        }
+    };
+
+    metrics::gauge!("dub_indexer_speculative_window_blocks").set(report.blocks_scanned as f64);
+    if report.accounts_admitted > 0 {
+        metrics::counter!("dub_indexer_speculative_admitted_total")
+            .increment(report.accounts_admitted);
+    }
+    if report.accounts_retracted > 0 {
+        metrics::counter!("dub_indexer_speculative_retracted_total")
+            .increment(report.accounts_retracted);
+    }
+    if report.skipped_wide_window {
+        metrics::counter!("dub_indexer_speculative_stood_down_total").increment(1);
+        tracing::warn!(
+            finalized,
+            best,
+            max_window = MAX_SPECULATIVE_WINDOW,
+            "unfinalized window too wide; admitting nothing new until finality catches up (held rows are still re-checked)"
+        );
+    }
+    Some(report)
+}
+
+fn record_best_head_gauges(finalized: u64, best: u64) {
+    metrics::gauge!("dub_chain_best_head_block").set(best as f64);
+    metrics::gauge!("dub_chain_finality_trail_blocks").set(best.saturating_sub(finalized) as f64);
 }
 
 /// Record the finalized head, the checkpoint, and the gap between them.
@@ -407,11 +461,11 @@ mod tests {
 
     const FALLBACK: Duration = Duration::from_secs(30);
 
-    /// One finalized header, or the subscription failing to produce it.
+    /// One best-block header, or the subscription failing to produce it.
     type Header = Result<u64, String>;
 
-    /// A header channel standing in for the finalized subscription. Dropping the
-    /// sender ends the stream the way a closed subscription does.
+    /// A header channel standing in for the best-block subscription. Dropping
+    /// the sender ends the stream the way a closed subscription does.
     fn headers() -> (
         mpsc::UnboundedSender<Header>,
         mpsc::UnboundedReceiver<Header>,

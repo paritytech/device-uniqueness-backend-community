@@ -177,9 +177,25 @@ pub(crate) async fn upsert_speculative(
             display_username = EXCLUDED.display_username,
             snapshot_hash = EXCLUDED.snapshot_hash,
             snapshot_number = EXCLUDED.snapshot_number,
-            speculative_from_block = EXCLUDED.speculative_from_block,
             updated_at = now()
-         WHERE assigned_usernames.speculative_from_block IS NOT NULL",
+         WHERE assigned_usernames.speculative_from_block IS NOT NULL
+           AND (
+                assigned_usernames.account_id_ss58,
+                assigned_usernames.identifier_key,
+                assigned_usernames.lite_username,
+                assigned_usernames.lite_base,
+                assigned_usernames.lite_digits,
+                assigned_usernames.full_username,
+                assigned_usernames.display_username
+           ) IS DISTINCT FROM (
+                EXCLUDED.account_id_ss58,
+                EXCLUDED.identifier_key,
+                EXCLUDED.lite_username,
+                EXCLUDED.lite_base,
+                EXCLUDED.lite_digits,
+                EXCLUDED.full_username,
+                EXCLUDED.display_username
+           )",
     )
     .bind(record.account_id.as_slice())
     .bind(&record.account_id_ss58)
@@ -208,6 +224,30 @@ pub(crate) async fn delete_if_speculative(
     .execute(&mut **tx)
     .await?;
     Ok(result.rows_affected() > 0)
+}
+
+pub(crate) async fn finalized_accounts(
+    pool: &PgPool,
+    accounts: &[[u8; 32]],
+) -> Result<std::collections::BTreeSet<[u8; 32]>, sqlx::Error> {
+    if accounts.is_empty() {
+        return Ok(std::collections::BTreeSet::new());
+    }
+    let keys: Vec<&[u8]> = accounts.iter().map(|account| account.as_slice()).collect();
+    let rows = sqlx::query(
+        "SELECT account_id FROM assigned_usernames
+         WHERE speculative_from_block IS NULL AND account_id = ANY($1)",
+    )
+    .bind(&keys)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let bytes: Vec<u8> = row.try_get("account_id").ok()?;
+            <[u8; 32]>::try_from(bytes.as_slice()).ok()
+        })
+        .collect())
 }
 
 pub(crate) async fn speculative_accounts(pool: &PgPool) -> Result<Vec<[u8; 32]>, sqlx::Error> {

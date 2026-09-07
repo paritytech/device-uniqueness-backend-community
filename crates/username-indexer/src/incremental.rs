@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chain_types::people;
 use chain_types::people::runtime_types::indiv_pallet_resources::types::ConsumerInfo;
@@ -143,7 +143,7 @@ pub async fn index_finalized_range_locked(
     Ok(Some(report))
 }
 
-const MAX_SPECULATIVE_WINDOW: u64 = 64;
+pub const MAX_SPECULATIVE_WINDOW: u64 = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpeculativeWindow {
@@ -177,17 +177,59 @@ pub struct SpeculativeReport {
     pub to_block: u64,
     /// Unfinalized blocks scanned for events this pass.
     pub blocks_scanned: u64,
-    /// Accounts re-read at the best head (window events + rows already held).
+    /// Accounts re-read at the best head: those named by window events plus
+    /// the rows already held speculatively, less any already held *finalized* —
+    /// speculation can neither overwrite nor delete those, so reading them
+    /// could only confirm what it may not act on.
     pub accounts_checked: u64,
-    /// Rows added or refreshed speculatively.
+    /// Rows added, or refreshed because their content actually changed. A row
+    /// that is merely still pending is left untouched, so this counts
+    /// admissions rather than passes.
     pub accounts_admitted: u64,
     /// Speculative rows retracted — the fork that carried them lost, or the
     /// consumer entry is simply gone at the new best head.
     pub accounts_retracted: u64,
-    /// Consumer values that failed decoding and were retracted instead.
+    /// Consumer values that failed decoding. Also counted in
+    /// `accounts_retracted`, since a value that will not decode is retracted.
     pub decode_failures: u64,
-    /// Set when the window was too wide to scan and speculation stood down.
+    /// Set when the window was too wide to scan, so nothing new was admitted.
+    /// Rows already held were still re-checked.
     pub skipped_wide_window: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct SpeculativeCache {
+    entries: BTreeMap<u64, CachedBlock>,
+}
+
+/// The accounts one block's events named, and the hash they were read from.
+#[derive(Debug)]
+struct CachedBlock {
+    hash: [u8; 32],
+    accounts: Vec<[u8; 32]>,
+}
+
+impl SpeculativeCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn get(&self, number: u64, hash: &[u8; 32]) -> Option<&[[u8; 32]]> {
+        self.entries
+            .get(&number)
+            .filter(|cached| &cached.hash == hash)
+            .map(|cached| cached.accounts.as_slice())
+    }
+
+    fn insert(&mut self, number: u64, hash: [u8; 32], accounts: Vec<[u8; 32]>) {
+        self.entries.insert(number, CachedBlock { hash, accounts });
+    }
+
+    /// Drop everything at or below `finalized`: those heights can no longer be
+    /// replaced, and the finalized pass owns them from here on.
+    fn prune_finalized(&mut self, finalized: u64) {
+        self.entries = self.entries.split_off(&finalized.saturating_add(1));
+    }
 }
 
 pub async fn index_speculative_window(
@@ -195,49 +237,67 @@ pub async fn index_speculative_window(
     chain: &PeopleChain,
     finalized: u64,
     best: u64,
+    cache: &mut SpeculativeCache,
 ) -> Result<SpeculativeReport, IndexError> {
     let mut report = SpeculativeReport {
         from_block: finalized.saturating_add(1),
         to_block: best,
         ..Default::default()
     };
-    let (from, to) = match plan_speculative_window(finalized, best) {
+    let scan = match plan_speculative_window(finalized, best) {
         SpeculativeWindow::Nothing => {
             report.to_block = finalized;
-            return Ok(report);
+            None
         }
         SpeculativeWindow::StandDown => {
             report.skipped_wide_window = true;
-            return Ok(report);
+            None
         }
-        SpeculativeWindow::Scan { from, to } => (from, to),
+        SpeculativeWindow::Scan { from, to } => Some((from, to)),
     };
+    cache.prune_finalized(finalized);
 
     let mut affected: Vec<[u8; 32]> = Vec::new();
-    for number in from..=to {
-        let at = chain
-            .online()
-            .at_block(number)
-            .await
-            .map_err(|source| ChainError::Query(Box::new(source)))?;
-        let events = at
-            .events()
-            .fetch()
-            .await
-            .map_err(|source| ChainError::Query(Box::new(source)))?;
-        affected.extend(accounts_from_events(&events)?);
-        report.blocks_scanned += 1;
+    if let Some((from, to)) = scan {
+        for number in from..=to {
+            let at = chain
+                .online()
+                .at_block(number)
+                .await
+                .map_err(|source| ChainError::Query(Box::new(source)))?;
+            let hash = at.block_hash().0;
+            match cache.get(number, &hash) {
+                Some(accounts) => affected.extend_from_slice(accounts),
+                None => {
+                    let events = at
+                        .events()
+                        .fetch()
+                        .await
+                        .map_err(|source| ChainError::Query(Box::new(source)))?;
+                    let accounts = accounts_from_events(&events)?;
+                    affected.extend_from_slice(&accounts);
+                    cache.insert(number, hash, accounts);
+                }
+            }
+            report.blocks_scanned += 1;
+        }
     }
     affected.extend(projection::speculative_accounts(pool).await?);
     let affected = dedupe_accounts(affected);
+    let already_finalized = projection::finalized_accounts(pool, &affected).await?;
+    let affected: Vec<[u8; 32]> = affected
+        .into_iter()
+        .filter(|account| !already_finalized.contains(account))
+        .collect();
     report.accounts_checked = affected.len() as u64;
     if affected.is_empty() {
         return Ok(report);
     }
 
+    let head = best.max(finalized);
     let at = chain
         .online()
-        .at_block(best)
+        .at_block(head)
         .await
         .map_err(|source| ChainError::Query(Box::new(source)))?;
     let block_hash = at.block_hash().0;
@@ -260,12 +320,13 @@ pub async fn index_speculative_window(
             )
             .await
             .map_err(|source| IndexError::Storage(Box::new(source)))?;
+        let mut decode_failed = false;
         let decoded = match consumer {
             Some(value) => {
                 let consumer: ConsumerInfo = value
                     .decode()
                     .map_err(|source| IndexError::Storage(Box::new(source)))?;
-                projection::decode_consumer(
+                match projection::decode_consumer(
                     *account,
                     consumer.identifier_key,
                     consumer.lite_username.0,
@@ -273,19 +334,27 @@ pub async fn index_speculative_window(
                     ss58_prefix,
                     block_hash,
                     block_number,
-                )
-                .ok()
-                .ok_or(())
+                ) {
+                    Ok(record) => Some(record),
+                    Err(error) => {
+                        decode_failed = true;
+                        tracing::warn!(stage = "speculative", account = ?account, error = ?error, "retracting undecodable consumer");
+                        None
+                    }
+                }
             }
-            None => Err(()),
+            None => None,
         };
         match decoded {
-            Ok(record) => {
+            Some(record) => {
                 if projection::upsert_speculative(&mut tx, &record, block_number_db).await? {
                     report.accounts_admitted += 1;
                 }
             }
-            Err(()) => {
+            None => {
+                if decode_failed {
+                    report.decode_failures += 1;
+                }
                 if projection::delete_if_speculative(&mut tx, account).await? {
                     report.accounts_retracted += 1;
                 }
@@ -458,7 +527,8 @@ fn dedupe_accounts(accounts: impl IntoIterator<Item = [u8; 32]>) -> Vec<[u8; 32]
 #[cfg(test)]
 mod tests {
     use super::{
-        dedupe_accounts, plan_speculative_window, SpeculativeWindow, MAX_SPECULATIVE_WINDOW,
+        dedupe_accounts, plan_speculative_window, SpeculativeCache, SpeculativeWindow,
+        MAX_SPECULATIVE_WINDOW,
     };
 
     #[test]
@@ -473,7 +543,7 @@ mod tests {
             plan_speculative_window(10, 13),
             SpeculativeWindow::Scan { from: 11, to: 13 }
         );
-        // The measured trail: 2-5 blocks on People, 5-14 on Asset Hub.
+        // Comfortably past the measured People trail of 2-5 blocks.
         assert_eq!(
             plan_speculative_window(100, 114),
             SpeculativeWindow::Scan { from: 101, to: 114 }
@@ -504,5 +574,39 @@ mod tests {
         let forward = dedupe_accounts([[1; 32], [2; 32], [3; 32]]);
         let reversed = dedupe_accounts([[3; 32], [2; 32], [1; 32]]);
         assert_eq!(forward, reversed);
+    }
+
+    #[test]
+    fn cache_answers_a_height_only_for_the_hash_it_was_read_from() {
+        let mut cache = SpeculativeCache::new();
+        cache.insert(10, [0xaa; 32], vec![[1; 32]]);
+
+        assert_eq!(cache.get(10, &[0xaa; 32]), Some([[1; 32]].as_slice()));
+        assert_eq!(cache.get(10, &[0xbb; 32]), None);
+        assert_eq!(cache.get(11, &[0xaa; 32]), None);
+    }
+
+    #[test]
+    fn cache_forgets_heights_finality_has_reached() {
+        let mut cache = SpeculativeCache::new();
+        for number in 8..=12 {
+            cache.insert(number, [number as u8; 32], vec![[number as u8; 32]]);
+        }
+
+        cache.prune_finalized(10);
+
+        for number in 8..=10 {
+            assert_eq!(cache.get(number, &[number as u8; 32]), None);
+        }
+        for number in 11..=12 {
+            assert!(cache.get(number, &[number as u8; 32]).is_some());
+        }
+    }
+
+    #[test]
+    fn a_wide_window_still_reconciles_rows_it_already_holds() {
+        let plan = plan_speculative_window(0, MAX_SPECULATIVE_WINDOW + 1);
+        assert_eq!(plan, SpeculativeWindow::StandDown);
+        assert!(!matches!(plan, SpeculativeWindow::Scan { .. }));
     }
 }
