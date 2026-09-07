@@ -68,6 +68,17 @@ pub async fn index_finalized_range_to(
     chain: &PeopleChain,
     head_number: u64,
 ) -> Result<Option<IndexReport>, IndexError> {
+    let Some(_lock) = try_projection_lock(pool).await? else {
+        return Ok(None);
+    };
+    index_finalized_range_locked(pool, chain, head_number).await
+}
+
+pub struct ProjectionLock {
+    _connection: sqlx::pool::PoolConnection<Postgres>,
+}
+
+pub async fn try_projection_lock(pool: &PgPool) -> Result<Option<ProjectionLock>, sqlx::Error> {
     let mut lock_connection = pool.acquire().await?;
     lock_connection.close_on_drop();
     let acquired: bool = sqlx::query("SELECT pg_try_advisory_lock($1)")
@@ -78,7 +89,16 @@ pub async fn index_finalized_range_to(
     if !acquired {
         return Ok(None);
     }
+    Ok(Some(ProjectionLock {
+        _connection: lock_connection,
+    }))
+}
 
+pub async fn index_finalized_range_locked(
+    pool: &PgPool,
+    chain: &PeopleChain,
+    head_number: u64,
+) -> Result<Option<IndexReport>, IndexError> {
     let checkpoint_row = sqlx::query("SELECT last_finalized_number FROM sync_state WHERE id = 1")
         .fetch_optional(pool)
         .await?;
@@ -123,6 +143,159 @@ pub async fn index_finalized_range_to(
     Ok(Some(report))
 }
 
+const MAX_SPECULATIVE_WINDOW: u64 = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpeculativeWindow {
+    /// Finality has caught up to the best head; nothing is unfinalized.
+    Nothing,
+    /// The gap is too wide to be a normal finality trail — stand down.
+    StandDown,
+    /// Scan this inclusive range for events.
+    Scan { from: u64, to: u64 },
+}
+
+fn plan_speculative_window(finalized: u64, best: u64) -> SpeculativeWindow {
+    if best <= finalized {
+        return SpeculativeWindow::Nothing;
+    }
+    if best - finalized > MAX_SPECULATIVE_WINDOW {
+        return SpeculativeWindow::StandDown;
+    }
+    SpeculativeWindow::Scan {
+        from: finalized + 1,
+        to: best,
+    }
+}
+
+/// Outcome of one speculative pass over the unfinalized window.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SpeculativeReport {
+    /// First unfinalized block scanned (finalized head + 1).
+    pub from_block: u64,
+    /// Best block the window was reconciled against.
+    pub to_block: u64,
+    /// Unfinalized blocks scanned for events this pass.
+    pub blocks_scanned: u64,
+    /// Accounts re-read at the best head (window events + rows already held).
+    pub accounts_checked: u64,
+    /// Rows added or refreshed speculatively.
+    pub accounts_admitted: u64,
+    /// Speculative rows retracted — the fork that carried them lost, or the
+    /// consumer entry is simply gone at the new best head.
+    pub accounts_retracted: u64,
+    /// Consumer values that failed decoding and were retracted instead.
+    pub decode_failures: u64,
+    /// Set when the window was too wide to scan and speculation stood down.
+    pub skipped_wide_window: bool,
+}
+
+pub async fn index_speculative_window(
+    pool: &PgPool,
+    chain: &PeopleChain,
+    finalized: u64,
+    best: u64,
+) -> Result<SpeculativeReport, IndexError> {
+    let mut report = SpeculativeReport {
+        from_block: finalized.saturating_add(1),
+        to_block: best,
+        ..Default::default()
+    };
+    let (from, to) = match plan_speculative_window(finalized, best) {
+        SpeculativeWindow::Nothing => {
+            report.to_block = finalized;
+            return Ok(report);
+        }
+        SpeculativeWindow::StandDown => {
+            report.skipped_wide_window = true;
+            return Ok(report);
+        }
+        SpeculativeWindow::Scan { from, to } => (from, to),
+    };
+
+    let mut affected: Vec<[u8; 32]> = Vec::new();
+    for number in from..=to {
+        let at = chain
+            .online()
+            .at_block(number)
+            .await
+            .map_err(|source| ChainError::Query(Box::new(source)))?;
+        let events = at
+            .events()
+            .fetch()
+            .await
+            .map_err(|source| ChainError::Query(Box::new(source)))?;
+        affected.extend(accounts_from_events(&events)?);
+        report.blocks_scanned += 1;
+    }
+    affected.extend(projection::speculative_accounts(pool).await?);
+    let affected = dedupe_accounts(affected);
+    report.accounts_checked = affected.len() as u64;
+    if affected.is_empty() {
+        return Ok(report);
+    }
+
+    let at = chain
+        .online()
+        .at_block(best)
+        .await
+        .map_err(|source| ChainError::Query(Box::new(source)))?;
+    let block_hash = at.block_hash().0;
+    let block_number = at.block_number();
+    let block_number_db =
+        i64::try_from(block_number).map_err(|_| IndexError::SnapshotNumber(block_number))?;
+    let ss58_prefix = crate::ss58::validate_prefix(
+        at.constants()
+            .entry(people::constants().system().ss58_prefix())
+            .map_err(|source| IndexError::Storage(Box::new(source)))?,
+    )?;
+
+    let mut tx = pool.begin().await?;
+    for account in &affected {
+        let consumer = at
+            .storage()
+            .try_fetch(
+                people::storage().resources().consumers(),
+                (AccountId32(*account),),
+            )
+            .await
+            .map_err(|source| IndexError::Storage(Box::new(source)))?;
+        let decoded = match consumer {
+            Some(value) => {
+                let consumer: ConsumerInfo = value
+                    .decode()
+                    .map_err(|source| IndexError::Storage(Box::new(source)))?;
+                projection::decode_consumer(
+                    *account,
+                    consumer.identifier_key,
+                    consumer.lite_username.0,
+                    consumer.full_username.map(|username| username.0),
+                    ss58_prefix,
+                    block_hash,
+                    block_number,
+                )
+                .ok()
+                .ok_or(())
+            }
+            None => Err(()),
+        };
+        match decoded {
+            Ok(record) => {
+                if projection::upsert_speculative(&mut tx, &record, block_number_db).await? {
+                    report.accounts_admitted += 1;
+                }
+            }
+            Err(()) => {
+                if projection::delete_if_speculative(&mut tx, account).await? {
+                    report.accounts_retracted += 1;
+                }
+            }
+        }
+    }
+    tx.commit().await?;
+    Ok(report)
+}
+
 /// Index one finalized block, committing its writes and checkpoint atomically.
 async fn index_block(
     pool: &PgPool,
@@ -146,24 +319,7 @@ async fn index_block(
         .await
         .map_err(|source| ChainError::Query(Box::new(source)))?;
 
-    let mut affected: Vec<[u8; 32]> = Vec::new();
-    for event in events.find::<people::resources::events::LitePersonRegistered>() {
-        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
-        affected.push(event.account.0);
-    }
-    for event in events.find::<people::resources::events::PersonRegistered>() {
-        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
-        affected.push(event.account.0);
-    }
-    for event in events.find::<people::resources::events::IdentifierKeyUpdated>() {
-        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
-        affected.push(event.account.0);
-    }
-    for event in events.find::<people::people_lite::events::ConsumerRegistered>() {
-        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
-        affected.push(event.account.0);
-    }
-    let affected = dedupe_accounts(affected);
+    let affected = dedupe_accounts(accounts_from_events(&events)?);
 
     if affected.is_empty() {
         let mut tx = pool.begin().await?;
@@ -267,6 +423,29 @@ async fn advance_checkpoint(
     Ok(())
 }
 
+fn accounts_from_events(
+    events: &subxt::events::Events<chain_types::PeopleConfig>,
+) -> Result<Vec<[u8; 32]>, IndexError> {
+    let mut affected: Vec<[u8; 32]> = Vec::new();
+    for event in events.find::<people::resources::events::LitePersonRegistered>() {
+        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
+        affected.push(event.account.0);
+    }
+    for event in events.find::<people::resources::events::PersonRegistered>() {
+        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
+        affected.push(event.account.0);
+    }
+    for event in events.find::<people::resources::events::IdentifierKeyUpdated>() {
+        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
+        affected.push(event.account.0);
+    }
+    for event in events.find::<people::people_lite::events::ConsumerRegistered>() {
+        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
+        affected.push(event.account.0);
+    }
+    Ok(affected)
+}
+
 /// Deduplicate affected accounts deterministically for stable per-block reads.
 fn dedupe_accounts(accounts: impl IntoIterator<Item = [u8; 32]>) -> Vec<[u8; 32]> {
     accounts
@@ -278,7 +457,41 @@ fn dedupe_accounts(accounts: impl IntoIterator<Item = [u8; 32]>) -> Vec<[u8; 32]
 
 #[cfg(test)]
 mod tests {
-    use super::dedupe_accounts;
+    use super::{
+        dedupe_accounts, plan_speculative_window, SpeculativeWindow, MAX_SPECULATIVE_WINDOW,
+    };
+
+    #[test]
+    fn nothing_to_speculate_when_finality_has_caught_up() {
+        assert_eq!(plan_speculative_window(10, 10), SpeculativeWindow::Nothing);
+        assert_eq!(plan_speculative_window(10, 9), SpeculativeWindow::Nothing);
+    }
+
+    #[test]
+    fn scans_the_gap_starting_one_past_the_checkpoint() {
+        assert_eq!(
+            plan_speculative_window(10, 13),
+            SpeculativeWindow::Scan { from: 11, to: 13 }
+        );
+        // The measured trail: 2-5 blocks on People, 5-14 on Asset Hub.
+        assert_eq!(
+            plan_speculative_window(100, 114),
+            SpeculativeWindow::Scan { from: 101, to: 114 }
+        );
+    }
+
+    #[test]
+    fn stands_down_once_the_window_stops_looking_like_a_finality_trail() {
+        let edge = MAX_SPECULATIVE_WINDOW;
+        assert_eq!(
+            plan_speculative_window(0, edge),
+            SpeculativeWindow::Scan { from: 1, to: edge }
+        );
+        assert_eq!(
+            plan_speculative_window(0, edge + 1),
+            SpeculativeWindow::StandDown
+        );
+    }
 
     #[test]
     fn dedupe_removes_duplicates_and_sorts() {

@@ -67,6 +67,13 @@ impl PeopleChain {
             .map_err(|source| ChainError::Query(Box::new(source)))
     }
 
+    pub async fn best_blocks(&self) -> Result<Blocks<PeopleConfig>, ChainError> {
+        self.client
+            .stream_best_blocks()
+            .await
+            .map_err(|source| ChainError::Query(Box::new(source)))
+    }
+
     pub async fn finalized_head_number(&self) -> Result<u64, ChainError> {
         Ok(self
             .client

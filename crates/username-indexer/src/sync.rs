@@ -11,7 +11,10 @@ use time::OffsetDateTime;
 
 use crate::chain::PeopleChain;
 use crate::config::Config;
-use crate::incremental::{index_finalized_range_to, IndexError, IndexReport};
+use crate::incremental::{
+    index_finalized_range_locked, index_speculative_window, try_projection_lock, IndexError,
+    IndexReport, SpeculativeReport,
+};
 
 const BACKOFF_BASE_SECS: u64 = 1;
 const BACKOFF_MAX_SECS: u64 = 60;
@@ -78,7 +81,7 @@ pub async fn checkpoint_freshness(pool: &PgPool) -> Result<Option<FreshnessSnaps
 /// What woke a sync pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Wake {
-    /// Finalized headers arrived; the payload is the highest number drained.
+    /// Best-fork headers arrived; the payload is the highest number drained.
     Block(u64),
     /// The fallback timer fired without a header.
     Timer,
@@ -95,14 +98,17 @@ impl Wake {
         }
     }
 
-    /// The finalized head this wake already knows, saving the pass a round-trip.
+    /// The **best** head this wake already knows.
     ///
-    /// A subscribed header number is a *lower bound* on the finalized head —
-    /// the subscription cannot run ahead of finality — so indexing up to it is
-    /// always safe, and the next header closes any gap. `Resubscribe` yields
-    /// nothing on purpose: a number from a stream that just died is not one to
-    /// index against.
-    fn head(self) -> Option<u64> {
+    /// Never a finalized head, and never usable as one: the finalized head is
+    /// always read from the chain. Feeding this number to the finalized pass
+    /// would advance the checkpoint over blocks that can still be discarded,
+    /// and the checkpoint never rewinds — the canonical replacement block would
+    /// then be skipped and its registrations lost for good.
+    ///
+    /// `Resubscribe` yields nothing on purpose: a number from a stream that
+    /// just died is not one to reconcile against.
+    fn best_head(self) -> Option<u64> {
         match self {
             Wake::Block(number) => Some(number),
             Wake::Timer | Wake::Resubscribe => None,
@@ -127,7 +133,7 @@ pub async fn run(pool: PgPool, chain: PeopleChain, config: Config, freshness: Fr
     let mut consecutive_failures = 0_u32;
 
     loop {
-        let blocks = match chain.finalized_blocks().await {
+        let blocks = match chain.best_blocks().await {
             Ok(blocks) => blocks,
             Err(error) => {
                 metrics::gauge!("dub_indexer_subscribed").set(0.0);
@@ -137,7 +143,7 @@ pub async fn run(pool: PgPool, chain: PeopleChain, config: Config, freshness: Fr
                     error = ?error,
                     consecutive_failures,
                     backoff_secs = delay.as_secs(),
-                    "subscribing to finalized blocks failed; retrying"
+                    "subscribing to best blocks failed; retrying"
                 );
                 tokio::time::sleep(delay).await;
                 continue;
@@ -152,7 +158,7 @@ pub async fn run(pool: PgPool, chain: PeopleChain, config: Config, freshness: Fr
         metrics::gauge!("dub_indexer_subscribed").set(1.0);
         tracing::info!(
             fallback_secs = fallback.as_secs(),
-            "subscribed to finalized block headers"
+            "subscribed to best block headers"
         );
 
         loop {
@@ -169,39 +175,47 @@ pub async fn run(pool: PgPool, chain: PeopleChain, config: Config, freshness: Fr
                 tracing::warn!(
                     consecutive_failures,
                     backoff_secs = delay.as_secs(),
-                    "finalized block subscription dropped; resubscribing"
+                    "best block subscription dropped; resubscribing"
                 );
                 tokio::time::sleep(delay).await;
                 break;
             }
 
             let started = Instant::now();
-            match pass(&pool, &chain, wake.head()).await {
+            match pass(&pool, &chain, wake.best_head(), config.speculative_indexing).await {
                 Ok(Some(report)) => {
                     consecutive_failures = 0;
+                    let finalized = report.finalized;
                     freshness.update(FreshnessSnapshot {
-                        last_finalized_number: report.to_block,
+                        last_finalized_number: finalized.to_block,
                         last_synced_at: OffsetDateTime::now_utc(),
-                        records_indexed: report.accounts_upserted,
-                        decode_failures: report.decode_failures,
+                        records_indexed: finalized.accounts_upserted,
+                        decode_failures: finalized.decode_failures,
                     });
-                    if report.blocks_processed > 0 {
+                    let speculative_change = report.speculative.is_some_and(|speculative| {
+                        speculative.accounts_admitted > 0 || speculative.accounts_retracted > 0
+                    });
+                    if finalized.blocks_processed > 0 || speculative_change {
                         tracing::info!(
                             wake = wake.as_str(),
-                            from_block = report.from_block,
-                            to_block = report.to_block,
-                            blocks_processed = report.blocks_processed,
-                            accounts_upserted = report.accounts_upserted,
-                            accounts_deleted = report.accounts_deleted,
-                            decode_failures = report.decode_failures,
+                            from_block = finalized.from_block,
+                            to_block = finalized.to_block,
+                            blocks_processed = finalized.blocks_processed,
+                            accounts_upserted = finalized.accounts_upserted,
+                            accounts_deleted = finalized.accounts_deleted,
+                            decode_failures = finalized.decode_failures,
+                            speculative_to_block = report.speculative.map(|s| s.to_block),
+                            speculative_admitted = report.speculative.map(|s| s.accounts_admitted),
+                            speculative_retracted =
+                                report.speculative.map(|s| s.accounts_retracted),
                             duration_ms = started.elapsed().as_millis() as u64,
-                            "finalized resync complete"
+                            "resync complete"
                         );
                     } else {
                         tracing::debug!(
                             wake = wake.as_str(),
-                            to_block = report.to_block,
-                            "finalized resync found no new blocks"
+                            to_block = finalized.to_block,
+                            "resync found nothing new"
                         );
                     }
                 }
@@ -253,11 +267,11 @@ where
     let mut head = match first {
         Some(Ok(number)) => number,
         Some(Err(error)) => {
-            tracing::warn!(error = ?error, "finalized block subscription failed");
+            tracing::warn!(error = ?error, "best block subscription failed");
             return Wake::Resubscribe;
         }
         None => {
-            tracing::warn!("finalized block subscription ended");
+            tracing::warn!("best block subscription ended");
             return Wake::Resubscribe;
         }
     };
@@ -266,11 +280,11 @@ where
         match ready {
             Some(Ok(number)) => head = head.max(number),
             Some(Err(error)) => {
-                tracing::warn!(error = ?error, "finalized block subscription failed");
+                tracing::warn!(error = ?error, "best block subscription failed");
                 return Wake::Resubscribe;
             }
             None => {
-                tracing::warn!("finalized block subscription ended");
+                tracing::warn!("best block subscription ended");
                 return Wake::Resubscribe;
             }
         }
@@ -279,24 +293,79 @@ where
     Wake::Block(head)
 }
 
-/// Record the lag gauges, then index everything up to the finalized head.
+/// One reconciliation: the finalized range, then the unfinalized window.
+#[derive(Debug, Clone, Copy)]
+struct PassReport {
+    finalized: IndexReport,
+    /// `None` when speculation is off, stood down, or this wake carried no best
+    /// head (the fallback timer).
+    speculative: Option<SpeculativeReport>,
+}
+
+/// Record the lag gauges, index up to the finalized head, then reconcile the
+/// unfinalized window against the best head.
 ///
-/// `known_head` is the number the subscription already delivered. Without one —
-/// the fallback timer, which is also how a quiet stream recovers — the head
-/// costs an `at_current_block` round-trip, so the hot path avoids it.
+/// `best_head` is the number the subscription delivered. The finalized head is
+/// *always* read from the chain rather than inferred from it — the one
+/// round-trip this design keeps, and the line that separates confirmed state
+/// from speculative state.
+///
+/// Both halves run under a single lock acquisition, so a second replica cannot
+/// slip between them and reconcile the same accounts against a different head.
 async fn pass(
     pool: &PgPool,
     chain: &PeopleChain,
-    known_head: Option<u64>,
-) -> Result<Option<IndexReport>, IndexError> {
-    let head = match known_head {
-        Some(number) => number,
-        None => chain.finalized_head_number().await?,
-    };
-    if let Err(error) = record_lag_gauges(pool, head).await {
+    best_head: Option<u64>,
+    speculative_indexing: bool,
+) -> Result<Option<PassReport>, IndexError> {
+    let finalized = chain.finalized_head_number().await?;
+    if let Err(error) = record_lag_gauges(pool, finalized).await {
         tracing::warn!(error = ?error, "checkpoint lag gauge pass failed");
     }
-    index_finalized_range_to(pool, chain, head).await
+    if let Some(best) = best_head {
+        metrics::gauge!("dub_chain_best_head_block").set(best as f64);
+        metrics::gauge!("dub_chain_finality_trail_blocks")
+            .set(best.saturating_sub(finalized) as f64);
+    }
+
+    let Some(_lock) = try_projection_lock(pool).await? else {
+        return Ok(None);
+    };
+    let Some(finalized_report) = index_finalized_range_locked(pool, chain, finalized).await? else {
+        return Ok(None);
+    };
+
+    let speculative = match best_head {
+        Some(best) if speculative_indexing && best > finalized => {
+            let report = index_speculative_window(pool, chain, finalized, best).await?;
+            metrics::gauge!("dub_indexer_speculative_window_blocks")
+                .set(report.blocks_scanned as f64);
+            if report.accounts_admitted > 0 {
+                metrics::counter!("dub_indexer_speculative_admitted_total")
+                    .increment(report.accounts_admitted);
+            }
+            if report.accounts_retracted > 0 {
+                metrics::counter!("dub_indexer_speculative_retracted_total")
+                    .increment(report.accounts_retracted);
+            }
+            if report.skipped_wide_window {
+                metrics::counter!("dub_indexer_speculative_stood_down_total").increment(1);
+                tracing::warn!(
+                    finalized,
+                    best,
+                    max_window = 64,
+                    "unfinalized window too wide; speculation standing down until finality catches up"
+                );
+            }
+            Some(report)
+        }
+        _ => None,
+    };
+
+    Ok(Some(PassReport {
+        finalized: finalized_report,
+        speculative,
+    }))
 }
 
 /// Record the finalized head, the checkpoint, and the gap between them.
@@ -360,7 +429,7 @@ mod tests {
         let wake = wait_for_wake(&mut stream, FALLBACK).await;
         assert_eq!(wake, Wake::Block(9));
         // The pass indexes checkpoint+1..=9 in one go rather than three times.
-        assert_eq!(wake.head(), Some(9));
+        assert_eq!(wake.best_head(), Some(9));
     }
 
     #[tokio::test]
@@ -373,7 +442,7 @@ mod tests {
         let wake = wait_for_wake(&mut stream, Duration::from_millis(10)).await;
         assert_eq!(wake, Wake::Timer);
         // No header means no head; the pass reads one over RPC instead.
-        assert_eq!(wake.head(), None);
+        assert_eq!(wake.best_head(), None);
     }
 
     #[tokio::test]
@@ -413,7 +482,7 @@ mod tests {
         // would be wrong.
         let wake = wait_for_wake(&mut stream, FALLBACK).await;
         assert_eq!(wake, Wake::Resubscribe);
-        assert_eq!(wake.head(), None);
+        assert_eq!(wake.best_head(), None);
     }
 
     #[test]

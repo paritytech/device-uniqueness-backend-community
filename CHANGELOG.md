@@ -10,9 +10,32 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ### Changed
 
-- **`username-indexer` syncs on finalized headers instead of a timer.** The
-  resync loop now subscribes to the People Chain's finalized block stream and
-  indexes on each header, so a newly registered username reaches
+- **`username-indexer` indexes the unfinalized window speculatively.** The sync
+  loop now subscribes to **best** block headers rather than finalized ones, and
+  each pass reconciles the finalized range first (unchanged, authoritative) and
+  then the unfinalized window `(finalized, best]` against the best head. A new
+  registration therefore reaches search about a block after it is *authored*
+  instead of after it is finalized — a gap measured at 2-5 blocks on People and
+  5-14 on Asset Hub. New `SPECULATIVE_INDEXING_ENABLED` (default `true`) turns
+  it off.
+
+  Speculative rows carry `assigned_usernames.speculative_from_block` and obey one
+  rule: **speculation may add rows and retract rows it added, and may never
+  modify or delete finalized state.** The window is re-derived from the finalized
+  head on every pass rather than checkpointed, so a block discarded at the tip —
+  on PreviewNet's People chain, structurally about one height in eight — is
+  retracted on the next pass instead of stranding a row the finalized pass would
+  never revisit. The checkpoint, `/readyz` freshness and the lag gauges keep
+  their existing finalized-only meaning. Startup drops any speculative rows a
+  previous run left behind. New metrics: `dub_chain_best_head_block`,
+  `dub_chain_finality_trail_blocks`, `dub_indexer_speculative_window_blocks`,
+  `dub_indexer_speculative_admitted_total`,
+  `dub_indexer_speculative_retracted_total`,
+  `dub_indexer_speculative_stood_down_total`.
+
+- **`username-indexer` syncs on block headers instead of a timer.** The
+  resync loop now subscribes to the People Chain's block stream and indexes on
+  each header, so a newly registered username reaches
   `GET /api/v1/usernames/search` about a block after finality rather than up to
   `SYNC_INTERVAL_SECS` (default 30s) later. Headers are only a signal — every
   pass still re-reads the checkpoint and indexes up to the head — so a dropped
