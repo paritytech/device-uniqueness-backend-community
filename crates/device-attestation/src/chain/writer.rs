@@ -122,11 +122,8 @@ pub struct WriterConfig {
     /// WARN below this signer free balance, in planck (transaction fees come
     /// from the signer, not the proxied primary).
     pub signer_balance_floor_planck: u128,
-    /// Whether the dotNS gateway lane is live (`DOTNS_GATEWAY_ENABLED`). Must
-    /// match device-attestation-api's value, which gates intake. When off, no Asset Hub
-    /// connection is opened at all and `dotns_status` rows are left alone.
-    pub dotns_gateway_enabled: bool,
-    /// Asset Hub RPC endpoint. Required when the dotNS lane is enabled.
+    /// Asset Hub RPC endpoint. Required: dotNS is the name authority, so the
+    /// writer has nothing to do without it.
     pub asset_hub_rpc_url: Option<String>,
 }
 
@@ -182,7 +179,6 @@ impl WriterConfig {
                 "ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK",
                 10_000_000_000,
             )?),
-            dotns_gateway_enabled: crate::config::env_bool("DOTNS_GATEWAY_ENABLED", false)?,
             asset_hub_rpc_url: match std::env::var("ASSET_HUB_RPC_URL") {
                 Ok(v) if !v.trim().is_empty() => Some(v.trim().to_string()),
                 _ => None,
@@ -206,29 +202,25 @@ pub async fn run(config: WriterConfig) -> anyhow::Result<()> {
         .proxy_for(AccountId32(config.attester))
         .map(|primary| primary.0);
 
-    let dotns_lane = match (config.dotns_gateway_enabled, &config.asset_hub_rpc_url) {
-        (true, Some(url)) => {
-            tracing::info!(
-                asset_hub_rpc = %url,
-                "dotns lane enabled; Asset Hub connects on the first pass"
-            );
-            DotnsLane {
-                rpc_url: url.clone(),
-                connected: None,
-                last_error: None,
-                retry_at: None,
-            }
-        }
-        (true, None) => anyhow::bail!(
-            "DOTNS_GATEWAY_ENABLED is on but ASSET_HUB_RPC_URL is unset. device-attestation-api would \
-             accept dotns blocks that nothing ever submits — set the RPC URL, or turn the \
-             gateway off for this environment."
-        ),
-        (false, _) => anyhow::bail!(
-            "DOTNS_GATEWAY_ENABLED is off. dotNS is the name authority, so no registration can \
-             complete without it — the People lane waits on a dotNS reservation that would never \
-             be submitted. Turn the gateway on and set ASSET_HUB_RPC_URL."
-        ),
+    // Asset Hub is the name authority: the People half is claimable only once
+    // the gateway has confirmed the name, so a writer without an Asset Hub
+    // endpoint would drain nothing in a healthy-looking loop. Fail at boot.
+    let Some(asset_hub_rpc_url) = config.asset_hub_rpc_url.as_deref() else {
+        anyhow::bail!(
+            "ASSET_HUB_RPC_URL is unset. dotNS is the name authority, so no registration can \
+             complete without it — the People lane waits on a dotNS reservation that would \
+             never be submitted."
+        )
+    };
+    tracing::info!(
+        asset_hub_rpc = %asset_hub_rpc_url,
+        "Asset Hub connects on the first pass"
+    );
+    let dotns_lane = DotnsLane {
+        rpc_url: asset_hub_rpc_url.to_string(),
+        connected: None,
+        last_error: None,
+        retry_at: None,
     };
     tracing::info!(
         signer = %hex_account(&signer_account.0),

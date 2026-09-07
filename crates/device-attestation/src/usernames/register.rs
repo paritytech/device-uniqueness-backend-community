@@ -160,7 +160,6 @@ const MSG_HEX_65: &str = "Must be a hexadecimal string of exactly 65 bytes.";
 const MSG_DIGITS: &str = "Digits must be between 01-99";
 const MSG_INVALID_SS58: &str = "Invalid ss58 address.";
 const MSG_INVALID_SIGNATURE: &str = "Invalid signature.";
-const MSG_DOTNS_DISABLED: &str = "dotNS gateway is not enabled in this environment.";
 /// `BaseLabel` is `BoundedVec<u8, ConstU32<32>>` in the dotns-gateway pallet.
 const MAX_DOTNS_LABEL_LEN: usize = 32;
 const PATTERN_BASE: &str = "^([a-z]{6,})$";
@@ -1228,60 +1227,54 @@ fn validate_register(
         }
 
         if let Some((_signature, signed_at, reserved_username)) = &dotns {
-            if !config.dotns_gateway_enabled {
-                errors.push(FieldError {
-                    message: MSG_DOTNS_DISABLED.to_string(),
-                    field: "dotns".to_string(),
-                });
-            } else {
-                if let Some(signed_at) = signed_at {
-                    let now = time::OffsetDateTime::now_utc().unix_timestamp();
-                    let skew = config.dotns_max_future_skew_secs as i64;
-                    let max_age = config.dotns_intake_freshness_max_age_secs as i64;
-                    if *signed_at > now + skew {
-                        errors.push(FieldError {
-                            message: format!("signedAt is in the future (tolerance {skew}s)."),
-                            field: "dotns.signedAt".to_string(),
-                        });
-                    }
-                    if now - signed_at > max_age {
-                        errors.push(FieldError {
-                            message: format!(
-                                "signedAt is older than the intake freshness bound ({max_age}s). \
-                                 Re-sign with a fresh timestamp and resubmit."
-                            ),
-                            field: "dotns.signedAt".to_string(),
-                        });
-                    }
+            if let Some(signed_at) = signed_at {
+                let now = time::OffsetDateTime::now_utc().unix_timestamp();
+                let skew = config.dotns_max_future_skew_secs as i64;
+                let max_age = config.dotns_intake_freshness_max_age_secs as i64;
+                if *signed_at > now + skew {
+                    errors.push(FieldError {
+                        message: format!("signedAt is in the future (tolerance {skew}s)."),
+                        field: "dotns.signedAt".to_string(),
+                    });
                 }
-
-                // `reservedUsername` is relayed verbatim into `reserve_name`'s
-                // `Option<BaseLabel>`, a `BoundedVec<u8, 32>`. A longer value
-                // makes the extrinsic unbuildable. Rejecting it here rather
-                // than letting the writer discover it.
-                if let Some(reserved) = reserved_username {
-                    if reserved.len() > MAX_DOTNS_LABEL_LEN {
-                        errors.push(FieldError {
-                            message: format!(
-                                "reservedUsername exceeds the maximum label length: \
-                                 ({MAX_DOTNS_LABEL_LEN})."
-                            ),
-                            field: "dotns.reservedUsername".to_string(),
-                        });
-                    }
+                if now - signed_at > max_age {
+                    errors.push(FieldError {
+                        message: format!(
+                            "signedAt is older than the intake freshness bound ({max_age}s). \
+                             Re-sign with a fresh timestamp and resubmit."
+                        ),
+                        field: "dotns.signedAt".to_string(),
+                    });
                 }
-
-                // The reservation signature is deliberately **not** verified here, and an
-                // unverifiable one is deliberately not a 400.
-                //
-                // The dotNS half is optional and independent — `ASSIGNED` +
-                // `DOTNS_FAILED_TERMINAL` is a legitimate resting state — so rejecting would
-                // cost the caller its People username over the optional half. The writer runs
-                // `check_dotns_submittable` before spending an extrinsic either way.
-                //
-                // The gates above stay 400s: they reject *malformed* blocks, not unverifiable
-                // signatures.
             }
+
+            // `reservedUsername` is relayed verbatim into `reserve_name`'s
+            // `Option<BaseLabel>`, a `BoundedVec<u8, 32>`. A longer value
+            // makes the extrinsic unbuildable. Rejecting it here rather
+            // than letting the writer discover it.
+            if let Some(reserved) = reserved_username {
+                if reserved.len() > MAX_DOTNS_LABEL_LEN {
+                    errors.push(FieldError {
+                        message: format!(
+                            "reservedUsername exceeds the maximum label length: \
+                             ({MAX_DOTNS_LABEL_LEN})."
+                        ),
+                        field: "dotns.reservedUsername".to_string(),
+                    });
+                }
+            }
+
+            // The reservation signature is deliberately **not** verified here.
+            //
+            // Intake cannot see what the writer sees: the attester's live
+            // allowance, the chain's clock, or the gateway's own view of the
+            // label. `check_dotns_submittable` runs all of that before an
+            // extrinsic is spent, and a signature that fails there is recorded
+            // on the row rather than guessed at here.
+            //
+            // The gates above stay 400s because they reject *malformed* blocks
+            // — a label the extrinsic could not carry, a timestamp outside the
+            // bounds the pallet itself enforces — not unverifiable signatures.
         }
     }
 
@@ -1566,21 +1559,8 @@ mod tests {
     }
 
     #[test]
-    fn dotns_gating_and_freshness_use_the_captured_messages() {
-        let mut disabled = config();
-        disabled.dotns_gateway_enabled = false;
-        let mut body = valid_body();
+    fn dotns_freshness_bounds_use_the_captured_messages() {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        body["dotns"] = json!({ "signature": format!("0x{}", "ab".repeat(64)), "signedAt": now });
-        match validate_register(&body, &disabled) {
-            Err(UsernamesError::InvalidBody(errors)) => {
-                assert_eq!(errors.len(), 1);
-                assert_eq!(errors[0].field, "dotns");
-                assert_eq!(errors[0].message, MSG_DOTNS_DISABLED);
-            }
-            other => panic!("expected InvalidBody, got {other:?}", other = other.err()),
-        }
-
         let enabled = config();
         let mut future = valid_body();
         future["dotns"] =
