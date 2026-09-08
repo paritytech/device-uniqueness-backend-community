@@ -84,12 +84,8 @@ pub struct WriterConfig {
     /// WARN below this signer free balance, in planck (transaction fees come
     /// from the signer, not the proxied primary).
     pub signer_balance_floor_planck: u128,
-    /// Whether the dotNS gateway lane is live (`DOTNS_GATEWAY_ENABLED`). Must
-    /// match device-attestation-api's value, which gates intake. When off, no Asset Hub
-    /// connection is opened at all and `dotns_status` rows are left alone.
-    pub dotns_gateway_enabled: bool,
-    /// Asset Hub RPC endpoint. Required when the dotNS lane is enabled.
-    pub asset_hub_rpc_url: Option<String>,
+    /// Asset Hub RPC endpoint. Required.
+    pub asset_hub_rpc_url: String,
 }
 
 impl WriterConfig {
@@ -144,11 +140,7 @@ impl WriterConfig {
                 "ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK",
                 10_000_000_000,
             )?),
-            dotns_gateway_enabled: crate::config::env_bool("DOTNS_GATEWAY_ENABLED", false)?,
-            asset_hub_rpc_url: match std::env::var("ASSET_HUB_RPC_URL") {
-                Ok(v) if !v.trim().is_empty() => Some(v.trim().to_string()),
-                _ => None,
-            },
+            asset_hub_rpc_url: http_common::config::required_var("ASSET_HUB_RPC_URL")?,
         })
     }
 }
@@ -168,24 +160,10 @@ pub async fn run(config: WriterConfig) -> anyhow::Result<()> {
         .proxy_for(AccountId32(config.attester))
         .map(|primary| primary.0);
 
-    let dotns_rpc = match (config.dotns_gateway_enabled, &config.asset_hub_rpc_url) {
-        (true, Some(url)) => {
-            tracing::info!(
-                asset_hub_rpc = %url,
-                "dotns lane enabled; Asset Hub connects on the first pass"
-            );
-            Some(url.clone())
-        }
-        (true, None) => anyhow::bail!(
-            "DOTNS_GATEWAY_ENABLED is on but ASSET_HUB_RPC_URL is unset. device-attestation-api would \
-             accept dotns blocks that nothing ever submits — set the RPC URL, or turn the \
-             gateway off for this environment."
-        ),
-        (false, _) => {
-            tracing::info!("dotns lane disabled");
-            None
-        }
-    };
+    tracing::info!(
+        asset_hub_rpc = %config.asset_hub_rpc_url,
+        "dotns lane connects on the first pass"
+    );
     tracing::info!(
         signer = %hex_account(&signer_account.0),
         attester = %hex_account(&config.attester),
@@ -203,6 +181,7 @@ pub async fn run(config: WriterConfig) -> anyhow::Result<()> {
     let batch_max = config.batch_size;
     let chain_for_lane = chain.clone();
     let config_attester = config.attester;
+    let asset_hub_rpc = config.asset_hub_rpc_url.clone();
     let mut writer = Writer {
         pool,
         chain,
@@ -211,7 +190,7 @@ pub async fn run(config: WriterConfig) -> anyhow::Result<()> {
         proxy_for,
         config,
         people: Drain::new(batch_max, PeopleLink(chain_for_lane)),
-        dotns: Drain::new(batch_max, DotnsLink::new(dotns_rpc, config_attester)),
+        dotns: Drain::new(batch_max, DotnsLink::new(asset_hub_rpc, config_attester)),
     };
     writer.run_forever().await
 }
@@ -546,6 +525,7 @@ mod tests {
         "ATTESTER_RESOURCE_POLL_SECS",
         "ATTESTER_ALLOWANCE_FLOOR",
         "ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK",
+        "ASSET_HUB_RPC_URL",
     ];
 
     const REQUIRED_ENV: &[(&str, &str)] = &[
@@ -555,6 +535,7 @@ mod tests {
         ),
         ("CHAIN_WRITER_SIGNER_SURI", "//Writer"),
         ("ATTESTER_ACCOUNT", ALICE_SS58),
+        ("ASSET_HUB_RPC_URL", "wss://asset-hub.invalid"),
     ];
 
     const ALICE_SS58: &str = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
@@ -599,6 +580,7 @@ mod tests {
             ("ATTESTER_RESOURCE_POLL_SECS", "120"),
             ("ATTESTER_ALLOWANCE_FLOOR", "250"),
             ("ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK", "123456789012"),
+            ("ASSET_HUB_RPC_URL", "wss://asset-hub.example"),
         ])
         .unwrap();
         assert_eq!(
@@ -606,6 +588,7 @@ mod tests {
             "postgres://writer:pw@localhost/device_attestation"
         );
         assert_eq!(config.people_rpc_url, "wss://people.example");
+        assert_eq!(config.asset_hub_rpc_url, "wss://asset-hub.example");
         assert_eq!(config.signer_suri.expose_secret(), "//Writer");
         let alice: [u8; 32] = hex::decode(ALICE_HEX).unwrap().try_into().unwrap();
         assert_eq!(config.attester, alice);

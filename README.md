@@ -106,9 +106,10 @@ For anything past that you need, on whichever network you target:
 - for invites, an inviter account holding `AvailableInvites` quota.
 
 Paseo's People Chain is
-`wss://paseo-people-next-system-rpc.polkadot.io` — set
-`DOTNS_GATEWAY_ENABLED=false` with it, because Paseo's Asset Hub runs a different
-`reserve_name`.
+`wss://paseo-people-next-system-rpc.polkadot.io` — point `ASSET_HUB_RPC_URL` at
+an Asset Hub on the same network running the `signed_at` `reserve_name`. The
+dotNS lane is not optional; where the shape does not match, the writer parks the
+lane rather than submitting.
 
 [docs/operations.md](docs/operations.md) covers this from zero, including the
 secret boundaries the compose file enforces and why they are worth keeping.

@@ -11,8 +11,7 @@ pub(super) fn record_writer_info(config: &WriterConfig, signer: &AccountId32) {
     metrics::gauge!(
         "dub_writer_info",
         "signer" => hex_account(&signer.0),
-        "attester" => hex_account(&config.attester),
-        "dotns_lane" => if config.dotns_gateway_enabled { "enabled" } else { "disabled" }
+        "attester" => hex_account(&config.attester)
     )
     .set(1.0);
 }
