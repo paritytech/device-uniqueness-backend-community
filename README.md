@@ -27,8 +27,10 @@ each of which deploys independently behind a single-URL
   the reservation outbox onto the chain.
 - **`registration-queue`** — a single-instance queue advancer; while
   `QUEUE_ENABLED` is on, it is the only path out of the registration queue.
-- **`username-indexer`** — a finalized-chain username projection with public
-  prefix search, plus an optional proof-of-compute gate on that search.
+- **`username-indexer`** — a username projection with public prefix search,
+  plus an optional proof-of-compute gate on that search. Finalized state is
+  authoritative; the unfinalized window is indexed speculatively on top of it so
+  a new registration is searchable a finality trail sooner.
 - **`invite-tickets-api`** / **`invite-tickets-pool`** — synchronous
   invitation-ticket claim, and the keypair pool that keeps it stocked.
 - **`turn-api`** — a stateless TURN credential issuer (coturn REST API).

@@ -33,11 +33,12 @@ async fn dead_chain_client() -> PeopleChain {
             Json(serde_json::json!(format!("0x{}", "00".repeat(32))))
         })
         .build();
-    let backend = subxt::backend::LegacyBackend::builder().build(RpcClient::new(mock));
+    let rpc = RpcClient::new(mock);
+    let backend = subxt::backend::LegacyBackend::builder().build(rpc.clone());
     let client = subxt::OnlineClient::<chain_types::PeopleConfig>::from_backend(Arc::new(backend))
         .await
         .expect("offline client from mock backend");
-    PeopleChain::from_online(client)
+    PeopleChain::from_parts(client, rpc)
 }
 
 async fn app(gate: bool) -> axum::Router {
