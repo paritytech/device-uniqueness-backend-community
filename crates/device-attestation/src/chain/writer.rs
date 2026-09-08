@@ -539,8 +539,8 @@ const UNFUNDED_SIGNER: &str = "Inability to pay some fees";
 
 const UNFUNDED_PARK_BACKOFF_SECS: i64 = 300;
 
-/// Node refusals that say *the signer's next nonce is contested*, not *this row
-/// is wrong*.
+/// Node refusals that say *the signer's next nonce is contested* — or that we
+/// never got a verdict at all — not *this row is wrong*.
 ///
 /// One writer signs every registration from one account, and the chain serves
 /// that account's transactions in strict nonce order. While an earlier
@@ -568,6 +568,12 @@ const SIGNER_CONTENTION: &[&str] = &[
     // The cached nonce trailed the chain. Re-read it and try again, but not at
     // this row's expense.
     "Transaction is outdated",
+    // Transport, not verdict: the subscription or the socket died while the
+    // transaction was in flight. It may already be in a pool holding our nonce,
+    // so the row learns nothing from this and everything behind it is refused
+    // the same way. Defer and re-read against chain state on the next pass.
+    "chainHead_follow emitted 'stop' event during transaction submission",
+    "the connection was lost",
 ];
 
 /// How long a row waits out a contested nonce. Long enough that a jam clears
