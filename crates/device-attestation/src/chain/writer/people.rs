@@ -11,6 +11,7 @@ use super::{
     engine::{finalize, parse_candidate, Cx, UNFUNDED_PARK_BACKOFF_SECS},
     events::{check_proxied_call, item_results},
     lane::{observe_defer, park_until, row_backoff, Gate, Lane, Outcome},
+    link::PeopleLink,
     observe::record_submit_outcome,
     tx::{build_registration_batch_tx, build_registration_tx},
 };
@@ -23,6 +24,7 @@ use crate::chain::{
 pub(super) struct People;
 
 impl Lane for People {
+    type Link = PeopleLink;
     type Chain = PeopleChain;
     type Ctx = ();
 

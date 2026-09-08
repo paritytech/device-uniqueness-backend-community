@@ -11,6 +11,7 @@ use super::{
     engine::{finalize, parse_candidate, Cx, UNFUNDED_PARK_BACKOFF_SECS},
     events::{check_proxied_call, item_results},
     lane::{observe_defer, park_until, row_backoff, Gate, Lane, Outcome},
+    link::{DotnsLink, Window},
     observe::record_submit_outcome,
     tx::{build_reserve_name_batch_tx, build_reserve_name_tx},
 };
@@ -97,12 +98,6 @@ pub(super) fn check_dotns_submittable(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(super) struct Window {
-    pub window: ValidityWindow,
-    pub attester: [u8; 32],
-}
-
 impl DotnsReject {
     fn gate(self, window: ValidityWindow, now: i64) -> Gate {
         match self {
@@ -139,6 +134,7 @@ impl DotnsReject {
 pub(super) struct Dotns;
 
 impl Lane for Dotns {
+    type Link = DotnsLink;
     type Chain = AssetHub;
     type Ctx = Window;
 
