@@ -62,6 +62,18 @@ pub async fn build_state(
     // than after the finalized bootstrap scan (which can take minutes).
     let poc = build_poc(config)?;
 
+    match username_indexer::try_projection_lock(&pool).await? {
+        Some(_lock) => {
+            let dropped = username_indexer::clear_speculative(&pool).await?;
+            if dropped > 0 {
+                tracing::info!(dropped, "cleared speculative rows left by a previous run");
+            }
+        }
+        None => tracing::info!(
+            "another instance holds the projection lock; leaving its speculative rows alone"
+        ),
+    }
+
     let freshness = Freshness::new();
     match ensure_seeded(&pool, &chain, config.storage_page_size).await? {
         Some(report) => {
