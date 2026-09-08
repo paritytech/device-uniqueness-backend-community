@@ -8,6 +8,74 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A contested signer nonce no longer fails registrations terminally.** One
+  writer signs from one account and the chain serves that account strictly in
+  nonce order, so while one of our transactions waits in a node's pool it owns
+  that nonce: a replacement may only displace it by bidding strictly higher
+  priority, and the writer attaches no tip, so every copy ties and every copy is
+  refused. The single-row submit path charged each of those refusals to the row
+  that happened to be next, which burned all 8 attempts in about three minutes —
+  far less than a transaction may legitimately sit in a pool — and sent valid
+  registrations to `FAILED_TERMINAL` against a healthy chain. A submit the
+  writer stops watching at `CHAIN_WRITER_FINALIZE_SECS` did the same, and could
+  additionally mark a row failed that was included moments later. Both are now
+  recognised as signer-wide conditions and deferred on a fixed 30s backoff at an
+  unchanged `attempt`, matching what the whole-batch path already did: a row
+  waits out the jam and is re-read against chain state on its next pass. They
+  count on `dub_chain_submit_total{outcome="deferred"}` and log `submission
+  deferred without spending an attempt`. Genuine row-level rejections are
+  unaffected and still spend their budget.
+### Changed
+
+- **`username-indexer` indexes the unfinalized window speculatively.** The sync
+  loop now subscribes to **best** block headers rather than finalized ones, and
+  each pass reconciles the finalized range first (unchanged, authoritative) and
+  then the unfinalized window `(finalized, best]` against the best head. A new
+  registration therefore reaches search about a block after it is *authored*
+  instead of after it is finalized — a gap measured at 2-5 blocks on the People
+  chain. New `SPECULATIVE_INDEXING_ENABLED` (default `true`) turns it off.
+
+  Speculative rows carry `assigned_usernames.speculative_from_block` and obey one
+  rule: **speculation may add rows and retract rows it added, and may never
+  modify or delete finalized state.** That rule sets the scope: a *new*
+  registration is admitted early, while a change to an account that already holds
+  a finalized row — a full-person upgrade, an identifier key rotation — still
+  becomes visible only at finality.
+
+  The window is re-derived from the finalized head on every pass rather than
+  checkpointed, so a block discarded at the tip — on PreviewNet's People chain,
+  structurally about one height in eight — is retracted on the next pass instead
+  of stranding a row the finalized pass would never revisit. Because
+  `Resources::Consumers` is append-only on chain, that re-check is the only thing
+  that ever retracts a row, so it runs on every pass: when a wake carries no
+  header the best head is read over RPC instead, and when the window is too wide
+  to scan the loop stops admitting but keeps re-checking what it already holds.
+  Failure there is contained — the finalized pass is never failed or backed off
+  by it. The checkpoint, `/readyz` freshness and the lag gauges keep their
+  existing finalized-only meaning. Startup drops any speculative rows a previous
+  run left behind, under the projection lock so a booting replica cannot clear
+  rows a live one is serving. New metrics: `dub_chain_best_head_block`,
+  `dub_chain_finality_trail_blocks`, `dub_indexer_speculative_window_blocks`,
+  `dub_indexer_speculative_admitted_total`,
+  `dub_indexer_speculative_retracted_total`,
+  `dub_indexer_speculative_stood_down_total`,
+  `dub_indexer_speculative_failed_total`.
+
+- **`username-indexer` syncs on block headers instead of a timer.** The
+  resync loop now subscribes to the People Chain's block stream and indexes on
+  each header, so a newly registered username reaches
+  `GET /api/v1/usernames/search` about a block after it is authored rather than
+  up to `SYNC_INTERVAL_SECS` (default 30s) later. Headers are only a signal —
+  every pass still re-reads the checkpoint and indexes up to the head — so a
+  dropped or coalesced header costs nothing, and a burst is drained into one
+  pass. `SYNC_INTERVAL_SECS` keeps its name and default but is now the fallback:
+  the longest the loop sits without a header before forcing a pass anyway.
+  Nothing to change in an environment. Two new metrics: `dub_indexer_subscribed`
+  (1 while the best-header subscription is live) and
+  `dub_indexer_resubscribes_total`.
+
 ## [0.5.0] - 2026-09-02
 
 ### Fixed

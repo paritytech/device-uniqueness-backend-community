@@ -35,7 +35,7 @@ pub(super) async fn record_spec_version<C: subxt::Config>(
 }
 
 const SUBMIT_LANES: [&str; 2] = ["people", "dotns"];
-const SUBMIT_OUTCOMES: [&str; 3] = ["ok", "retry", "terminal"];
+const SUBMIT_OUTCOMES: [&str; 4] = ["ok", "retry", "deferred", "terminal"];
 
 pub(super) fn zero_init_submit_outcomes() {
     for lane in SUBMIT_LANES {

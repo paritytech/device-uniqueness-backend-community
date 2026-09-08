@@ -10,7 +10,7 @@ use time::OffsetDateTime;
 use super::{
     engine::{finalize, parse_candidate, Cx, UNFUNDED_PARK_BACKOFF_SECS},
     events::{check_proxied_call, item_results},
-    lane::{park_until, row_backoff, Defer, Gate, Lane, Outcome},
+    lane::{observe_defer, park_until, row_backoff, Gate, Lane, Outcome},
     observe::record_submit_outcome,
     tx::{build_reserve_name_batch_tx, build_reserve_name_tx},
 };
@@ -295,16 +295,7 @@ impl Lane for Dotns {
                 {
                     anyhow::bail!("lease lost while re-queueing a failed dotns batch");
                 }
-                match cause {
-                    Defer::Batch => record_submit_outcome(Self::NAME, "retry"),
-                    Defer::NotYet => tracing::warn!(
-                        id = r.id,
-                        username = %r.full_username,
-                        until = %until,
-                        reason,
-                        "dotns reservation deferred; not yet within the gateway's skew bound"
-                    ),
-                }
+                observe_defer(Self::NAME, r, until, reason, cause);
             }
             Outcome::Failed(reason) => {
                 if !outbox::mark_dotns_failed(pool, guard, r.id, reason).await? {

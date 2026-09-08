@@ -7,7 +7,8 @@ use sqlx::PgPool;
 use subxt::{dynamic::Value, tx::DynamicPayload, utils::AccountId32};
 use time::OffsetDateTime;
 
-use super::engine::{Cx, UNFUNDED_PARK_BACKOFF_SECS};
+use super::engine::{Cx, SIGNER_CONTENTION_BACKOFF_SECS, UNFUNDED_PARK_BACKOFF_SECS};
+use super::observe::record_submit_outcome;
 use crate::chain::{
     outbox::{Guard, Reservation},
     registry::NameRegistry,
@@ -38,6 +39,12 @@ pub(super) enum Outcome<'a> {
 pub(super) enum Defer {
     /// Batch failure counts as a submission outcome, because a submission was attempted.
     Batch,
+    /// The node refused the submission over a condition that belongs to the
+    /// *signer*, not to this row: the nonce it needs is already held by an
+    /// earlier transaction still sitting in the pool. Every row behind that one
+    /// gets the same refusal until it is included, so spending an attempt here
+    /// bills a queue to whoever happened to be standing in it.
+    Signer,
     /// DotNS signature future-dated, doesn't count as attempt since we just need to wait.
     NotYet,
 }
@@ -113,6 +120,51 @@ impl Gate {
                 cause: Defer::NotYet,
             },
         }
+    }
+}
+
+/// Re-queue a row for a failure that belongs to the signer's nonce rather than
+/// to the row. Spends no attempt, so a pool jam that outlives the whole retry
+/// budget cannot turn a perfectly valid registration terminal.
+pub(super) fn signer_defer(reason: &str) -> Outcome<'_> {
+    Outcome::Defer {
+        until: OffsetDateTime::now_utc() + time::Duration::seconds(SIGNER_CONTENTION_BACKOFF_SECS),
+        reason,
+        cause: Defer::Signer,
+    }
+}
+
+/// The shared half of both lanes' [`Outcome::Defer`] arm: what a deferral is
+/// counted and said as, given why it was deferred.
+pub(super) fn observe_defer(
+    lane: &'static str,
+    r: &Reservation,
+    until: OffsetDateTime,
+    reason: &str,
+    cause: Defer,
+) {
+    match cause {
+        Defer::Batch => record_submit_outcome(lane, "retry"),
+        Defer::Signer => {
+            record_submit_outcome(lane, "deferred");
+            tracing::warn!(
+                lane,
+                id = r.id,
+                username = %r.full_username,
+                until = %until,
+                reason,
+                "submission deferred without spending an attempt; the signer's nonce is \
+                 held by an earlier transaction still in the node's pool"
+            );
+        }
+        Defer::NotYet => tracing::warn!(
+            lane,
+            id = r.id,
+            username = %r.full_username,
+            until = %until,
+            reason,
+            "dotns reservation deferred; not yet within the gateway's skew bound"
+        ),
     }
 }
 

@@ -10,7 +10,7 @@ use time::OffsetDateTime;
 use super::{
     engine::{finalize, parse_candidate, Cx, UNFUNDED_PARK_BACKOFF_SECS},
     events::{check_proxied_call, item_results},
-    lane::{park_until, row_backoff, Defer, Gate, Lane, Outcome},
+    lane::{observe_defer, park_until, row_backoff, Gate, Lane, Outcome},
     observe::record_submit_outcome,
     tx::{build_registration_batch_tx, build_registration_tx},
 };
@@ -170,9 +170,7 @@ impl Lane for People {
                 if !outbox::mark_retry(pool, guard, r.id, until, r.attempt, reason).await? {
                     anyhow::bail!("lease lost while re-queueing a failed batch");
                 }
-                if cause == Defer::Batch {
-                    record_submit_outcome(Self::NAME, "retry");
-                }
+                observe_defer(Self::NAME, r, until, reason, cause);
             }
             Outcome::Failed(reason) | Outcome::Expired(reason) => {
                 let mut tx = pool.begin().await?;
