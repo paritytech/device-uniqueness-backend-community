@@ -117,7 +117,7 @@ impl DotnsLink {
     fn ctx(&self, up: &(AssetHub, ValidityWindow)) -> (AssetHub, Window) {
         let attester = match self {
             DotnsLink::Enabled { attester, .. } => *attester,
-            DotnsLink::Disabled => [0u8; 32],
+            DotnsLink::Disabled => unreachable!("ctx on a disabled dotNS lane"),
         };
         (
             up.0.clone(),

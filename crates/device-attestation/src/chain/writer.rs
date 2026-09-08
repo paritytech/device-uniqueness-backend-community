@@ -234,9 +234,7 @@ impl Writer {
             tracing::info!(epoch = guard.epoch, "acquired writer lease");
             self.people.reset_nonce();
             self.dotns.reset_nonce();
-            if let Err(e) = self.reconcile(&guard).await {
-                tracing::warn!(error = %e, "startup reconcile failed");
-            }
+            self.reconcile(&guard).await;
             if let Err(e) = self.active_loop(&guard).await {
                 tracing::warn!(error = %e, "writer loop exited; re-acquiring lease");
             }
@@ -354,12 +352,15 @@ impl Writer {
         drain.pass(&cx).await
     }
 
-    /// Reconcile both lanes' `SUBMITTING` rows after acquiring the lease.
-    async fn reconcile(&mut self, guard: &Guard) -> anyhow::Result<()> {
+    async fn reconcile(&mut self, guard: &Guard) {
         let (cx, drain) = self.people_pass_parts(guard);
-        drain.reconcile_submitting(&cx).await?;
+        if let Err(e) = drain.reconcile_submitting(&cx).await {
+            tracing::warn!(error = %e, lane = "people", "startup reconcile failed");
+        }
         let (cx, drain) = self.dotns_pass_parts(guard);
-        drain.reconcile_submitting(&cx).await
+        if let Err(e) = drain.reconcile_submitting(&cx).await {
+            tracing::warn!(error = %e, lane = "dotns", "startup reconcile failed");
+        }
     }
     fn people_pass_parts<'a>(&'a mut self, guard: &'a Guard) -> (Cx<'a>, &'a mut Drain<People>) {
         let Writer {
