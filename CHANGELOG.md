@@ -8,6 +8,25 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A contested signer nonce no longer fails registrations terminally.** One
+  writer signs from one account and the chain serves that account strictly in
+  nonce order, so while one of our transactions waits in a node's pool it owns
+  that nonce: a replacement may only displace it by bidding strictly higher
+  priority, and the writer attaches no tip, so every copy ties and every copy is
+  refused. The single-row submit path charged each of those refusals to the row
+  that happened to be next, which burned all 8 attempts in about three minutes —
+  far less than a transaction may legitimately sit in a pool — and sent valid
+  registrations to `FAILED_TERMINAL` against a healthy chain. A submit the
+  writer stops watching at `CHAIN_WRITER_FINALIZE_SECS` did the same, and could
+  additionally mark a row failed that was included moments later. Both are now
+  recognised as signer-wide conditions and deferred on a fixed 30s backoff at an
+  unchanged `attempt`, matching what the whole-batch path already did: a row
+  waits out the jam and is re-read against chain state on its next pass. They
+  count on `dub_chain_submit_total{outcome="deferred"}` and log `submission
+  deferred without spending an attempt`. Genuine row-level rejections are
+  unaffected and still spend their budget.
 ### Changed
 
 - **`username-indexer` indexes the unfinalized window speculatively.** The sync

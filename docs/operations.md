@@ -294,6 +294,18 @@ sudo docker compose exec -T postgres psql -U device_attestation -d device_attest
 
 - `RETRY_AFTER` retries automatically, up to 8 attempts.
 - `FAILED_TERMINAL` never retries — inspect `last_error`.
+- **Not every failure spends one of those 8.** A refusal that belongs to the
+  *signer* rather than the row — its next nonce still held by an earlier
+  transaction of ours waiting in the node's pool, or a submission the writer
+  stopped watching when `CHAIN_WRITER_FINALIZE_SECS` ran out — holds the row in
+  `RETRY_AFTER` at an unchanged `attempt` and logs `submission deferred without
+  spending an attempt`. One writer signs from one account and the chain serves
+  that account strictly in nonce order, so while one transaction is stuck every
+  row behind it gets the identical refusal; billing that to whoever is standing
+  in the queue would fail valid registrations for someone else's traffic jam.
+  Deferrals count on `dub_chain_submit_total{outcome="deferred"}` — a burst
+  while `outcome="ok"` stays flat is one slow inclusion holding the lane, and it
+  clears itself; a sustained one is a pool or RPC problem worth looking at.
 - Independent check: query `Resources.UsernameOwnerOf("<base>.<NN>")` on the
   People Chain.
 - A pass submits its whole claimed set as **one** `Utility.force_batch`, so rows
@@ -545,6 +557,7 @@ you expect.
 |---|---|
 | `readyz`: `chain: down` | People Chain RPC unreachable or changed — check `PEOPLE_RPC_URL`. |
 | Writer: `registration parked without spending an attempt` / `dotns reservation parked …` | The signer cannot pay fees on that chain. Rows are held in `RETRY_AFTER` at an unchanged `attempt` and resume by themselves once funded — nothing is lost and no restart is needed. Fund the signer named in the accompanying `chain-writer signer balance below floor` warning (`ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK` is the threshold, and the two chains hold **separate** balances for the same account). A park that persists past a top-up is not a funding problem: read the `reason` field. |
+| Writer: `submission deferred without spending an attempt` | The signer's next nonce is held by an earlier transaction of ours still in the node's pool (`priority of the transaction is too low`, `Transaction Already Imported`, `Transaction is outdated`) or a submit passed `CHAIN_WRITER_FINALIZE_SECS` without being seen finalized. Rows wait 30s at an unchanged `attempt` and resume by themselves; nothing is lost and no restart is needed. Expect a short burst behind one slow inclusion — that is the mechanism working. Persisting for many minutes means the incumbent transaction is not being included: check finality lag and the RPC endpoint, and confirm the signer can pay fees (an unfunded signer parks instead, see the row above). Do **not** restart the writer to clear it — a restart re-reads the nonce and hits the same pool. |
 | Writer: `rejected deterministically, not retried` in `last_error` | Another submission would buy the same answer, so the row fails on the first pass instead of paying `CHAIN_WRITER_MAX_ATTEMPTS` fees. All three causes are the row's `reserved_username` (the full-person name) leg, which `attest` checks **before** it writes the lite username: `Resources::UsernameReservationTaken` (that name is owned by someone else), `Resources::QueueFull` (its reservation queue is at `MaxReservationQueueLength`, 10 on next-people-paseo), `Resources::AlreadyHasReservation` (the candidate already reserved another name). Intake refuses these claims with a `409` before a row exists, so a row that reaches here raced that check — a queue that filled in between. The writer **cannot** resubmit without the reservation: the consumer signature covers `reserved_username`, so only the client can re-sign. The client must re-register for another `dotns.reservedUsername` — dropping the reservation leg is not an option any client implements. Note `QueueFull` is not immutable in principle — entries expire and `remove_expired_username_reservation` is permissionless — but nothing drains within the seconds the backoff spans. The lite username is unaffected only if `status` is `ASSIGNED`; if it is `FAILED_TERMINAL` the discriminator that row holds stays consumed until the row is deleted. |
 | Availability checks failing while `readyz` is green | The endpoint does not serve the legacy `state_queryStorageAt` method (a trimmed or `chainHead`-only RPC or proxy). Availability reads all 100 `{base}.{NN}` keys in one such request, and the writer resolves `UsernameOwnerOf` (People) and `LiteLabelOwner` (Asset Hub) for a whole claimed set the same way, so writer passes fail wholesale too — but `readyz` only probes it on People, so readiness can stay green. Repoint `PEOPLE_RPC_URL` (and `ASSET_HUB_RPC_URL`) at a full node. A response that is incomplete, doubled, or for another block also fails closed by design — never as "available". |
 | Claims returning `422 Pool exhausted` | The ticket pool drained. Check `invite-tickets-pool` logs: `ticket batch finalized … registered=0` means the inviter is out of `AvailableInvites` quota or unauthorized; `pool tick failed` means RPC or signer trouble. Pool size is logged each tick — treat sustained `available < ~10% of POOL_TARGET_SIZE` as the alert threshold. |

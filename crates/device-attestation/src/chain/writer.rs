@@ -38,7 +38,7 @@ mod observe;
 mod tx;
 
 use events::{check_proxied_call, item_results};
-use lane::{Defer, Dotns, Lane as _, Outcome, People};
+use lane::{signer_defer, Defer, Dotns, Lane as _, Outcome, People};
 use observe::{
     record_outbox_gauges, record_spec_version, record_writer_info, zero_init_submit_outcomes,
 };
@@ -450,6 +450,9 @@ enum SubmitFailureAction {
     Assign,
     Park,
     Retry,
+    /// Hold the row on a shared backoff at an unchanged `attempt`, because the
+    /// failure is the signer's, not the row's. See [`SIGNER_CONTENTION`].
+    Defer,
     Fail,
 }
 
@@ -536,6 +539,69 @@ const UNFUNDED_SIGNER: &str = "Inability to pay some fees";
 
 const UNFUNDED_PARK_BACKOFF_SECS: i64 = 300;
 
+/// Node refusals that say *the signer's next nonce is contested* — or that we
+/// never got a verdict at all — not *this row is wrong*.
+///
+/// One writer signs every registration from one account, and the chain serves
+/// that account's transactions in strict nonce order. While an earlier
+/// transaction of ours is still waiting in a node's pool it owns that nonce:
+/// a replacement may only displace it by offering strictly higher priority, and
+/// we attach no tip, so every copy ties and every copy loses. Each row that
+/// reaches the writer next gets the identical refusal for a condition none of
+/// them caused.
+///
+/// Charging that to the row is the bug this list exists to close: eight rows
+/// once went `FAILED_TERMINAL` in three and a half minutes against a perfectly
+/// healthy chain, while the transaction they were queued behind was included
+/// minutes later. The whole-batch path already refuses to bill a shared fault
+/// to its rows; these make the single-row path agree.
+const SIGNER_CONTENTION: &[&str] = &[
+    // Pool: our own earlier transaction holds this nonce and ties on priority.
+    // Three phrasings of one refusal — the pool's own `TooLowPriority`, and the
+    // two wordings RPC servers wrap it in.
+    "Priority is too low",
+    "priority of the transaction is too low",
+    "too low priority",
+    // Pool: the identical transaction is already queued. Resubmitting cannot
+    // improve on that; waiting can.
+    "Transaction Already Imported",
+    // The cached nonce trailed the chain. Re-read it and try again, but not at
+    // this row's expense.
+    "Transaction is outdated",
+    // Transport, not verdict: the subscription or the socket died while the
+    // transaction was in flight. It may already be in a pool holding our nonce,
+    // so the row learns nothing from this and everything behind it is refused
+    // the same way. Defer and re-read against chain state on the next pass.
+    "chainHead_follow emitted 'stop' event during transaction submission",
+    "the connection was lost",
+];
+
+/// How long a row waits out a contested nonce. Long enough that a jam clears
+/// without the writer hammering the node, short enough that a lane recovers in
+/// one poll or two once the incumbent lands.
+///
+/// Unlike a retry backoff this never escalates, because it is not a failure
+/// run: it is one shared condition, and every row behind it waits the same.
+const SIGNER_CONTENTION_BACKOFF_SECS: i64 = 30;
+
+/// What [`Writer::finalize`] says when `finalize_timeout` runs out.
+///
+/// It reads like a rejection and is not one: the transaction is still alive in
+/// the pool, still holding the signer's nonce, and may well be included a
+/// minute later. Giving up on watching it is a signer-wide condition for the
+/// same reason a priority tie is — everything behind it will now be refused —
+/// which is why it defers instead of spending the row's attempt. A row deferred
+/// here is re-read against chain state on its next pass, so one that did land
+/// after the writer stopped watching is assigned rather than written off.
+const FINALIZE_TIMEOUT: &str = "finalization timed out";
+
+fn is_signer_contention(reason: &str) -> bool {
+    reason.contains(FINALIZE_TIMEOUT)
+        || SIGNER_CONTENTION
+            .iter()
+            .any(|refusal| reason.contains(refusal))
+}
+
 /// Rejections that another submission cannot talk the runtime out of, so the
 /// row fails on the first pass rather than paying `max_attempts` fees for the
 /// same answer.
@@ -581,6 +647,11 @@ fn classify_submit_failure(
         SubmitFailureAction::Assign
     } else if reason.contains(UNFUNDED_SIGNER) {
         SubmitFailureAction::Park
+    } else if is_signer_contention(reason) {
+        // Deliberately ahead of the max-attempts check: a row that has already
+        // spent its budget on unrelated failures must still not die of somebody
+        // else's traffic jam.
+        SubmitFailureAction::Defer
     } else if is_deterministic_rejection(reason) || completed_attempts >= max_attempts {
         SubmitFailureAction::Fail
     } else {
@@ -861,6 +932,9 @@ impl Writer {
                     SubmitFailureAction::Retry => {
                         People::record(&self.pool, guard, r, Outcome::Retry(&reason)).await
                     }
+                    SubmitFailureAction::Defer => {
+                        People::record(&self.pool, guard, r, signer_defer(&reason)).await
+                    }
                     SubmitFailureAction::Fail => {
                         People::record(
                             &self.pool,
@@ -1058,6 +1132,9 @@ impl Writer {
                 SubmitFailureAction::Retry => {
                     People::record(&self.pool, guard, r, Outcome::Retry(&reason)).await?
                 }
+                SubmitFailureAction::Defer => {
+                    People::record(&self.pool, guard, r, signer_defer(&reason)).await?
+                }
                 SubmitFailureAction::Fail => {
                     People::record(
                         &self.pool,
@@ -1231,7 +1308,7 @@ impl Writer {
         };
         tokio::time::timeout(self.config.finalize_timeout, watched)
             .await
-            .map_err(|_| anyhow::anyhow!("finalization timed out"))?
+            .map_err(|_| anyhow::anyhow!(FINALIZE_TIMEOUT))?
     }
 
     /// Drain `SUBMITTING` rows left by a previous writer: reconcile each against
@@ -1617,6 +1694,9 @@ impl Writer {
                     SubmitFailureAction::Retry => {
                         Dotns::record(&self.pool, guard, r, Outcome::Retry(&reason)).await
                     }
+                    SubmitFailureAction::Defer => {
+                        Dotns::record(&self.pool, guard, r, signer_defer(&reason)).await
+                    }
                     SubmitFailureAction::Fail => {
                         Dotns::record(
                             &self.pool,
@@ -1794,6 +1874,9 @@ impl Writer {
                 }
                 SubmitFailureAction::Retry => {
                     Dotns::record(&self.pool, guard, r, Outcome::Retry(&reason)).await?
+                }
+                SubmitFailureAction::Defer => {
+                    Dotns::record(&self.pool, guard, r, signer_defer(&reason)).await?
                 }
                 SubmitFailureAction::Fail => {
                     Dotns::record(
@@ -2300,6 +2383,79 @@ mod tests {
             classify_submit_failure("dispatch failed", Some([8; 32]), candidate, 1, 3),
             SubmitFailureAction::Retry
         );
+    }
+
+    /// The refusal that killed eight rows in three and a half minutes against a
+    /// healthy chain: the writer's own earlier transaction held the nonce, and
+    /// every row queued behind it was billed for the wait.
+    const CONTESTED_NONCE: &str = "Error during transaction progress: The transaction is not \
+         valid: Invalid transaction: priority of the transaction is too low \
+         (pool 278 > current 278)";
+
+    #[test]
+    fn a_contested_nonce_defers_and_never_becomes_terminal() {
+        let candidate = [7; 32];
+
+        assert_eq!(
+            classify_submit_failure(CONTESTED_NONCE, None, candidate, 1, 8),
+            SubmitFailureAction::Defer
+        );
+        // The point of the fix: a row out of attempts still may not die of a
+        // queue it did not cause.
+        assert_eq!(
+            classify_submit_failure(CONTESTED_NONCE, None, candidate, 8, 8),
+            SubmitFailureAction::Defer
+        );
+        assert_eq!(
+            classify_submit_failure(CONTESTED_NONCE, Some(candidate), candidate, 99, 8),
+            SubmitFailureAction::Assign
+        );
+    }
+
+    #[test]
+    fn every_signer_wide_refusal_defers_rather_than_spending_the_row() {
+        let candidate = [7; 32];
+        for refusal in SIGNER_CONTENTION.iter().chain([&FINALIZE_TIMEOUT]) {
+            let reason = format!("Error during transaction progress: {refusal}");
+            assert_eq!(
+                classify_submit_failure(&reason, None, candidate, 8, 8),
+                SubmitFailureAction::Defer,
+                "{refusal} belongs to the signer, not the row"
+            );
+        }
+    }
+
+    #[test]
+    fn a_finalization_timeout_holds_the_row_instead_of_charging_it() {
+        // The transaction is still in the pool holding the nonce; the writer
+        // only stopped watching. Charging the attempt is what turned rows that
+        // later landed into `FAILED_TERMINAL` liars.
+        let candidate = [7; 32];
+        assert_eq!(
+            classify_submit_failure(FINALIZE_TIMEOUT, None, candidate, 1, 3),
+            SubmitFailureAction::Defer
+        );
+        assert_eq!(
+            classify_submit_failure(FINALIZE_TIMEOUT, None, candidate, 3, 3),
+            SubmitFailureAction::Defer
+        );
+    }
+
+    #[test]
+    fn a_row_level_rejection_still_spends_its_attempt() {
+        // The guard on the deferral: only signer-wide refusals skip the budget.
+        let candidate = [7; 32];
+        assert_eq!(
+            classify_submit_failure(
+                "PeopleLite.InvalidAttestationSignature",
+                None,
+                candidate,
+                8,
+                8
+            ),
+            SubmitFailureAction::Fail
+        );
+        assert!(!is_signer_contention("Resources::QueueFull"));
     }
 
     fn from_env_with(vars: &[(&str, &str)]) -> anyhow::Result<WriterConfig> {
