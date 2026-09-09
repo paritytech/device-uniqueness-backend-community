@@ -1,9 +1,7 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::net::SocketAddr;
-use std::str::FromStr as _;
-use std::time::Duration;
+use std::{net::SocketAddr, str::FromStr as _, time::Duration};
 
 use chain_types::subxt::utils::AccountId32;
 use secrecy::{SecretBox, SecretString};
@@ -141,6 +139,17 @@ pub enum ConfigError {
     Missing(&'static str),
     #[error("environment variable {key} is invalid: {reason}")]
     Invalid { key: &'static str, reason: String },
+}
+
+impl From<http_common::config::ConfigError> for ConfigError {
+    fn from(e: http_common::config::ConfigError) -> Self {
+        match e {
+            http_common::config::ConfigError::Missing(key) => ConfigError::Missing(key),
+            http_common::config::ConfigError::Invalid { key, reason } => {
+                ConfigError::Invalid { key, reason }
+            }
+        }
+    }
 }
 
 impl Config {

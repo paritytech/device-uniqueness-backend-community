@@ -7,9 +7,12 @@ use sqlx::PgPool;
 use subxt::{dynamic::Value, tx::DynamicPayload, utils::AccountId32};
 use time::OffsetDateTime;
 
-use super::engine::{Cx, SIGNER_CONTENTION_BACKOFF_SECS, UNFUNDED_PARK_BACKOFF_SECS};
-use super::link::Link as ChainLink;
-use super::observe::record_submit_outcome;
+use super::{
+    engine::{Cx, SIGNER_CONTENTION_BACKOFF_SECS, UNFUNDED_PARK_BACKOFF_SECS},
+    error::WriterError,
+    link::Link as ChainLink,
+    observe::record_submit_outcome,
+};
 use crate::chain::{
     outbox::{Guard, Reservation},
     registry::NameRegistry,
@@ -101,7 +104,7 @@ pub(super) trait Lane {
         guard: &Guard,
         r: &Reservation,
         outcome: Outcome<'_>,
-    ) -> Result<()>;
+    ) -> Result<(), WriterError>;
 }
 
 pub(super) enum Gate {
