@@ -9,7 +9,7 @@ use time::OffsetDateTime;
 
 use super::{
     engine::{finalize, parse_candidate, Cx, UNFUNDED_PARK_BACKOFF_SECS},
-    error::WriterError,
+    error::{Op, WriterError},
     events::{check_proxied_call, item_results},
     lane::{observe_defer, park_until, row_backoff, Gate, Lane, Outcome},
     link::PeopleLink,
@@ -76,7 +76,7 @@ impl Lane for People {
         mark(cx, r, &tx_hash, nonce).await?;
         tracing::info!(id = r.id, username = %r.full_username, nonce, tx = %tx_hash, "submitting registration");
 
-        let (events, metadata) = finalize(cx, signed.submit_and_watch().await?, "submit").await?;
+        let (events, metadata) = finalize(cx, signed.submit_and_watch().await?).await?;
         check_proxied_call(&events, &metadata)
     }
 
@@ -100,7 +100,7 @@ impl Lane for People {
         metrics::histogram!("dub_chain_batch_items", "lane" => Self::NAME)
             .record(rows.len() as f64);
 
-        let (events, metadata) = finalize(cx, signed.submit_and_watch().await?, "submit").await?;
+        let (events, metadata) = finalize(cx, signed.submit_and_watch().await?).await?;
         check_proxied_call(&events, &metadata)?;
         item_results(&events, &metadata)
     }
@@ -115,10 +115,10 @@ impl Lane for People {
             Outcome::Landed | Outcome::Observed => {
                 let mut tx = pool.begin().await?;
                 if !lease::fence(&mut tx, &guard.lease_name, &guard.holder_id, guard.epoch).await? {
-                    return Err(WriterError::LeaseLost("while assigning"));
+                    return Err(WriterError::LeaseLost(Op::Landing));
                 }
                 if !outbox::mark_assigned(&mut *tx, guard, r.id).await? {
-                    return Err(WriterError::LeaseLost("while assigning"));
+                    return Err(WriterError::LeaseLost(Op::Landing));
                 }
                 crate::widevine::store::consume_for_reservation(&mut *tx, r.id).await?;
                 tx.commit().await?;
@@ -140,7 +140,7 @@ impl Lane for People {
                 let backoff = row_backoff(attempt);
                 let not_before = OffsetDateTime::now_utc() + backoff;
                 if !outbox::mark_retry(pool, guard, r.id, not_before, attempt, reason).await? {
-                    return Err(WriterError::LeaseLost("while scheduling retry"));
+                    return Err(WriterError::LeaseLost(Op::Retrying));
                 }
                 record_submit_outcome(Self::NAME, "retry");
                 tracing::warn!(
@@ -153,7 +153,7 @@ impl Lane for People {
             }
             Outcome::Park(reason) => {
                 if !outbox::mark_retry(pool, guard, r.id, park_until(), r.attempt, reason).await? {
-                    return Err(WriterError::LeaseLost("while parking a registration"));
+                    return Err(WriterError::LeaseLost(Op::Parking));
                 }
                 record_submit_outcome(Self::NAME, "parked");
                 tracing::warn!(
@@ -171,17 +171,17 @@ impl Lane for People {
                 cause,
             } => {
                 if !outbox::mark_retry(pool, guard, r.id, until, r.attempt, reason).await? {
-                    return Err(WriterError::LeaseLost("while re-queueing a failed batch"));
+                    return Err(WriterError::LeaseLost(Op::Deferring));
                 }
                 observe_defer(Self::NAME, r, until, reason, cause);
             }
             Outcome::Failed(reason) | Outcome::Expired(reason) => {
                 let mut tx = pool.begin().await?;
                 if !lease::fence(&mut tx, &guard.lease_name, &guard.holder_id, guard.epoch).await? {
-                    return Err(WriterError::LeaseLost("while failing"));
+                    return Err(WriterError::LeaseLost(Op::Failing));
                 }
                 if !outbox::mark_failed(&mut *tx, guard, r.id, reason).await? {
-                    return Err(WriterError::LeaseLost("while failing"));
+                    return Err(WriterError::LeaseLost(Op::Failing));
                 }
                 let released =
                     crate::widevine::store::release_for_reservation(&mut *tx, r.id).await?;
@@ -228,7 +228,7 @@ async fn mark(cx: &Cx<'_>, r: &Reservation, tx_hash: &str, nonce: u64) -> Result
     )
     .await?
     {
-        return Err(WriterError::LeaseLost("before submit"));
+        return Err(WriterError::LeaseLost(Op::Submitting));
     }
     Ok(())
 }

@@ -26,6 +26,7 @@ mod tx;
 
 use dotns::Dotns;
 use engine::{Cx, Drain};
+use error::Op;
 pub use error::WriterError;
 use link::{DotnsLink, PeopleLink};
 use observe::{record_writer_info, zero_init_submit_outcomes};
@@ -253,7 +254,7 @@ impl Writer {
     async fn active_loop(&mut self, guard: &Guard) -> Result<(), WriterError> {
         loop {
             if !self.heartbeat(guard).await? {
-                return Err(WriterError::LeaseLost("while draining"));
+                return Err(WriterError::LeaseLost(Op::Draining));
             }
             self.periodic().await;
 

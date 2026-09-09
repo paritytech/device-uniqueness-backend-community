@@ -24,7 +24,7 @@ use subxt::{
 use time::OffsetDateTime;
 
 use super::{
-    error::WriterError,
+    error::{Op, WriterError},
     lane::{signer_defer, BatchLane, Defer, Gate, Lane, Outcome},
     link::Link as _,
 };
@@ -76,7 +76,7 @@ impl Cx<'_> {
 
     async fn hold(&self) -> Result<(), WriterError> {
         if !self.heartbeat().await? {
-            return Err(WriterError::LeaseLost("while draining"));
+            return Err(WriterError::LeaseLost(Op::Draining));
         }
         Ok(())
     }
@@ -89,7 +89,6 @@ impl Cx<'_> {
 pub(super) async fn finalize<T, C>(
     cx: &Cx<'_>,
     progress: TransactionProgress<T, C>,
-    what: &'static str,
 ) -> Result<(ExtrinsicEvents<T>, ArcMetadata)>
 where
     T: subxt::Config,
@@ -110,7 +109,7 @@ where
                 result = &mut wait => return result,
                 _ = renew.tick() => {
                     if !cx.heartbeat().await? {
-                        return Err(WriterError::LeaseLost(what).into());
+                        return Err(WriterError::LeaseLost(Op::Finalizing).into());
                     }
                 }
             }
