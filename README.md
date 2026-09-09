@@ -1,11 +1,16 @@
 # Device Uniqueness Backend
 
 > [!WARNING]
-> The following is a prototype, reference implementation, and proof-of-concept.
-> This open source code is provided for research, experimentation, and developer
-> education only. This code has not been audited, is actively experimental, and
-> may contain bugs, vulnerabilities, or incomplete features. Use at your own
-> risk.
+> The following is a proof-of-concept. This open source code is provided for
+> research, experimentation, and developer education only. This code has not been
+> audited, is actively experimental, and may contain bugs, vulnerabilities, or
+> incomplete features. Use at your own risk.
+
+Parity doesn’t deploy the code but may update it based on community feedback.
+
+If you experience problems with any product or service that was built on or
+deployed from this code, you should contact the third party who deployed the code
+in its amended form, not Parity.
 
 A Rust backend that proves a device is a distinct physical device, and registers
 a username for it on Polkadot's People Chain — plus the sibling services a
