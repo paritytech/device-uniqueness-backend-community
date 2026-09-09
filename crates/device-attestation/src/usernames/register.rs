@@ -160,7 +160,6 @@ const MSG_HEX_65: &str = "Must be a hexadecimal string of exactly 65 bytes.";
 const MSG_DIGITS: &str = "Digits must be between 01-99";
 const MSG_INVALID_SS58: &str = "Invalid ss58 address.";
 const MSG_INVALID_SIGNATURE: &str = "Invalid signature.";
-const MSG_DOTNS_DISABLED: &str = "dotNS gateway is not enabled in this environment.";
 /// `BaseLabel` is `BoundedVec<u8, ConstU32<32>>` in the dotns-gateway pallet.
 const MAX_DOTNS_LABEL_LEN: usize = 32;
 const PATTERN_BASE: &str = "^([a-z]{6,})$";
@@ -1226,12 +1225,7 @@ fn validate_register(
         }
 
         if let Some((_signature, signed_at, reserved_username)) = &dotns {
-            if !config.dotns_gateway_enabled {
-                errors.push(FieldError {
-                    message: MSG_DOTNS_DISABLED.to_string(),
-                    field: "dotns".to_string(),
-                });
-            } else {
+            {
                 if let Some(signed_at) = signed_at {
                     let now = time::OffsetDateTime::now_utc().unix_timestamp();
                     let skew = config.dotns_max_future_skew_secs as i64;
@@ -1564,21 +1558,8 @@ mod tests {
     }
 
     #[test]
-    fn dotns_gating_and_freshness_use_the_captured_messages() {
-        let mut disabled = config();
-        disabled.dotns_gateway_enabled = false;
-        let mut body = valid_body();
+    fn dotns_freshness_uses_the_captured_messages() {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        body["dotns"] = json!({ "signature": format!("0x{}", "ab".repeat(64)), "signedAt": now });
-        match validate_register(&body, &disabled) {
-            Err(UsernamesError::InvalidBody(errors)) => {
-                assert_eq!(errors.len(), 1);
-                assert_eq!(errors[0].field, "dotns");
-                assert_eq!(errors[0].message, MSG_DOTNS_DISABLED);
-            }
-            other => panic!("expected InvalidBody, got {other:?}", other = other.err()),
-        }
-
         let enabled = config();
         let mut future = valid_body();
         future["dotns"] =

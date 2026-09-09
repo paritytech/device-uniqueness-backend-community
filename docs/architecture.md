@@ -344,7 +344,7 @@ Operational invariants an agent must respect when touching the code.
   out differently for the same call (`DETERMINISTIC_REJECTIONS`) is terminal on the *first* pass
   rather than paying its fee eight times over.
 - **A dotNS problem parks the dotNS lane; it never stops the writer.** Only one dotNS condition is
-  a startup abort: `DOTNS_GATEWAY_ENABLED` on with no `ASSET_HUB_RPC_URL`, a config error knowable
+  a startup abort: a missing `ASSET_HUB_RPC_URL`, a config error knowable
   before any row is claimed. Everything else is runtime. Asset Hub is connected lazily on the
   first pass, not at boot, so an unreachable endpoint — an RPC bounce, a DNS blip, maintenance —
   leaves rows in `PENDING` and keeps People attesting, instead of crash-looping the process. The

@@ -43,9 +43,6 @@ pub struct Config {
     /// `true` recognises `lifetimePoUDVoucher` on `POST /api/v1/usernames`;
     /// `false` (default) ignores the field, keeping the frozen wire.
     pub registration_vouchers_enabled: bool,
-    /// Whether registration accepts the optional `dotns` block (mirrors the
-    /// legacy `DOTNS_GATEWAY_ENABLED` gate and its captured 400 message).
-    pub dotns_gateway_enabled: bool,
     /// Max age, in seconds, of `dotns.signedAt` (the intake freshness bound).
     pub dotns_intake_freshness_max_age_secs: u32,
     /// Max future skew, in seconds, tolerated on `dotns.signedAt`.
@@ -229,11 +226,6 @@ impl Config {
             enforce_auth,
             queue_enabled: env_bool("QUEUE_ENABLED", false)?,
             registration_vouchers_enabled: env_bool("REGISTRATION_VOUCHERS_ENABLED", false)?,
-            // Defaults off in code while `.env.example` and `docker-compose.yml` ship it
-            // on: their PEOPLE_RPC_URL and ASSET_HUB_RPC_URL name the same network, which
-            // is what makes the lane safe. A bare process has no such pairing, so the
-            // fallback stays conservative. Must match the writer's default.
-            dotns_gateway_enabled: env_bool("DOTNS_GATEWAY_ENABLED", false)?,
             dotns_intake_freshness_max_age_secs: parse_var(
                 "DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS",
                 "600",
@@ -286,7 +278,6 @@ impl Config {
             enforce_auth: false,
             queue_enabled: false,
             registration_vouchers_enabled: false,
-            dotns_gateway_enabled: true,
             dotns_intake_freshness_max_age_secs: 600,
             dotns_max_future_skew_secs: 600,
             apple_app_attest_app_ids: Vec::new(),
@@ -929,10 +920,6 @@ mod tests {
         assert_eq!(config.bind_addr.to_string(), "0.0.0.0:8080");
         assert_eq!(config.jwt_issuer, "polkadot-app");
         assert!(!config.auth_enabled);
-        assert!(
-            !config.dotns_gateway_enabled,
-            "the gateway is opt-in; a minimal environment must not claim dotNS labels"
-        );
         let alice: [u8; 32] =
             hex::decode("d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d")
                 .unwrap()
