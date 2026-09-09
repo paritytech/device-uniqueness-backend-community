@@ -8,6 +8,7 @@ use subxt::{dynamic::Value, tx::DynamicPayload, utils::AccountId32};
 use time::OffsetDateTime;
 
 use super::engine::{Cx, SIGNER_CONTENTION_BACKOFF_SECS, UNFUNDED_PARK_BACKOFF_SECS};
+use super::link::Link as ChainLink;
 use super::observe::record_submit_outcome;
 use crate::chain::{
     outbox::{Guard, Reservation},
@@ -51,6 +52,9 @@ pub(super) enum Defer {
 
 pub(super) trait Lane {
     type Chain: NameRegistry;
+
+    /// The connection this lane runs against, and its park policy.
+    type Link: ChainLink<Chain = Self::Chain, Ctx = Self::Ctx>;
 
     type Ctx: Copy;
 

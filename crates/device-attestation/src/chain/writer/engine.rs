@@ -26,6 +26,7 @@ use subxt::{
 use time::OffsetDateTime;
 
 use super::lane::{signer_defer, BatchLane, Defer, Gate, Lane, Outcome};
+use super::link::Link as _;
 use crate::chain::{
     lease,
     outbox::{Guard, Reservation},
@@ -139,14 +140,17 @@ pub(super) struct Drain<L: Lane> {
     /// Cached account nonce on this lane's chain. Cleared after any submission
     /// that errored, because the nonce it consumed is then unknown.
     nonce: Option<u64>,
+    /// This lane's connection and park state.
+    link: L::Link,
     lane: PhantomData<L>,
 }
 
 impl<L: Lane> Drain<L> {
-    pub(super) fn new(batch_max: u16) -> Self {
+    pub(super) fn new(batch_max: u16, link: L::Link) -> Self {
         Self {
             batch: BatchLane::new(L::NAME, batch_max),
             nonce: None,
+            link,
             lane: PhantomData,
         }
     }
@@ -157,8 +161,10 @@ impl<L: Lane> Drain<L> {
         self.nonce = None;
     }
 
-    pub(super) fn size(&self) -> u16 {
-        self.batch.size
+    /// This lane's chain for a one-off read, dialling if it is due a retry.
+    /// `None` while the lane is parked.
+    pub(super) async fn chain(&mut self) -> Option<L::Chain> {
+        self.link.up().await.map(|(chain, _)| chain)
     }
 
     /// Drain one claimed set. `Ok(true)` means there was nothing due.
@@ -168,17 +174,17 @@ impl<L: Lane> Drain<L> {
     /// set stays a bare call — one registration should not pay for a
     /// `force_batch` wrapper, and its dispatch result is a genuine per-row
     /// verdict rather than a positional guess.
-    pub(super) async fn pass(
-        &mut self,
-        cx: &Cx<'_>,
-        chain: &L::Chain,
-        ctx: L::Ctx,
-        due: &[Reservation],
-    ) -> Result<bool> {
+    pub(super) async fn pass(&mut self, cx: &Cx<'_>) -> Result<bool> {
+        let Some((chain, ctx)) = self.link.up().await else {
+            return Ok(true);
+        };
+        let due = L::claim(cx.pool, i64::from(self.batch.size)).await?;
         if due.is_empty() {
             return Ok(true);
         }
         cx.hold().await?;
+        let chain = &chain;
+        let due = &due[..];
         let submittable = self.triage(cx, chain, ctx, due).await?;
         match submittable.len() {
             0 => {}
@@ -555,7 +561,11 @@ impl<L: Lane> Drain<L> {
     ///
     /// Rows in a chunk that could not be read stay `SUBMITTING`: unknown is
     /// never read as not-yet-landed.
-    pub(super) async fn reconcile_submitting(&self, cx: &Cx<'_>, chain: &L::Chain) -> Result<()> {
+    pub(super) async fn reconcile_submitting(&mut self, cx: &Cx<'_>) -> Result<()> {
+        let Some((chain, _)) = self.link.up().await else {
+            return Ok(());
+        };
+        let chain = &chain;
         let stuck = L::submitting(cx.pool).await?;
         let mut parsed = Vec::with_capacity(stuck.len());
         for r in &stuck {
