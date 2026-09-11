@@ -12,9 +12,7 @@
 //! checked against the calls submitted, or through a direct ownership read. A
 //! mapping that does not line up is discarded, never guessed at.
 
-use std::collections::HashMap;
-use std::marker::PhantomData;
-use std::time::Duration;
+use std::{collections::HashMap, marker::PhantomData, time::Duration};
 
 use anyhow::Result;
 use chain_client::WriterSigner;
@@ -25,8 +23,11 @@ use subxt::{
 };
 use time::OffsetDateTime;
 
-use super::lane::{signer_defer, BatchLane, Defer, Gate, Lane, Outcome};
-use super::link::Link as _;
+use super::{
+    error::{Op, WriterError},
+    lane::{signer_defer, BatchLane, Defer, Gate, Lane, Outcome},
+    link::Link as _,
+};
 use crate::chain::{
     lease,
     outbox::{Guard, Reservation},
@@ -62,7 +63,7 @@ pub(super) struct Cx<'a> {
 }
 
 impl Cx<'_> {
-    pub(super) async fn heartbeat(&self) -> Result<bool> {
+    pub(super) async fn heartbeat(&self) -> Result<bool, WriterError> {
         Ok(lease::renew(
             self.pool,
             &self.guard.lease_name,
@@ -73,9 +74,9 @@ impl Cx<'_> {
         .await?)
     }
 
-    async fn hold(&self) -> Result<()> {
+    async fn hold(&self) -> Result<(), WriterError> {
         if !self.heartbeat().await? {
-            anyhow::bail!("lost writer lease");
+            return Err(WriterError::LeaseLost(Op::Draining));
         }
         Ok(())
     }
@@ -88,7 +89,6 @@ impl Cx<'_> {
 pub(super) async fn finalize<T, C>(
     cx: &Cx<'_>,
     progress: TransactionProgress<T, C>,
-    what: &'static str,
 ) -> Result<(ExtrinsicEvents<T>, ArcMetadata)>
 where
     T: subxt::Config,
@@ -109,7 +109,7 @@ where
                 result = &mut wait => return result,
                 _ = renew.tick() => {
                     if !cx.heartbeat().await? {
-                        anyhow::bail!("lost writer lease during {what}");
+                        return Err(WriterError::LeaseLost(Op::Finalizing).into());
                     }
                 }
             }
@@ -174,7 +174,7 @@ impl<L: Lane> Drain<L> {
     /// set stays a bare call — one registration should not pay for a
     /// `force_batch` wrapper, and its dispatch result is a genuine per-row
     /// verdict rather than a positional guess.
-    pub(super) async fn pass(&mut self, cx: &Cx<'_>) -> Result<bool> {
+    pub(super) async fn pass(&mut self, cx: &Cx<'_>) -> Result<bool, WriterError> {
         let Some((chain, ctx)) = self.link.up().await else {
             return Ok(true);
         };
@@ -265,7 +265,7 @@ impl<L: Lane> Drain<L> {
         chain: &L::Chain,
         r: &Reservation,
         candidate: [u8; 32],
-    ) -> Result<()> {
+    ) -> Result<(), WriterError> {
         let nonce = match self.next_nonce(cx, chain).await {
             Ok(n) => n,
             Err(e) => {
@@ -303,7 +303,7 @@ impl<L: Lane> Drain<L> {
         cx: &Cx<'_>,
         chain: &L::Chain,
         rows: &[(&Reservation, [u8; 32])],
-    ) -> Result<()> {
+    ) -> Result<(), WriterError> {
         let nonce = match self.next_nonce(cx, chain).await {
             Ok(n) => n,
             Err(e) => {
@@ -339,7 +339,7 @@ impl<L: Lane> Drain<L> {
         chain: &L::Chain,
         rows: &[(&Reservation, [u8; 32])],
         items: Vec<Result<(), String>>,
-    ) -> Result<()> {
+    ) -> Result<(), WriterError> {
         if items.len() != rows.len() {
             tracing::error!(
                 lane = L::NAME,
@@ -402,7 +402,7 @@ impl<L: Lane> Drain<L> {
         candidate: [u8; 32],
         observed: Option<[u8; 32]>,
         reason: &str,
-    ) -> Result<()> {
+    ) -> Result<(), WriterError> {
         match classify_submit_failure(
             reason,
             observed,
@@ -442,7 +442,7 @@ impl<L: Lane> Drain<L> {
         chain: &L::Chain,
         rows: &[(&Reservation, [u8; 32])],
         reason: &str,
-    ) -> Result<()> {
+    ) -> Result<(), WriterError> {
         let names: Vec<&str> = rows.iter().map(|(r, _)| r.full_username.as_str()).collect();
         let owners = match chain.owners(&names).await {
             Ok(owners) => owners,
@@ -478,7 +478,7 @@ impl<L: Lane> Drain<L> {
         cx: &Cx<'_>,
         rows: &[(&Reservation, [u8; 32])],
         reason: &str,
-    ) -> Result<()> {
+    ) -> Result<(), WriterError> {
         let backoff = self.batch.failed(cx.batch_max);
         tracing::warn!(
             lane = L::NAME,
@@ -505,7 +505,7 @@ impl<L: Lane> Drain<L> {
         cx: &Cx<'_>,
         rows: &[(&Reservation, [u8; 32])],
         reason: &str,
-    ) -> Result<()> {
+    ) -> Result<(), WriterError> {
         metrics::counter!("dub_chain_batch_reconciled_total", "lane" => L::NAME)
             .increment(rows.len() as u64);
         tracing::warn!(
@@ -527,7 +527,7 @@ impl<L: Lane> Drain<L> {
         rows: &[(&Reservation, [u8; 32])],
         backoff: time::Duration,
         reason: &str,
-    ) -> Result<()> {
+    ) -> Result<(), WriterError> {
         let until = OffsetDateTime::now_utc() + backoff;
         for (r, _) in rows {
             let outcome = Outcome::Defer {
@@ -540,7 +540,7 @@ impl<L: Lane> Drain<L> {
         Ok(())
     }
 
-    async fn next_nonce(&mut self, cx: &Cx<'_>, chain: &L::Chain) -> Result<u64> {
+    async fn next_nonce(&mut self, cx: &Cx<'_>, chain: &L::Chain) -> Result<u64, WriterError> {
         if let Some(n) = self.nonce {
             return Ok(n);
         }
@@ -561,7 +561,7 @@ impl<L: Lane> Drain<L> {
     ///
     /// Rows in a chunk that could not be read stay `SUBMITTING`: unknown is
     /// never read as not-yet-landed.
-    pub(super) async fn reconcile_submitting(&mut self, cx: &Cx<'_>) -> Result<()> {
+    pub(super) async fn reconcile_submitting(&mut self, cx: &Cx<'_>) -> Result<(), WriterError> {
         let Some((chain, _)) = self.link.up().await else {
             return Ok(());
         };
@@ -606,10 +606,11 @@ impl<L: Lane> Drain<L> {
             }
         }
         if unread > 0 {
-            anyhow::bail!(
+            return Err(anyhow::anyhow!(
                 "reconcile could not read {unread} of {} SUBMITTING rows",
                 parsed.len()
-            );
+            )
+            .into());
         }
         Ok(())
     }

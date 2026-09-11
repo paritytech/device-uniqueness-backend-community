@@ -32,15 +32,14 @@ pub(super) struct Window {
 
 const DOTNS_RECONNECT_INTERVAL: Duration = Duration::from_secs(30);
 
-pub(super) enum DotnsLink {
-    Disabled,
-    Enabled {
-        rpc_url: String,
-        attester: [u8; 32],
-        connected: Option<(AssetHub, ValidityWindow)>,
-        last_error: Option<String>,
-        retry_at: Option<Instant>,
-    },
+/// The Asset Hub link. Parks and redials on its own schedule when the chain is
+/// unreachable.
+pub(super) struct DotnsLink {
+    rpc_url: String,
+    attester: [u8; 32],
+    connected: Option<(AssetHub, ValidityWindow)>,
+    last_error: Option<String>,
+    retry_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,45 +51,28 @@ enum DotnsDial {
 
 impl DotnsLink {
     fn dial_state(&self, now: Instant) -> DotnsDial {
-        match self {
-            DotnsLink::Disabled => DotnsDial::Skip,
-            DotnsLink::Enabled { connected, .. } if connected.is_some() => DotnsDial::Ready,
-            DotnsLink::Enabled { retry_at, .. } => match retry_at {
-                Some(at) if now < *at => DotnsDial::Skip,
-                _ => DotnsDial::Dial,
-            },
+        if self.connected.is_some() {
+            return DotnsDial::Ready;
+        }
+        match self.retry_at {
+            Some(at) if now < at => DotnsDial::Skip,
+            _ => DotnsDial::Dial,
         }
     }
 
     fn record_dial_failure(&mut self, reason: String, now: Instant) -> bool {
-        let DotnsLink::Enabled {
-            last_error,
-            retry_at,
-            ..
-        } = self
-        else {
-            return false;
-        };
-        *retry_at = Some(now + DOTNS_RECONNECT_INTERVAL);
-        let is_new = last_error.as_deref() != Some(reason.as_str());
+        self.retry_at = Some(now + DOTNS_RECONNECT_INTERVAL);
+        let is_new = self.last_error.as_deref() != Some(reason.as_str());
         if is_new {
-            *last_error = Some(reason);
+            self.last_error = Some(reason);
         }
         is_new
     }
 
     fn record_dial_success(&mut self, up: (AssetHub, ValidityWindow)) {
-        if let DotnsLink::Enabled {
-            connected,
-            last_error,
-            retry_at,
-            ..
-        } = self
-        {
-            *connected = Some(up);
-            *last_error = None;
-            *retry_at = None;
-        }
+        self.connected = Some(up);
+        self.last_error = None;
+        self.retry_at = None;
     }
 }
 
@@ -101,29 +83,22 @@ async fn connect_asset_hub(url: &str) -> anyhow::Result<(AssetHub, ValidityWindo
 }
 
 impl DotnsLink {
-    pub(super) fn new(rpc_url: Option<String>, attester: [u8; 32]) -> Self {
-        match rpc_url {
-            Some(rpc_url) => DotnsLink::Enabled {
-                rpc_url,
-                attester,
-                connected: None,
-                last_error: None,
-                retry_at: None,
-            },
-            None => DotnsLink::Disabled,
+    pub(super) fn new(rpc_url: String, attester: [u8; 32]) -> Self {
+        Self {
+            rpc_url,
+            attester,
+            connected: None,
+            last_error: None,
+            retry_at: None,
         }
     }
 
     fn ctx(&self, up: &(AssetHub, ValidityWindow)) -> (AssetHub, Window) {
-        let attester = match self {
-            DotnsLink::Enabled { attester, .. } => *attester,
-            DotnsLink::Disabled => unreachable!("ctx on a disabled dotNS lane"),
-        };
         (
             up.0.clone(),
             Window {
                 window: up.1,
-                attester,
+                attester: self.attester,
             },
         )
     }
@@ -138,21 +113,12 @@ impl Link for DotnsLink {
         match self.dial_state(now) {
             DotnsDial::Skip => return None,
             DotnsDial::Ready => {
-                let DotnsLink::Enabled {
-                    connected: Some(up),
-                    ..
-                } = &self
-                else {
-                    return None;
-                };
+                let up = self.connected.as_ref()?;
                 return Some(self.ctx(up));
             }
             DotnsDial::Dial => {}
         }
-        let DotnsLink::Enabled { rpc_url, .. } = self else {
-            return None;
-        };
-        let rpc_url = rpc_url.clone();
+        let rpc_url = self.rpc_url.clone();
         match connect_asset_hub(&rpc_url).await {
             Ok(up) => {
                 tracing::info!(
@@ -190,13 +156,7 @@ mod tests {
     #[test]
     fn a_parked_dotns_lane_backs_off_and_logs_each_cause_once() {
         let t0 = Instant::now();
-        let mut lane = DotnsLink::Enabled {
-            rpc_url: "wss://example.invalid".to_string(),
-            attester: [0u8; 32],
-            connected: None,
-            last_error: None,
-            retry_at: None,
-        };
+        let mut lane = DotnsLink::new("wss://example.invalid".to_string(), [0u8; 32]);
 
         assert_eq!(lane.dial_state(t0), DotnsDial::Dial);
 
@@ -216,8 +176,5 @@ mod tests {
         assert!(lane.record_dial_failure("reserve_name shape mismatch".to_string(), t2));
         let t3 = t2 + DOTNS_RECONNECT_INTERVAL;
         assert!(lane.record_dial_failure("unreachable".to_string(), t3));
-
-        assert_eq!(DotnsLink::Disabled.dial_state(t0), DotnsDial::Skip);
-        assert!(!DotnsLink::Disabled.record_dial_failure("ignored".to_string(), t0));
     }
 }

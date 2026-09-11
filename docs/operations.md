@@ -107,7 +107,7 @@ The values you must decide, at minimum:
 | --- | --- |
 | `ENV_ID` | This environment's name; suffixes every network alias. |
 | `PEOPLE_RPC_URL` | People Chain RPC. Must be a **full** node serving the legacy `state_queryStorageAt` — see the availability failure mode below. |
-| `ASSET_HUB_RPC_URL` | Asset Hub RPC, if `DOTNS_GATEWAY_ENABLED=true`. Same `state_queryStorageAt` requirement. **Must name the same network as `PEOPLE_RPC_URL`** — a split pair claims labels on the wrong chain, unrecoverably. |
+| `ASSET_HUB_RPC_URL` | Asset Hub RPC. **Required.** Same `state_queryStorageAt` requirement. **Must name the same network as `PEOPLE_RPC_URL`** — a split pair claims labels on the wrong chain, unrecoverably. |
 | `ATTESTER_ACCOUNT` | The on-chain attester authority (SS58). |
 | `CHAIN_WRITER_SIGNER_SURI` | The writer's signing key; must be an authorized attester or its proxy, and funded. |
 | `JWT_ED25519_SECRET` | 32 bytes. `device-attestation-api` only. |
@@ -406,9 +406,9 @@ always pin `chain="people"` or `chain="asset-hub"` in alerts and dashboards.
   real serializer.
 - Restart-safe: reconciles `SUBMITTING` rows on both chains against chain state
   rather than resubmitting.
-- **One dotNS condition refuses to start:** `DOTNS_GATEWAY_ENABLED` on with no
-  `ASSET_HUB_RPC_URL`. That is a config error — `device-attestation-api` would
-  accept blocks nothing submits — and is not restart-fixable. Correct the `.env`.
+- **One dotNS condition refuses to start:** a missing `ASSET_HUB_RPC_URL`. The
+  dotNS lane is not optional, so a writer without an endpoint would accept
+  blocks nothing submits. Not restart-fixable; correct the `.env`.
 - **Everything else dotNS parks the lane, not the writer.** Asset Hub is dialled
   on the first pass rather than at boot, and re-dialled every 30s while down, so
   an unreachable endpoint leaves rows in `PENDING` and keeps People registrations

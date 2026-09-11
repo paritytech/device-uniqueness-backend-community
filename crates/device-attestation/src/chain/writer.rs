@@ -3,7 +3,6 @@
 
 use std::time::Duration;
 
-use anyhow::Context as _;
 use secrecy::{ExposeSecret as _, SecretString};
 use sqlx::PgPool;
 use subxt::utils::AccountId32;
@@ -11,23 +10,27 @@ use subxt::utils::AccountId32;
 use chain_client::WriterSigner;
 
 use super::{lease, outbox::Guard, people::PeopleChain};
+use crate::config::ConfigError;
 mod dotns;
 mod engine;
+mod error;
 mod events;
 #[cfg(test)]
 mod fixtures;
 mod lane;
 mod link;
 mod observe;
+mod passes;
 mod people;
 mod tx;
 
 use dotns::Dotns;
 use engine::{Cx, Drain};
+use error::Op;
+pub use error::WriterError;
 use link::{DotnsLink, PeopleLink};
-use observe::{
-    record_outbox_gauges, record_spec_version, record_writer_info, zero_init_submit_outcomes,
-};
+use observe::{record_writer_info, zero_init_submit_outcomes};
+use passes::Passes;
 use people::People;
 
 /// The claim size a writer uses when `CHAIN_WRITER_BATCH_SIZE` is unset or
@@ -84,21 +87,16 @@ pub struct WriterConfig {
     /// WARN below this signer free balance, in planck (transaction fees come
     /// from the signer, not the proxied primary).
     pub signer_balance_floor_planck: u128,
-    /// Whether the dotNS gateway lane is live (`DOTNS_GATEWAY_ENABLED`). Must
-    /// match device-attestation-api's value, which gates intake. When off, no Asset Hub
-    /// connection is opened at all and `dotns_status` rows are left alone.
-    pub dotns_gateway_enabled: bool,
-    /// Asset Hub RPC endpoint. Required when the dotNS lane is enabled.
-    pub asset_hub_rpc_url: Option<String>,
+    /// Asset Hub RPC endpoint. Required.
+    pub asset_hub_rpc_url: String,
 }
 
 impl WriterConfig {
-    pub fn from_env() -> anyhow::Result<Self> {
+    pub fn from_env() -> Result<Self, ConfigError> {
         let database_url = http_common::config::required_var("DEVICE_ATTESTATION_DATABASE_URL")?;
         let people_rpc_url = std::env::var("PEOPLE_RPC_URL")
             .unwrap_or_else(|_| "wss://previewnet.substrate.dev/people".to_string());
-        let signer_suri = std::env::var("CHAIN_WRITER_SIGNER_SURI")
-            .context("CHAIN_WRITER_SIGNER_SURI is required")?;
+        let signer_suri = http_common::config::required_var("CHAIN_WRITER_SIGNER_SURI")?;
         let attester = crate::config::attester_account_from_env()?;
         let holder_id = match std::env::var("CHAIN_WRITER_HOLDER_ID") {
             Ok(value) if !value.trim().is_empty() => value,
@@ -123,37 +121,25 @@ impl WriterConfig {
             finalize_timeout: Duration::from_secs(env_u64("CHAIN_WRITER_FINALIZE_SECS", 120)),
             max_attempts: env_u64("CHAIN_WRITER_MAX_ATTEMPTS", 8) as i32,
             queue_enabled: crate::config::env_bool("QUEUE_ENABLED", false)?,
-            queue_fallback_after: Duration::from_secs(crate::queue::env_u64_strict(
-                "QUEUE_FALLBACK_AFTER_SECS",
-                60,
-            )?),
-            payment_poll_interval: Duration::from_secs(crate::queue::env_u64_strict(
-                "PAYMENT_POLL_INTERVAL_SECS",
-                30,
-            )?),
-            resource_poll_interval: Duration::from_secs(crate::queue::env_u64_strict(
-                "ATTESTER_RESOURCE_POLL_SECS",
-                60,
-            )?),
-            allowance_floor: u32::try_from(crate::queue::env_u64_strict(
-                "ATTESTER_ALLOWANCE_FLOOR",
-                100,
-            )?)
-            .context("ATTESTER_ALLOWANCE_FLOOR must fit a u32")?,
-            signer_balance_floor_planck: u128::from(crate::queue::env_u64_strict(
+            queue_fallback_after: Duration::from_secs(strict("QUEUE_FALLBACK_AFTER_SECS", 60)?),
+            payment_poll_interval: Duration::from_secs(strict("PAYMENT_POLL_INTERVAL_SECS", 30)?),
+            resource_poll_interval: Duration::from_secs(strict("ATTESTER_RESOURCE_POLL_SECS", 60)?),
+            allowance_floor: u32::try_from(strict("ATTESTER_ALLOWANCE_FLOOR", 100)?).map_err(
+                |_| ConfigError::Invalid {
+                    key: "ATTESTER_ALLOWANCE_FLOOR",
+                    reason: "must fit a u32".to_string(),
+                },
+            )?,
+            signer_balance_floor_planck: u128::from(strict(
                 "ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK",
                 10_000_000_000,
             )?),
-            dotns_gateway_enabled: crate::config::env_bool("DOTNS_GATEWAY_ENABLED", false)?,
-            asset_hub_rpc_url: match std::env::var("ASSET_HUB_RPC_URL") {
-                Ok(v) if !v.trim().is_empty() => Some(v.trim().to_string()),
-                _ => None,
-            },
+            asset_hub_rpc_url: http_common::config::required_var("ASSET_HUB_RPC_URL")?,
         })
     }
 }
 
-pub async fn run(config: WriterConfig) -> anyhow::Result<()> {
+pub async fn run(config: WriterConfig) -> Result<(), WriterError> {
     tracing::info!(
         people_rpc = %config.people_rpc_url,
         attester = %hex_account(&config.attester),
@@ -168,24 +154,10 @@ pub async fn run(config: WriterConfig) -> anyhow::Result<()> {
         .proxy_for(AccountId32(config.attester))
         .map(|primary| primary.0);
 
-    let dotns_rpc = match (config.dotns_gateway_enabled, &config.asset_hub_rpc_url) {
-        (true, Some(url)) => {
-            tracing::info!(
-                asset_hub_rpc = %url,
-                "dotns lane enabled; Asset Hub connects on the first pass"
-            );
-            Some(url.clone())
-        }
-        (true, None) => anyhow::bail!(
-            "DOTNS_GATEWAY_ENABLED is on but ASSET_HUB_RPC_URL is unset. device-attestation-api would \
-             accept dotns blocks that nothing ever submits — set the RPC URL, or turn the \
-             gateway off for this environment."
-        ),
-        (false, _) => {
-            tracing::info!("dotns lane disabled");
-            None
-        }
-    };
+    tracing::info!(
+        asset_hub_rpc = %config.asset_hub_rpc_url,
+        "dotns lane connects on the first pass"
+    );
     tracing::info!(
         signer = %hex_account(&signer_account.0),
         attester = %hex_account(&config.attester),
@@ -203,6 +175,8 @@ pub async fn run(config: WriterConfig) -> anyhow::Result<()> {
     let batch_max = config.batch_size;
     let chain_for_lane = chain.clone();
     let config_attester = config.attester;
+    let asset_hub_rpc = config.asset_hub_rpc_url.clone();
+    let passes = Passes::new(&config);
     let mut writer = Writer {
         pool,
         chain,
@@ -211,7 +185,8 @@ pub async fn run(config: WriterConfig) -> anyhow::Result<()> {
         proxy_for,
         config,
         people: Drain::new(batch_max, PeopleLink(chain_for_lane)),
-        dotns: Drain::new(batch_max, DotnsLink::new(dotns_rpc, config_attester)),
+        dotns: Drain::new(batch_max, DotnsLink::new(asset_hub_rpc, config_attester)),
+        passes,
     };
     writer.run_forever().await
 }
@@ -225,10 +200,12 @@ struct Writer {
     config: WriterConfig,
     people: Drain<People>,
     dotns: Drain<Dotns>,
+    /// The periodic work this process hosts because it holds the lease.
+    passes: Passes,
 }
 
 impl Writer {
-    async fn run_forever(&mut self) -> anyhow::Result<()> {
+    async fn run_forever(&mut self) -> Result<(), WriterError> {
         loop {
             let guard = self.acquire_lease().await?;
             tracing::info!(epoch = guard.epoch, "acquired writer lease");
@@ -242,7 +219,7 @@ impl Writer {
         }
     }
 
-    async fn acquire_lease(&self) -> anyhow::Result<Guard> {
+    async fn acquire_lease(&self) -> Result<Guard, WriterError> {
         loop {
             let epoch = lease::try_acquire(
                 &self.pool,
@@ -263,7 +240,7 @@ impl Writer {
         }
     }
 
-    async fn heartbeat(&self, guard: &Guard) -> anyhow::Result<bool> {
+    async fn heartbeat(&self, guard: &Guard) -> Result<bool, WriterError> {
         Ok(lease::renew(
             &self.pool,
             &guard.lease_name,
@@ -274,66 +251,13 @@ impl Writer {
         .await?)
     }
 
-    async fn active_loop(&mut self, guard: &Guard) -> anyhow::Result<()> {
-        let mut last_payment_pass: Option<std::time::Instant> = None;
-        let mut last_stranded_check: Option<std::time::Instant> = None;
-        let mut last_resource_pass: Option<std::time::Instant> = None;
+    async fn active_loop(&mut self, guard: &Guard) -> Result<(), WriterError> {
         loop {
             if !self.heartbeat(guard).await? {
-                anyhow::bail!("lost writer lease");
+                return Err(WriterError::LeaseLost(Op::Draining));
             }
-            if last_resource_pass.is_none_or(|t| t.elapsed() >= self.config.resource_poll_interval)
-            {
-                last_resource_pass = Some(std::time::Instant::now());
-                if let Err(e) = self.log_attester_resources().await {
-                    tracing::warn!(error = %e, "attester resources read failed");
-                }
-                if let Err(e) = record_outbox_gauges(&self.pool).await {
-                    tracing::warn!(error = %e, "outbox gauge pass failed");
-                }
-            }
-            if self.config.queue_enabled {
-                if last_stranded_check
-                    .is_none_or(|t| t.elapsed() >= self.config.queue_fallback_after)
-                {
-                    last_stranded_check = Some(std::time::Instant::now());
-                    match crate::queue::stranded_queued(&self.pool).await {
-                        Ok(0) => {}
-                        Ok(stranded) => tracing::warn!(
-                            stranded,
-                            "queue advancer is down with claims queued; holding the throttle \
-                             (queue enabled — not draining). Restart registration-queue, or \
-                             retire the queue by setting QUEUE_ENABLED=false everywhere."
-                        ),
-                        Err(e) => tracing::warn!(error = %e, "stranded-queue check failed"),
-                    }
-                }
-            } else {
-                match crate::queue::fallback_drain(&self.pool, self.config.queue_fallback_after)
-                    .await
-                {
-                    Ok(0) => {}
-                    Ok(drained) => tracing::warn!(
-                        drained,
-                        "queue disabled with advancer gone; promoted leftover queued claims"
-                    ),
-                    Err(e) => tracing::warn!(error = %e, "queue janitor drain failed"),
-                }
-            }
-            if last_payment_pass.is_none_or(|t| t.elapsed() >= self.config.payment_poll_interval) {
-                last_payment_pass = Some(std::time::Instant::now());
-                match crate::payment::watch_pass(&self.pool, &self.chain).await {
-                    Ok(stats) if stats.acted() => tracing::info!(
-                        expired = stats.expired,
-                        confirmed = stats.confirmed,
-                        conflicted = stats.conflicted,
-                        still_pending = stats.still_pending,
-                        "payment watch pass"
-                    ),
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error = %e, "payment watch pass failed"),
-                }
-            }
+            self.periodic().await;
+
             let people_idle = self.people_pass(guard).await?;
             self.dotns_pass(guard).await?;
             if people_idle {
@@ -342,12 +266,28 @@ impl Writer {
         }
     }
 
-    async fn people_pass(&mut self, guard: &Guard) -> anyhow::Result<bool> {
+    async fn periodic(&mut self) {
+        let Writer {
+            pool,
+            chain,
+            signer_account,
+            proxy_for,
+            config,
+            dotns,
+            passes,
+            ..
+        } = self;
+        passes
+            .tick(pool, chain, dotns, signer_account, *proxy_for, config)
+            .await;
+    }
+
+    async fn people_pass(&mut self, guard: &Guard) -> Result<bool, WriterError> {
         let (cx, drain) = self.people_pass_parts(guard);
         drain.pass(&cx).await
     }
 
-    async fn dotns_pass(&mut self, guard: &Guard) -> anyhow::Result<bool> {
+    async fn dotns_pass(&mut self, guard: &Guard) -> Result<bool, WriterError> {
         let (cx, drain) = self.dotns_pass_parts(guard);
         drain.pass(&cx).await
     }
@@ -393,100 +333,20 @@ impl Writer {
             dotns,
         )
     }
-
-    async fn log_attester_resources(&mut self) -> anyhow::Result<()> {
-        let allowance_account = self.config.attester;
-        let allowance = self.chain.attestation_allowance(allowance_account).await?;
-        let signer_balance = self.chain.free_balance(self.signer_account.0).await?;
-        let primary_balance = match self.proxy_for {
-            Some(primary) => Some(self.chain.free_balance(primary).await?),
-            None => None,
-        };
-
-        tracing::info!(
-            allowance,
-            allowance_account = %hex_account(&allowance_account),
-            signer = %hex_account(&self.signer_account.0),
-            signer_balance_planck = signer_balance,
-            primary_balance_planck = primary_balance,
-            "attester_resources"
-        );
-        metrics::gauge!("dub_attester_allowance").set(allowance as f64);
-        record_spec_version("people", self.chain.online()).await;
-        metrics::gauge!(
-            "dub_account_free_balance_planck",
-            "role" => "signer",
-            "chain" => "people"
-        )
-        .set(signer_balance as f64);
-        if let Some(primary) = primary_balance {
-            metrics::gauge!(
-                "dub_account_free_balance_planck",
-                "role" => "primary",
-                "chain" => "people"
-            )
-            .set(primary as f64);
-        }
-
-        if allowance < self.config.allowance_floor {
-            tracing::warn!(
-                allowance,
-                floor = self.config.allowance_floor,
-                allowance_account = %hex_account(&allowance_account),
-                "attestation allowance below floor; registration stops at zero"
-            );
-        }
-        if signer_balance < self.config.signer_balance_floor_planck {
-            tracing::warn!(
-                signer_balance_planck = signer_balance,
-                floor_planck = self.config.signer_balance_floor_planck,
-                signer = %hex_account(&self.signer_account.0),
-                "chain-writer signer balance below floor; registrations will fail to pay fees"
-            );
-        }
-
-        if let Some(asset_hub) = self.dotns.chain().await {
-            let allowance = asset_hub.attestation_allowance(allowance_account).await?;
-            let ah_signer_balance = asset_hub.free_balance(self.signer_account.0).await?;
-            tracing::info!(
-                allowance,
-                allowance_account = %hex_account(&allowance_account),
-                signer_balance_planck = ah_signer_balance,
-                "dotns_attester_resources"
-            );
-            metrics::gauge!("dub_dotns_attester_allowance").set(allowance as f64);
-            record_spec_version("asset-hub", asset_hub.online()).await;
-            metrics::gauge!(
-                "dub_account_free_balance_planck",
-                "role" => "signer",
-                "chain" => "asset-hub"
-            )
-            .set(ah_signer_balance as f64);
-
-            if allowance < self.config.allowance_floor {
-                tracing::warn!(
-                    allowance,
-                    floor = self.config.allowance_floor,
-                    allowance_account = %hex_account(&allowance_account),
-                    "dotns gateway allowance below floor; reservations stop at zero"
-                );
-            }
-            if ah_signer_balance < self.config.signer_balance_floor_planck {
-                tracing::warn!(
-                    signer_balance_planck = ah_signer_balance,
-                    floor_planck = self.config.signer_balance_floor_planck,
-                    signer = %hex_account(&self.signer_account.0),
-                    "chain-writer signer balance on Asset Hub below floor; \
-                     failed reservations will not pay their fees"
-                );
-            }
-        }
-        Ok(())
-    }
 }
 
 fn hex_account(bytes: &[u8; 32]) -> String {
     format!("0x{}", hex::encode(bytes))
+}
+
+/// [`crate::queue::env_u64_strict`] in this module's error vocabulary. That
+/// helper still returns `anyhow` and is shared with the queue role, so the
+/// mapping lives here rather than being pushed onto its other caller.
+fn strict(key: &'static str, default: u64) -> Result<u64, ConfigError> {
+    crate::queue::env_u64_strict(key, default).map_err(|e| ConfigError::Invalid {
+        key,
+        reason: e.to_string(),
+    })
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {
@@ -546,6 +406,7 @@ mod tests {
         "ATTESTER_RESOURCE_POLL_SECS",
         "ATTESTER_ALLOWANCE_FLOOR",
         "ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK",
+        "ASSET_HUB_RPC_URL",
     ];
 
     const REQUIRED_ENV: &[(&str, &str)] = &[
@@ -555,13 +416,14 @@ mod tests {
         ),
         ("CHAIN_WRITER_SIGNER_SURI", "//Writer"),
         ("ATTESTER_ACCOUNT", ALICE_SS58),
+        ("ASSET_HUB_RPC_URL", "wss://asset-hub.invalid"),
     ];
 
     const ALICE_SS58: &str = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
 
     const ALICE_HEX: &str = "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d";
 
-    fn from_env_with(vars: &[(&str, &str)]) -> anyhow::Result<WriterConfig> {
+    fn from_env_with(vars: &[(&str, &str)]) -> Result<WriterConfig, ConfigError> {
         for key in FROM_ENV_VARS {
             std::env::remove_var(key);
         }
@@ -599,6 +461,7 @@ mod tests {
             ("ATTESTER_RESOURCE_POLL_SECS", "120"),
             ("ATTESTER_ALLOWANCE_FLOOR", "250"),
             ("ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK", "123456789012"),
+            ("ASSET_HUB_RPC_URL", "wss://asset-hub.example"),
         ])
         .unwrap();
         assert_eq!(
@@ -606,6 +469,7 @@ mod tests {
             "postgres://writer:pw@localhost/device_attestation"
         );
         assert_eq!(config.people_rpc_url, "wss://people.example");
+        assert_eq!(config.asset_hub_rpc_url, "wss://asset-hub.example");
         assert_eq!(config.signer_suri.expose_secret(), "//Writer");
         let alice: [u8; 32] = hex::decode(ALICE_HEX).unwrap().try_into().unwrap();
         assert_eq!(config.attester, alice);
@@ -661,8 +525,7 @@ mod tests {
         let err =
             from_env_with(&[("DEVICE_ATTESTATION_DATABASE_URL", "postgres://x")]).unwrap_err();
         assert!(
-            err.to_string()
-                .contains("CHAIN_WRITER_SIGNER_SURI is required"),
+            err.to_string().contains("CHAIN_WRITER_SIGNER_SURI"),
             "{err}"
         );
 
@@ -697,11 +560,9 @@ mod tests {
         let mut vars = REQUIRED_ENV.to_vec();
         vars.push(("ATTESTER_ALLOWANCE_FLOOR", "4294967296"));
         let err = from_env_with(&vars).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("ATTESTER_ALLOWANCE_FLOOR must fit a u32"),
-            "{err}"
-        );
+        let err = err.to_string();
+        assert!(err.contains("ATTESTER_ALLOWANCE_FLOOR"), "{err}");
+        assert!(err.contains("must fit a u32"), "{err}");
 
         let mut vars = REQUIRED_ENV.to_vec();
         vars.push(("CHAIN_WRITER_LEASE_TTL_SECS", "garbage"));

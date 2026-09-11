@@ -9,6 +9,7 @@ use time::OffsetDateTime;
 
 use super::{
     engine::{finalize, parse_candidate, Cx, UNFUNDED_PARK_BACKOFF_SECS},
+    error::{Op, WriterError},
     events::{check_proxied_call, item_results},
     lane::{observe_defer, park_until, row_backoff, Gate, Lane, Outcome},
     link::{DotnsLink, Window},
@@ -195,8 +196,7 @@ impl Lane for Dotns {
             "submitting dotns reservation"
         );
 
-        let (events, metadata) =
-            finalize(cx, signed.submit_and_watch().await?, "dotns submit").await?;
+        let (events, metadata) = finalize(cx, signed.submit_and_watch().await?).await?;
         check_proxied_call(&events, &metadata)
     }
 
@@ -220,8 +220,7 @@ impl Lane for Dotns {
         metrics::histogram!("dub_chain_batch_items", "lane" => Self::NAME)
             .record(rows.len() as f64);
 
-        let (events, metadata) =
-            finalize(cx, signed.submit_and_watch().await?, "dotns submit").await?;
+        let (events, metadata) = finalize(cx, signed.submit_and_watch().await?).await?;
         check_proxied_call(&events, &metadata)?;
         item_results(&events, &metadata)
     }
@@ -231,11 +230,11 @@ impl Lane for Dotns {
         guard: &Guard,
         r: &Reservation,
         outcome: Outcome<'_>,
-    ) -> Result<()> {
+    ) -> Result<(), WriterError> {
         match outcome {
             Outcome::Landed | Outcome::Observed => {
                 if !outbox::mark_dotns_reserved(pool, guard, r.id).await? {
-                    anyhow::bail!("lease lost while reserving dotns name");
+                    return Err(WriterError::LeaseLost(Op::Landing));
                 }
                 record_submit_outcome(Self::NAME, "ok");
                 tracing::info!(id = r.id, username = %r.full_username, "dotns reserved on-chain");
@@ -246,7 +245,7 @@ impl Lane for Dotns {
                 let not_before = OffsetDateTime::now_utc() + backoff;
                 if !outbox::mark_dotns_retry(pool, guard, r.id, not_before, attempt, reason).await?
                 {
-                    anyhow::bail!("lease lost while scheduling dotns retry");
+                    return Err(WriterError::LeaseLost(Op::Retrying));
                 }
                 record_submit_outcome(Self::NAME, "retry");
                 tracing::warn!(
@@ -268,7 +267,7 @@ impl Lane for Dotns {
                 )
                 .await?
                 {
-                    anyhow::bail!("lease lost while parking a dotns reservation");
+                    return Err(WriterError::LeaseLost(Op::Parking));
                 }
                 record_submit_outcome(Self::NAME, "parked");
                 tracing::warn!(
@@ -289,13 +288,13 @@ impl Lane for Dotns {
                 if !outbox::mark_dotns_retry(pool, guard, r.id, until, r.dotns_attempt, reason)
                     .await?
                 {
-                    anyhow::bail!("lease lost while re-queueing a failed dotns batch");
+                    return Err(WriterError::LeaseLost(Op::Deferring));
                 }
                 observe_defer(Self::NAME, r, until, reason, cause);
             }
             Outcome::Failed(reason) => {
                 if !outbox::mark_dotns_failed(pool, guard, r.id, reason).await? {
-                    anyhow::bail!("lease lost while failing dotns reservation");
+                    return Err(WriterError::LeaseLost(Op::Failing));
                 }
                 record_submit_outcome(Self::NAME, "terminal");
                 tracing::warn!(
@@ -307,7 +306,7 @@ impl Lane for Dotns {
             }
             Outcome::Expired(reason) => {
                 if !outbox::mark_dotns_expired(pool, guard, r.id, reason).await? {
-                    anyhow::bail!("lease lost while expiring dotns reservation");
+                    return Err(WriterError::LeaseLost(Op::Expiring));
                 }
                 record_submit_outcome(Self::NAME, "terminal");
                 tracing::warn!(
@@ -339,10 +338,10 @@ async fn sign(
     Ok(tx_client.create_signed(&payload, cx.signer, params).await?)
 }
 
-async fn mark(cx: &Cx<'_>, r: &Reservation, tx_hash: &str) -> Result<()> {
+async fn mark(cx: &Cx<'_>, r: &Reservation, tx_hash: &str) -> Result<(), WriterError> {
     if !outbox::mark_dotns_submitting(cx.pool, cx.guard, r.id, tx_hash, r.dotns_attempt + 1).await?
     {
-        anyhow::bail!("lease lost before dotns submit");
+        return Err(WriterError::LeaseLost(Op::Submitting));
     }
     Ok(())
 }
