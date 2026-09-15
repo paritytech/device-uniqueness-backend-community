@@ -97,7 +97,7 @@ aes-gcm = "0.10"
 aes-kw = { version = "0.2", features = ["std"] }
 # Temporary Google decodeIntegrityToken fallback (until the Play Console
 # self-managed key exchange lands): RS256 service-account assertion.
-jsonwebtoken = "9"
+jsonwebtoken = "11"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
