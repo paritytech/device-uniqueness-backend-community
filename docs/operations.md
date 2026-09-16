@@ -205,6 +205,37 @@ network, re-check all of them:
 None of these are things the software can provision. On a permissioned test
 network they are an ask of whoever operates it.
 
+## Choosing a network
+
+One source tree builds for three networks, selected at **build time** by
+`DUB_NETWORK`. It is not runtime configuration: an image or binary is built for
+one network and stays that network.
+
+| `DUB_NETWORK` | People runtime | Vendored metadata | invite-tickets |
+| --- | --- | --- | --- |
+| `previewnet` (default) | `next-people-paseo` | `metadata.previewnet.scale` | yes |
+| `paseo` (paseo-next-v2) | `next-people-paseo` | `metadata.paseo.scale` | yes |
+| `polkadot` (polkadot-test) | `people-polkadot` | `metadata.polkadot.scale` | no — the runtime has no `Game` / `ProofOfInk` |
+
+- **Build**: compose passes `DUB_NETWORK` from `.env` as a build arg;
+  `DUB_NETWORK=polkadot docker buildx bake all` for bake; the shell variable
+  for `cargo`. Tag images for different networks differently — the default tag
+  is the same `local` for all three.
+- **Run**: set `COMPOSE_PROFILES=invite-tickets` on `previewnet` / `paseo` to
+  start the three invite-tickets services. Leave it empty on `polkadot`: that
+  image rejects both roles. `dub --help` prints the network a binary was built
+  for.
+- **Endpoints go with the network.** `PEOPLE_RPC_URL` / `ASSET_HUB_RPC_URL` must
+  name the same network the image was built for; `.env.example` lists each
+  network's pair. A mismatch shows up at boot as `live runtime and the vendored
+  metadata disagree`, with `network` and `vendored_metadata` fields.
+- **Edge**: the route table is the same everywhere. An environment with no
+  `invite-tickets-api` points `INVITE_TICKETS_UPSTREAM` at its own
+  `device-attestation-api`, so the claim path answers a JSON 404 instead of a 502.
+- **Checks**: `DUB_NETWORK=<network> just check` gates that network's build. CI
+  runs the offline gate once per network. `just openapi` needs a network with
+  invite-tickets, because the committed API reference documents every surface.
+
 ## Choosing a topology
 
 The backend deploys in one of two shapes. They serve an **identical** public API;
@@ -567,7 +598,7 @@ you expect.
 | `QUEUED` rows draining with the advancer down, or stranded-queue warnings while intake goes direct | `QUEUE_ENABLED` is split between api and writer. Writer off + api on = the janitor silently drains a queue the api is still filling, and the throttle is gone. Writer on + api off = warnings about leftovers no new claim joins. The values must match; `scripts/verify_compose_boundaries.sh` pins both. |
 | Rows stuck in `RETRY_AFTER` with wasm-trap errors | Invalid payload for `PeopleLite.attest`, or attester/proxy authorization missing on-chain. |
 | At boot: `live runtime and the vendored metadata disagree` | The chain was upgraded under the vendored blob. Harmless on its own — most upgrades change nothing this workspace signs — but it is the early warning for the row below, which is the same drift seen minutes to days later as a failed write or a silent invite-ticket pool. Every connection also logs `connected to the chain` with the live `spec_version` / `transaction_version`, on People and Asset Hub alike. |
-| `The extrinsic payload is not compatible with the live chain` | The runtime changed shape under the vendored metadata. Refresh `crates/chain-types/metadata/people.scale` with the `subxt metadata` command in the `chain-types` crate docs, `subxt diff` the blobs to see what moved, then rebuild. |
+| `The extrinsic payload is not compatible with the live chain` | The runtime changed shape under the vendored metadata. Refresh `crates/chain-types/metadata/metadata.<network>.scale` (the one this build's `DUB_NETWORK` names — the boot warning logs it as `vendored_metadata`) with the `subxt metadata` command in the `chain-types` crate docs, `subxt diff` the blobs to see what moved, then rebuild. |
 | Every extrinsic failing with `Transaction has a bad signature`, nonce back at 0 | The chain was reset: the process still holds the old genesis hash, captured when its client connected. **Restart the service** — reconnecting alone does not re-read it. Then re-check the [chain prerequisites](#chain-prerequisites). |
 | Writer exits at boot | Bad `CHAIN_WRITER_SIGNER_SURI`, or Postgres unreachable. |
 | `device-attestation-api` never healthy | It blocks on the People Chain RPC at startup. Check connectivity to `PEOPLE_RPC_URL`. |

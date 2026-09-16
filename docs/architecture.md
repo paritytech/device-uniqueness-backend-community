@@ -370,8 +370,15 @@ Operational invariants an agent must respect when touching the code.
   configures it separately. Both pallets see that same account as the attester — under
   `Proxy.proxy(real = P)`, `P` is what `GET /api/v1/attester` returns, on People and Asset Hub
   alike.
+- **The target network is a build input.** `DUB_NETWORK` (`polkadot`, `previewnet` — the
+  default — or `paseo`) is read by `crates/chain-types/build.rs`, which every crate that compiles
+  differently per network shares. It picks the vendored blob the People types are generated from,
+  and it decides whether invite-tickets exists: `polkadot`'s runtime has no `Game` or
+  `ProofOfInk`, so there the crate compiles to nothing and `dub` has no invite-tickets roles. The
+  signing path, the transaction-extension tuples and the edge route table are the same on every
+  network (the tuples are the union of every known runtime's extensions).
 - **`chain-types` is the only place chain types live.** Static codegen from vendored metadata at
-  `crates/chain-types/metadata/people.scale`; online transport + signing live in
+  `crates/chain-types/metadata/metadata.<network>.scale`; online transport + signing live in
   `device-attestation::chain`, never in `chain-types`. Regenerate with the `subxt metadata …` command
   at the top of `crates/chain-types/src/lib.rs`. It holds one subxt config per chain family,
   `PeopleConfig` and `AssetHubConfig`. Their transaction-extension sets differ, and a merged

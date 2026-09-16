@@ -110,6 +110,13 @@ For anything past that you need, on whichever network you target:
 - a **funded signing key** authorized as that account's `Any`/delay-0 proxy,
 - for invites, an inviter account holding `AvailableInvites` quota.
 
+The binary is **built for one network**: `DUB_NETWORK` is `previewnet` (the
+default), `paseo` or `polkadot` (polkadot-test). It picks the vendored People
+metadata and, on `polkadot` — whose runtime has no `Game` / `ProofOfInk` —
+leaves the invite-tickets services out. Set it in `.env` before building, together
+with `COMPOSE_PROFILES` and the RPC endpoints; see
+[Choosing a network](docs/operations.md#choosing-a-network).
+
 Paseo's People Chain is
 `wss://paseo-people-next-system-rpc.polkadot.io` — point `ASSET_HUB_RPC_URL` at
 an Asset Hub on the same network running the `signed_at` `reserve_name`. The

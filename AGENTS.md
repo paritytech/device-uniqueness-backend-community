@@ -46,7 +46,11 @@ Twelve crates today (plans may add more independently-deployable service crates)
   are mutually exclusive and the compose file here runs the standard one —
   `docs/architecture.md` "Deployment topologies" has the threat model,
   `docs/operations.md` "Choosing a topology" the operator view.
-- `chain-types` — generated People Chain type surface (subxt codegen).
+- `chain-types` — generated People Chain type surface (subxt codegen), from the vendored
+  `metadata/metadata.<network>.scale` that `DUB_NETWORK` selects. Its `build.rs` is **the** network
+  switch: `invite-tickets`, `dub` and `apidoc-gen` name it as their own `build =` script, and it
+  emits `cfg(dub_network = "…")` plus `cfg(invite_tickets)` (every network but `polkadot`). Gate
+  network-specific code on those cfgs; never read `DUB_NETWORK` at runtime.
 - `chain-client` — reconnecting People Chain connection + the chain-writer signing key (`WriterSigner`); product-agnostic transport shared by the services.
 - `jwt-verify` — the cross-service auth contract: JWKS parsing, Ed25519 signing and verification, claims. It holds **both** halves, but only `device-attestation` is given `JWT_ED25519_SECRET`, so it is the only process that can construct the issuer; every other service builds a verifier from public key material alone. (The crate name predates the issuer moving in.)
 - `http-common` — shared axum primitives: the one JSON error envelope every service renders (`{error}`, plus a `fields` array of `{field, message}` on per-field validation failures), the JWT extractor, rate limiter, health, middleware stack, and fail-fast env helpers; consumed by invite-tickets. Also holds the two things **every** process installs: the metrics exporter (`metrics::spawn`) and the log subscriber (`telemetry::init`).
@@ -63,6 +67,9 @@ Each service's boundary, persistence, endpoints, and data-flow invariants are in
 ## Commands
 
 - `just check` — the fast offline gate: fmt `--check` + `clippy -D warnings` + `cargo test --workspace`.
+  It checks **one** network build (`DUB_NETWORK`, default `previewnet`). CI runs it for all three, so
+  run `DUB_NETWORK=polkadot just check` too when touching anything invite-tickets or
+  chain-types.
 - `just test-live-db` (also `just test-live`) — the deterministic Postgres gate: 13 suites / 28 ignored tests against a per-run isolated Compose project. CI runs it after `just check`; run both before declaring done.
 - `just test-live-chain` — optional Postgres + live People Chain suites; external RPC availability keeps it outside the merge/release gate.
 - `just test-live-providers` — optional credentialed APNs/FCM smokes; runs only the providers configured in the environment and fails if neither is configured.
