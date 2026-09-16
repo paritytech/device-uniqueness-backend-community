@@ -218,6 +218,124 @@ longer passes).
 
 Migrations run automatically on boot. Never run them by hand.
 
+## Running the released binaries, without Docker
+
+Everything above is Compose. The release also publishes the bare `dub` binary,
+and systemd is a fine way to run it — but Compose was doing three things for you
+that now become your job: it supplied Postgres, it gave every role its own
+network namespace, and it handed each process only the variables that role is
+allowed to see. Re-read [Secret boundaries](#secret-boundaries) first: **nothing
+below enforces them**, so a flat environment shared by every unit puts
+`JWT_ED25519_SECRET` in the same process as public search.
+
+**1. Take the tarball for your network.** Assets are
+`dub-<version>-<network>-<target>.tar.gz` — the network is in the name because
+the two binaries differ (see [Choosing a network](#choosing-a-network)).
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing
+tar xzf dub-<version>-testnet-x86_64-unknown-linux-gnu.tar.gz
+sudo install -m 0755 \
+  dub-<version>-testnet-x86_64-unknown-linux-gnu/dub /usr/local/bin/dub
+
+dub --help          # the network this binary was built for — check it matches your RPC
+dub --list-roles    # eight roles on testnet, six on polkadot
+```
+
+**2. Provide Postgres yourself.** Each database belongs to one service: create
+the roles and databases named in the `*_DATABASE_URL` defaults in
+`.env.example` — `device_attestation` and `username_indexer`, plus
+`invite_tickets` on a `testnet` build. Migrations still run automatically on
+first boot, advisory-locked; never run them by hand.
+
+**3. Load the environment — `dub` does not read `.env`.** This is the one that
+bites: Compose reads that file, the binary does not. It reads real environment
+variables only, and a required one that is missing aborts startup. So either
+source it into the shell, or let systemd do it:
+
+```bash
+sudo install -d -m 0750 /etc/dub
+sudo install -m 0640 .env.example /etc/dub/env    # then edit it as step 2 describes
+```
+
+**4. Give every role its own ports.** Under Compose each container had its own
+namespace, so all of them could use `0.0.0.0:8080` and `0.0.0.0:9090`. On one
+host the second process to start simply fails to bind. Assign a pair per role —
+this scheme matches the debug overlay, so the doc's other `curl` examples still
+apply:
+
+| Role | `BIND_ADDR` | `METRICS_ADDR` |
+| --- | --- | --- |
+| `device-attestation-api` | `127.0.0.1:8080` | `127.0.0.1:9090` |
+| `username-indexer` | `127.0.0.1:8081` | `127.0.0.1:9091` |
+| `invite-tickets-api` (`testnet`) | `127.0.0.1:8083` | `127.0.0.1:9093` |
+| `turn-api` | `127.0.0.1:8084` | `127.0.0.1:9094` |
+| `notify-relay` | `127.0.0.1:8085` | `127.0.0.1:9095` |
+| `device-attestation-chain-writer` | — (no HTTP) | `127.0.0.1:9096` |
+| `registration-queue` | — | `127.0.0.1:9097` |
+| `invite-tickets-pool` (`testnet`) | — | `127.0.0.1:9098` |
+
+Bind to loopback and let a reverse proxy publish, exactly as the Compose
+deployment does — nothing but the edge should hold a public port.
+
+**5. One unit per role.** A single template unit takes the role as its instance
+name, so adding a role is `systemctl enable dub@<role>`:
+
+```ini
+# /etc/systemd/system/dub@.service
+[Unit]
+Description=Device Uniqueness Backend — %i
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/dub --role %i
+EnvironmentFile=/etc/dub/env
+EnvironmentFile=-/etc/dub/%i.env      # per-role overrides: ports, and the
+                                      # secrets only this role may see
+User=dub
+Restart=always
+RestartSec=5s
+# LOG_FORMAT defaults to text in the binary; set json here if you ship logs.
+Environment=LOG_FORMAT=json
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The per-role file is where the secret boundaries are rebuilt by hand: keep
+`JWT_ED25519_SECRET` in `device-attestation-api.env` and nowhere else, the
+writer's SURI in `device-attestation-chain-writer.env`, `TURN_SECRET` in
+`turn-api.env`, and give every other role the verify-only
+`JWT_ED25519_PUBLIC_KEY` instead. The `environment:` block of each service in
+[`docker-compose.yml`](../docker-compose.yml) is the authoritative list of what
+that role should receive.
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now dub@device-attestation-api dub@username-indexer \
+  dub@turn-api dub@notify-relay \
+  dub@device-attestation-chain-writer dub@registration-queue
+```
+
+**The singleton rules still apply, and nothing enforces them here.** Exactly one
+`device-attestation-chain-writer` and one `registration-queue` across the whole
+deployment (one `invite-tickets-pool` too, on `testnet`) — the Postgres lease is
+a deploy-overlap guard, not a licence to run two.
+
+**6. Front it yourself.** No edge comes with the binaries. Run Caddy against the
+committed [`gateway/Caddyfile`](../gateway/Caddyfile) — the route table is
+generated and stays correct — or map the same ownership into whatever proxy you
+already run. `https://<domain>/docs` is served from `docs/api-reference/` in a
+checkout; without one, drop that route or serve the directory from the release.
+
+Health probes work the same as in a container: `dub --healthcheck` GETs this
+process's own `/readyz` on its `BIND_ADDR` port, and `--url` points it anywhere.
+
+```bash
+dub --healthcheck --url http://127.0.0.1:8081/readyz
+```
+
 ## 4. Verify
 
 ```bash
