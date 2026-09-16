@@ -29,7 +29,11 @@ use subxt::{
 const V4_EXTENSION_VERSION: u8 = 0;
 
 /// Build and sign a v4 extrinsic for `call` against the block `at` is pinned
-/// to, encoding the version-0 transaction extensions
+/// to, encoding the version-0 transaction extensions.
+///
+/// Like `create_signed`, it first checks `call` against the live metadata, so a
+/// call whose shape changed since the vendored metadata fails here with
+/// `IncompatibleCodegen` instead of being signed and submitted.
 pub async fn create_signed_v4<T, Call, S>(
     at: &ClientAtBlock<T, OnlineClientAtBlockImpl<T>>,
     call: &Call,
@@ -42,6 +46,7 @@ where
     S: Signer<T>,
 {
     let transactions = at.transactions();
+    transactions.validate(call)?;
     let account = signer.account_id();
 
     params.inject_account_nonce(transactions.account_nonce(&account).await?);

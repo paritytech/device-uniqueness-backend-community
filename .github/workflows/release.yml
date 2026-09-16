@@ -217,7 +217,23 @@ jobs:
 
             out="bundle/$network"
             mkdir -p "$out/gateway"
-            cp gateway/Caddyfile gateway/docker-compose.yml "$out/gateway/"
+            cp gateway/docker-compose.yml "$out/gateway/"
+            # The polkadot stack runs no invite-tickets-api, so the claim path
+            # must default to this environment's device-attestation-api (a JSON
+            # 404), not the absent invite-tickets-api (a 502). It is the
+            # Caddyfile default that changes: the edge is its own compose
+            # project under gateway/, so it never reads the bundle's .env.
+            case "$network" in
+              polkadot)
+                sed -e 's|{\$INVITE_TICKETS_UPSTREAM:invite-tickets-api-paseo-next-v2:8080}|{$INVITE_TICKETS_UPSTREAM:device-attestation-api-paseo-next-v2:8080}|' \
+                    gateway/Caddyfile > "$out/gateway/Caddyfile"
+                if grep -q 'invite-tickets-api-' "$out/gateway/Caddyfile"; then
+                  echo '::error::the polkadot bundle'"'"'s Caddyfile still routes to an invite-tickets-api it does not run'
+                  exit 1
+                fi
+                ;;
+              *) cp gateway/Caddyfile "$out/gateway/" ;;
+            esac
 
             # The bundled .env.example names this bundle's network, so
             # `cp .env.example .env && docker compose up -d` is correct as-is.
