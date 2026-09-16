@@ -205,14 +205,24 @@ jobs:
           PINNED_TESTNET: ${{ steps.image.outputs.pinned_testnet }}
           PINNED_POLKADOT: ${{ steps.image.outputs.pinned_polkadot }}
         run: |
-          # One bundle per network. They differ in three places: the image tag
-          # they pin, DUB_NETWORK, and COMPOSE_PROFILES — `polkadot` has no
+          # One bundle per network. They differ in four places: the image tag
+          # they pin, DUB_NETWORK, COMPOSE_PROFILES — `polkadot` has no
           # invite-tickets roles, so starting that profile against its image
-          # would crash-loop three services.
+          # would crash-loop three services — and the chain endpoints. The
+          # testnet bundle keeps the repository's previewnet defaults; the
+          # polkadot one must point at polkadot-test, or its binary signs
+          # against a runtime whose metadata it was not built for.
           for network in testnet polkadot; do
             case "$network" in
-              testnet)  pinned="$PINNED_TESTNET";  profiles='invite-tickets' ;;
-              polkadot) pinned="$PINNED_POLKADOT"; profiles='' ;;
+              testnet)
+                pinned="$PINNED_TESTNET"; profiles='invite-tickets'
+                people_rpc=''; asset_hub_rpc=''
+                ;;
+              polkadot)
+                pinned="$PINNED_POLKADOT"; profiles=''
+                people_rpc='wss://polkadot-test.substrate.dev/people'
+                asset_hub_rpc='wss://polkadot-test.substrate.dev/asset-hub'
+                ;;
             esac
 
             out="bundle/$network"
@@ -237,13 +247,24 @@ jobs:
 
             # The bundled .env.example names this bundle's network, so
             # `cp .env.example .env && docker compose up -d` is correct as-is.
+            endpoints=()
+            if [ -n "$people_rpc" ]; then
+              endpoints+=(-e "s|^PEOPLE_RPC_URL=.*|PEOPLE_RPC_URL=$people_rpc|")
+              endpoints+=(-e "s|^ASSET_HUB_RPC_URL=.*|ASSET_HUB_RPC_URL=$asset_hub_rpc|")
+            fi
             sed -e "s|^DUB_NETWORK=.*|DUB_NETWORK=$network|" \
                 -e "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=$profiles|" \
+                "${endpoints[@]}" \
                 .env.example > "$out/.env.example"
             grep -qE "^DUB_NETWORK=$network\$" "$out/.env.example" ||
               { echo "::error::the $network bundle's .env.example does not name its network"; exit 1; }
             grep -qE "^COMPOSE_PROFILES=$profiles\$" "$out/.env.example" ||
               { echo "::error::the $network bundle's .env.example has the wrong COMPOSE_PROFILES"; exit 1; }
+            if [ -n "$people_rpc" ]; then
+              grep -qxF "PEOPLE_RPC_URL=$people_rpc" "$out/.env.example" &&
+                grep -qxF "ASSET_HUB_RPC_URL=$asset_hub_rpc" "$out/.env.example" ||
+                { echo "::error::the $network bundle's .env.example does not point at its chain"; exit 1; }
+            fi
 
             if [ -n "$pinned" ]; then
               # Every service names the same image, so pinning is two
