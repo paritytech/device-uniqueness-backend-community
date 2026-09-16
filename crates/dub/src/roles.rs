@@ -20,8 +20,8 @@ pub mod username_indexer;
 /// gate compares the compose services and chart workloads against that output
 /// rather than against a second hand-written list.
 ///
-/// The invite-tickets roles are compiled in only where the People runtime
-/// has `Game` and `ProofOfInk` .
+/// The invite-tickets roles are compiled in only where the People runtime has
+/// `Game` and `ProofOfInk`: `DUB_NETWORK=testnet`, but not `polkadot`.
 pub const ROLES: &[&str] = &[
     "device-attestation-api",
     "username-indexer",
@@ -35,6 +35,9 @@ pub const ROLES: &[&str] = &[
     "invite-tickets-pool",
 ];
 
+/// The invite-tickets roles, whether or not this build includes them. The edge
+/// route table is shared by every network, so it names them even where they are
+/// not deployed.
 pub const INVITE_TICKETS_ROLES: &[&str] = &["invite-tickets-api", "invite-tickets-pool"];
 
 /// The roles that make up the **small** topology's HTTP tier: one merged

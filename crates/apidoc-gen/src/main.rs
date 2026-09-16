@@ -7,7 +7,7 @@ fn main() -> anyhow::Result<()> {
     if !cfg!(invite_tickets) {
         anyhow::bail!(
             "DUB_NETWORK={} has no invite-tickets surface; regenerate the API reference \
-             from a network that does (e.g. DUB_NETWORK=previewnet just openapi)",
+             from a network that does (e.g. DUB_NETWORK=testnet just openapi)",
             env!("DUB_NETWORK")
         );
     }

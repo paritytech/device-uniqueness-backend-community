@@ -4,27 +4,23 @@
 //! Generated People Chain types for the network this build targets.
 //!
 //! The network is chosen at **build time** by `DUB_NETWORK` (see `build.rs`):
-//! `polkadot`, `previewnet` (the default) or `paseo`. Each has its own
-//! vendored blob, `metadata/metadata.<network>.scale`. Refresh one with:
+//! `testnet` (the default — previewnet and paseo-next-v2, one runtime) or
+//! `polkadot` (polkadot-test). Each has its own vendored blob,
+//! `metadata/metadata.<network>.scale`. Refresh one with:
 //! `subxt metadata --url <people-rpc> --pallets <pallets> -f bytes -o crates/chain-types/metadata/metadata.<network>.scale`
 //! where `<pallets>` is `System,Balances,Utility,Proxy,People,PeopleLite,Resources,Members`,
-//! plus `Game,ProofOfInk` on every network but `polkadot`, whose runtime
-//! dropped them.
+//! plus `Game,ProofOfInk` on `testnet`; the `polkadot` runtime dropped them.
 
 use subxt::config::transaction_extensions as tx_ext;
 
 #[allow(clippy::all, missing_docs, rustdoc::all)]
 #[cfg_attr(
+    dub_network = "testnet",
+    subxt::subxt(runtime_metadata_path = "metadata/metadata.testnet.scale")
+)]
+#[cfg_attr(
     dub_network = "polkadot",
     subxt::subxt(runtime_metadata_path = "metadata/metadata.polkadot.scale")
-)]
-#[cfg_attr(
-    dub_network = "previewnet",
-    subxt::subxt(runtime_metadata_path = "metadata/metadata.previewnet.scale")
-)]
-#[cfg_attr(
-    dub_network = "paseo",
-    subxt::subxt(runtime_metadata_path = "metadata/metadata.paseo.scale")
 )]
 pub mod people {}
 
@@ -501,8 +497,9 @@ mod tests {
         "StorageWeightReclaim",
     ];
 
-    /// What polkadot hub 2005000 declares, in
-    /// order (extension version 1). 
+    /// What `statemint` 2005000 (the polkadot-test Asset Hub) declares, in
+    /// order (extension version 1). New against the Paseo Asset Hubs:
+    /// `VerifyMultiSignature` and `PrevalidateAttests`; `AsScarcity` is gone.
     const ASSET_HUB_POLKADOT_2005000_EXTENSIONS: &[&str] = &[
         "UnitTransactionExtension",
         "VerifyMultiSignature",
