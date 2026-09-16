@@ -82,6 +82,9 @@ pub const TABLE: &[Row] = &[
             "carve-out; this is why the Traefik emitter renders an IngressRoute rather than an Ingress.",
         ],
     },
+    // Kept on every network: the edge config is shared, and a build without
+    // invite-tickets serves the catch-all 404 here. A deployment that runs no
+    // invite-tickets-api points this upstream at its device-attestation-api.
     Row {
         name: "invite-tickets",
         owner: "invite-tickets-api",
@@ -281,7 +284,9 @@ mod tests {
     fn every_owner_is_a_real_target() {
         for row in TABLE {
             assert!(
-                crate::roles::ROLES.contains(&row.owner) || row.owner == "api-docs",
+                crate::roles::ROLES.contains(&row.owner)
+                    || crate::roles::INVITE_TICKETS_ROLES.contains(&row.owner)
+                    || row.owner == "api-docs",
                 "route {} names unknown owner {}",
                 row.name,
                 row.owner
