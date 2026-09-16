@@ -127,6 +127,10 @@ them apart — and differ only in how many processes hold how many secrets.
 
 ### Standard: eight workloads (the default)
 
+> Counts here are a `testnet` build. A `polkadot` build has no invite-tickets,
+> so it runs six workloads and two singleton workers; everything else is
+> identical. See [Choosing a network](operations.md#choosing-a-network).
+
 Five HTTP services and three single-instance workers, each its own process with its own environment.
 This is what the committed `docker-compose.yml` runs, and it is the recommended shape.
 

@@ -6,8 +6,8 @@ system *is* and why it is shaped this way, read
 
 Everything here is Docker Compose. There is no orchestrator-specific tooling in
 this repository — if you deploy to Kubernetes or anything else, the compose file
-is the configuration contract to port: the same image, the same eight `--role`
-arguments, the same environment allowlists.
+is the configuration contract to port: the same image, the same `--role`
+arguments (`dub --list-roles` prints them), the same environment allowlists.
 
 **Two compose projects share a host.** The services live in an *environment*
 project started from [`docker-compose.yml`](../docker-compose.yml); the public
@@ -41,11 +41,15 @@ none.
 Worth understanding before you write a `.env`, because the compose file enforces
 it and a "simplification" here is a real downgrade:
 
-- The JWT **signing** seed lives only in `device-attestation-api`.
-  `invite-tickets-api`, `turn-api`, `notify-relay` and `username-indexer` (for
-  the proof-of-compute bypass) get the **public** key (or JWKS) only.
+- The JWT **signing** seed lives only in `device-attestation-api`. `turn-api`,
+  `notify-relay`, `username-indexer` (for the proof-of-compute bypass) and
+  `invite-tickets-api` where it runs get the **public** key (or JWKS) only.
 - Each chain-submitting worker holds only its own signing secret: the invite
   inviter SURI lives only in `invite-tickets-pool`.
+
+> The `invite-tickets` services exist only on a `testnet` build — see
+> [Choosing a network](#choosing-a-network). On `polkadot`, ignore every mention
+> of them here; that image has no such roles.
 - `turn-api` additionally holds `TURN_SECRET`, the HMAC key shared with the TURN
   relay (coturn `--use-auth-secret`). Relay and issuer rotate together, and no
   other service sees it.
@@ -57,11 +61,12 @@ key. `scripts/verify_compose_boundaries.sh` asserts this, and runs in CI.
 
 ### Nonce lanes
 
-`invite-tickets-pool` submits as "an inviter" and
-`device-attestation-chain-writer` as the attester authority. **No two submitters
-may sign as the same account** — two independent submitters on one account race
-nonces. Give each its own account; separate proxy delegates of one cold primary
-works well.
+`device-attestation-chain-writer` submits as the attester authority, and on a
+`testnet` build `invite-tickets-pool` also submits, as "an inviter". **No two
+submitters may sign as the same account** — two independent submitters on one
+account race nonces. Give each its own account; separate proxy delegates of one
+cold primary works well. (On `polkadot` there is one submitter, so this is one
+account.)
 
 ---
 
@@ -105,6 +110,8 @@ The values you must decide, at minimum:
 
 | Variable | What it is |
 | --- | --- |
+| `DUB_NETWORK` | Which People runtime this build targets — `testnet` or `polkadot`. **Read when the image is built, not when it runs**; see [Choosing a network](#choosing-a-network) directly below. |
+| `COMPOSE_PROFILES` | `invite-tickets` on `testnet`; **empty** on `polkadot`, whose image has no such roles. |
 | `ENV_ID` | This environment's name; suffixes every network alias. |
 | `PEOPLE_RPC_URL` | People Chain RPC. Must be a **full** node serving the legacy `state_queryStorageAt` — see the availability failure mode below. |
 | `ASSET_HUB_RPC_URL` | Asset Hub RPC. **Required.** Same `state_queryStorageAt` requirement. **Must name the same network as `PEOPLE_RPC_URL`** — a split pair claims labels on the wrong chain, unrecoverably. |
@@ -112,7 +119,7 @@ The values you must decide, at minimum:
 | `CHAIN_WRITER_SIGNER_SURI` | The writer's signing key; must be an authorized attester or its proxy, and funded. |
 | `JWT_ED25519_SECRET` | 32 bytes. `device-attestation-api` only. |
 | `JWT_ED25519_PUBLIC_KEY` or `JWT_JWKS_JSON` | The verify-only half, for the other services. |
-| `INVITE_INVITER_SIGNER_SURI` | The invite pool's own account — **not** the writer's. |
+| `INVITE_INVITER_SIGNER_SURI` | `testnet` only: the invite pool's own account — **not** the writer's. Unused on `polkadot`. |
 | `TURN_SECRET` | Shared with your coturn relay; must match it exactly. |
 
 The defaults in `.env.example` point at a public test network
@@ -120,13 +127,64 @@ The defaults in `.env.example` point at a public test network
 `//Bob`). They exist so `docker compose up` works on a laptop. **Replace every
 one of them before a deployment anyone else can reach.**
 
+### Choosing a network
+
+**Decide this before you build.** One source tree builds for two People
+runtimes, selected by `DUB_NETWORK`. It is a *build* input, not runtime
+configuration: an image or binary is built for one runtime and stays that
+runtime, and changing it means rebuilding.
+
+| `DUB_NETWORK` | People runtime | Deployments | Vendored metadata | invite-tickets |
+| --- | --- | --- | --- | --- |
+| `testnet` (default) | `next-people-paseo` | previewnet, paseo-next-v2 | `metadata.testnet.scale` | yes |
+| `polkadot` | `people-polkadot` | polkadot-test | `metadata.polkadot.scale` | no — the runtime has no `Game` / `ProofOfInk` |
+
+previewnet and paseo-next-v2 are **one** build: same runtime, same metadata.
+What separates them is `ENV_ID` and their endpoints. Split the flag again only
+if their runtimes diverge.
+
+- **Build — the one trap worth reading twice.** `docker compose build` reads
+  `DUB_NETWORK` from `.env` and is correct with nothing else set. **`docker
+  buildx bake` does not read `.env`**: it takes the shell environment and
+  otherwise falls back to `testnet`, so building with bake after editing only
+  `.env` gives you a `testnet` image whatever the file says. Export it, and keep
+  it across `sudo`:
+
+  ```bash
+  export DUB_NETWORK=polkadot          # or testnet
+  sudo -E docker buildx bake all       # -E preserves the variable
+  ```
+
+  Tag images for different networks differently — the default tag is `local` for
+  both. `dub --help` prints the network a binary was built for, which is how you
+  check an image you did not build yourself.
+- **Run**: keep `COMPOSE_PROFILES=invite-tickets` on `testnet` to start the
+  three invite-tickets services. Leave it empty on `polkadot`: that image
+  rejects both roles, and those containers would crash-loop.
+- **Endpoints go with the network.** `PEOPLE_RPC_URL` / `ASSET_HUB_RPC_URL` must
+  name the same network the image was built for; `.env.example` lists each
+  network's pair. A mismatch shows up at boot as `live runtime and the vendored
+  metadata disagree`, with `network` and `vendored_metadata` fields.
+- **Edge**: the route table is the same everywhere. An environment with no
+  `invite-tickets-api` points `INVITE_TICKETS_UPSTREAM` at its own
+  `device-attestation-api`, so the claim path answers a JSON 404 instead of a 502.
+- **Building from source yourself**: `DUB_NETWORK=<network> just check` gates
+  that network's build, and CI runs the offline gate once per network. `just
+  openapi` needs a `testnet` build, because the committed API reference
+  documents every surface.
+
 ## 3. Run
 
 ```bash
 # the service image — one cargo build, one runtime stage (several minutes the
 # first time). `bake` is the only builder: compose's `build.target` keys exist
 # so `docker compose build` works too, but bake shares the compile.
-sudo docker buildx bake all
+#
+# bake does NOT read .env, so the network comes from the shell here — without
+# these two lines you get a testnet image whatever .env says. See
+# "Choosing a network" above.
+export DUB_NETWORK=testnet           # or polkadot; must match .env
+sudo -E docker buildx bake all
 
 # the environment (migrations run on boot, advisory-locked)
 sudo docker compose up -d --no-build
@@ -201,44 +259,11 @@ network, re-check all of them:
 - The authority holds an **attestation allowance** (`dub_attester_allowance`).
 - The writer's signing account is **funded** on both chains it submits to
   (`dub_account_free_balance_planck{role="signer",chain=…}`).
-- The invite inviter account holds `AvailableInvites` quota, or claims return
-  `422 Pool exhausted`.
+- **`testnet` builds only:** the invite inviter account holds `AvailableInvites`
+  quota, or claims return `422 Pool exhausted`.
 
 None of these are things the software can provision. On a permissioned test
 network they are an ask of whoever operates it.
-
-## Choosing a network
-
-One source tree builds for two People runtimes, selected at **build time** by
-`DUB_NETWORK`. It is not runtime configuration: an image or binary is built for
-one runtime and stays that runtime.
-
-| `DUB_NETWORK` | People runtime | Deployments | Vendored metadata | invite-tickets |
-| --- | --- | --- | --- | --- |
-| `testnet` (default) | `next-people-paseo` | previewnet, paseo-next-v2 | `metadata.testnet.scale` | yes |
-| `polkadot` | `people-polkadot` | polkadot-test | `metadata.polkadot.scale` | no — the runtime has no `Game` / `ProofOfInk` |
-
-previewnet and paseo-next-v2 are **one** build: same runtime, same metadata.
-What separates them is `ENV_ID` and their endpoints. Split the flag again only
-if their runtimes diverge.
-
-- **Build**: compose passes `DUB_NETWORK` from `.env` as a build arg;
-  `DUB_NETWORK=polkadot docker buildx bake all` for bake; the shell variable
-  for `cargo`. Tag images for different networks differently — the default tag
-  is the same `local` for both.
-- **Run**: keep `COMPOSE_PROFILES=invite-tickets` on `testnet` to start the
-  three invite-tickets services. Leave it empty on `polkadot`: that image
-  rejects both roles. `dub --help` prints the network a binary was built for.
-- **Endpoints go with the network.** `PEOPLE_RPC_URL` / `ASSET_HUB_RPC_URL` must
-  name the same network the image was built for; `.env.example` lists each
-  network's pair. A mismatch shows up at boot as `live runtime and the vendored
-  metadata disagree`, with `network` and `vendored_metadata` fields.
-- **Edge**: the route table is the same everywhere. An environment with no
-  `invite-tickets-api` points `INVITE_TICKETS_UPSTREAM` at its own
-  `device-attestation-api`, so the claim path answers a JSON 404 instead of a 502.
-- **Checks**: `DUB_NETWORK=<network> just check` gates that network's build. CI
-  runs the offline gate once per network. `just openapi` needs a network with
-  invite-tickets, because the committed API reference documents every surface.
 
 ## Choosing a topology
 
@@ -250,9 +275,9 @@ choosing, not after.
 
 | | standard | small |
 |---|---|---|
-| workloads | 8 | 4 |
+| workloads | 8, or 6 on `polkadot` | 4, or 3 on `polkadot` |
 | HTTP tier | one service per surface | one `all-in-one` process |
-| workers | three singletons | the same three |
+| workers | three singletons (two on `polkadot`) | the same ones |
 | `JWT_ED25519_SECRET` reaches | `device-attestation-api` only | the process that also serves public search |
 | `/readyz` on a dead dependency | that service leaves rotation | reports `degraded`, stays in rotation |
 
@@ -596,8 +621,9 @@ you expect.
 | Writer: `submission deferred …; the signer's nonce was already consumed on chain` | The node refused the signed nonce as `Transaction is outdated`: it is below the signer's current nonce. The writer reads its nonce with `system_accountNextIndex` (best block plus our pool transactions), so an occasional one after a reconnect or finalize timeout is expected; rows wait 6s at an unchanged `attempt` and re-read. A steady stream means **something else is signing from the writer's account** on that chain (another deployment or a manual script) — find and stop it; the writer cannot out-race it. |
 | Writer: `rejected deterministically, not retried` in `last_error` | Another submission would buy the same answer, so the row fails on the first pass instead of paying `CHAIN_WRITER_MAX_ATTEMPTS` fees. All three causes are the row's `reserved_username` (the personhood name) leg, which `attest` checks **before** it writes the lite username: `Resources::UsernameReservationTaken` (that name is owned by someone else), `Resources::QueueFull` (its reservation queue is at `MaxReservationQueueLength`, 10 on next-people-paseo), `Resources::AlreadyHasReservation` (the candidate already reserved another name). Intake refuses these claims with a `409` before a row exists, so a row that reaches here raced that check — a queue that filled in between. The writer **cannot** resubmit without the reservation: the consumer signature covers `reserved_username`, so only the client can re-sign. The client must re-register for another `dotns.reservedUsername` — dropping the reservation leg is not an option any client implements. Note `QueueFull` is not immutable in principle — entries expire and `remove_expired_username_reservation` is permissionless — but nothing drains within the seconds the backoff spans. The lite username is unaffected only if `status` is `ASSIGNED`; if it is `FAILED_TERMINAL` the discriminator that row holds stays consumed until the row is deleted. |
 | Availability checks failing while `readyz` is green | The endpoint does not serve the legacy `state_queryStorageAt` method (a trimmed or `chainHead`-only RPC or proxy). Availability reads all 100 `{base}.{NN}` keys in one such request, and the writer resolves `UsernameOwnerOf` (People) and `LiteLabelOwner` (Asset Hub) for a whole claimed set the same way, so writer passes fail wholesale too — but `readyz` only probes it on People, so readiness can stay green. Repoint `PEOPLE_RPC_URL` (and `ASSET_HUB_RPC_URL`) at a full node. A response that is incomplete, doubled, or for another block also fails closed by design — never as "available". |
-| Claims returning `422 Pool exhausted` | The ticket pool drained. Check `invite-tickets-pool` logs: `ticket batch finalized … registered=0` means the inviter is out of `AvailableInvites` quota or unauthorized; `pool tick failed` means RPC or signer trouble. Pool size is logged each tick — treat sustained `available < ~10% of POOL_TARGET_SIZE` as the alert threshold. |
-| `invite-tickets-pool`: `another maintainer instance holds the pool lock` | A second replica or a stuck deploy overlap. Scale back to exactly one. |
+| Claims returning `422 Pool exhausted` (`testnet` builds only) | The ticket pool drained. Check `invite-tickets-pool` logs: `ticket batch finalized … registered=0` means the inviter is out of `AvailableInvites` quota or unauthorized; `pool tick failed` means RPC or signer trouble. Pool size is logged each tick — treat sustained `available < ~10% of POOL_TARGET_SIZE` as the alert threshold. |
+| `invite-tickets-pool`: `another maintainer instance holds the pool lock` (`testnet` builds only) | A second replica or a stuck deploy overlap. Scale back to exactly one. |
+| `unknown role: invite-tickets-api` / `-pool` at startup | A `polkadot` image was started with `COMPOSE_PROFILES=invite-tickets`. That runtime has no `Game` / `ProofOfInk`, so the build has no such roles. Clear `COMPOSE_PROFILES` in `.env`, or rebuild with `DUB_NETWORK=testnet` if you meant the other network. |
 | Writer: `queue advancer is down with claims queued; holding the throttle` | The registration queue is enabled but `registration-queue` is dead, so free-lane claims park as `QUEUED` and nothing drains. This is deliberate: the queue is the free lane's throughput control and a dead queue never falls back to unthrottled registration. Restart it. To retire the queue instead, set `QUEUE_ENABLED=false` for **both** `device-attestation-api` and the writer (writer last). Treat a warning that survives one restart as a page. |
 | `QUEUED` rows draining with the advancer down, or stranded-queue warnings while intake goes direct | `QUEUE_ENABLED` is split between api and writer. Writer off + api on = the janitor silently drains a queue the api is still filling, and the throttle is gone. Writer on + api off = warnings about leftovers no new claim joins. The values must match; `scripts/verify_compose_boundaries.sh` pins both. |
 | Rows stuck in `RETRY_AFTER` with wasm-trap errors | Invalid payload for `PeopleLite.attest`, or attester/proxy authorization missing on-chain. |

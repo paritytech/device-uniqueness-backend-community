@@ -19,7 +19,9 @@ point it at whichever network you want, deploy it under whatever name you want.
 
 ## What it does
 
-Eight services, each of which owns its Postgres database where it has one, and
+Eight services on a `testnet` build (six on `polkadot`, which has no
+invite-tickets — see [Choosing a network](docs/operations.md#choosing-a-network)),
+each of which owns its Postgres database where it has one, and
 each of which deploys independently behind a single-URL
 [gateway](gateway/Caddyfile):
 
@@ -59,14 +61,15 @@ independent state machine alongside the People Chain registration.
 - **It does not ship a Kubernetes chart or any deployment automation.** Docker
   Compose is the configuration contract; port it wherever you like.
 
-## One binary, eight roles
+## One binary, every role
 
 Every service and worker is a `--role` of the single `dub` binary. What makes a
 container a given service is its role, not a different image:
 
 ```
-dub --list-roles                       # the eight
+dub --list-roles                       # eight on testnet, six on polkadot
 dub --role device-attestation-api
+dub --help                             # which network this binary was built for
 ```
 
 ## Quickstart
@@ -79,6 +82,9 @@ cd device-uniqueness-backend-community
 cp .env.example .env
 
 docker network create dub-edge dub-metrics   # once per host
+
+# bake reads the shell, NOT .env: export this or you get a testnet image.
+export DUB_NETWORK=testnet                   # or polkadot
 docker buildx bake all                       # one cargo build, one image
 docker compose up -d                         # nothing is published — the edge does that
 ```
@@ -89,7 +95,7 @@ loopback-only debug overlay:
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d
 #   device-attestation 127.0.0.1:8080 · indexer :8081
-#   invite-tickets :8083 · turn :8084 · notify :8085
+#   turn :8084 · notify :8085 · invite-tickets :8083 (testnet builds only)
 
 curl -fsS http://127.0.0.1:8080/readyz
 ```
@@ -201,7 +207,11 @@ bundle works — the second case just needs a source checkout beside it:
 ```bash
 tar xzf dub-compose-<version>-<network>.tar.gz && cp .env.example .env
 docker network create dub-edge dub-metrics
-docker buildx bake all      # only if the bundle was not pinned to an image
+
+# only if the bundle was not pinned to an image. bake reads the shell, not
+# .env, so name the same network the bundle is for:
+export DUB_NETWORK=<network>
+docker buildx bake all
 docker compose up -d
 ```
 

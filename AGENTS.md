@@ -33,7 +33,8 @@ If a change makes a doc wrong, fix the doc (or flag the drift) in the same chang
 Twelve crates today (plans may add more independently-deployable service crates):
 
 - `dub` — **the single deployable binary**. Every service and worker is a *role* of this one
-  process (`dub --role device-attestation-api`; `dub --list-roles` prints the eight, `--list-merged-roles` the
+  process (`dub --role device-attestation-api`; `dub --list-roles` prints them — eight on a `testnet`
+  build, six on `polkadot` — and `--list-merged-roles` the
   small topology's `all-in-one`). Process wiring only, no
   domain logic: each role module holds that service's former `main` body and enters the service
   crate through its library `routes()` / `run()`. Also serves `--healthcheck` (a GET on this
@@ -42,7 +43,8 @@ Twelve crates today (plans may add more independently-deployable service crates)
   `gateway/Caddyfile` proxies, in Rust, which `--role all-in-one` serves so a consumer can run the
   whole API with no edge. `all-in-one` is accepted by `--role` but deliberately **absent from
   `--list-roles`** (it holds every secret in one process), so the gate rejects it in any manifest.
-  **Two topologies**: standard (eight workloads) and small (`all-in-one` + the three workers). They
+  **Two topologies**: standard (eight workloads, six on `polkadot`) and small (`all-in-one` + the
+  three workers, two on `polkadot`). They
   are mutually exclusive and the compose file here runs the standard one —
   `docs/architecture.md` "Deployment topologies" has the threat model,
   `docs/operations.md` "Choosing a topology" the operator view.
