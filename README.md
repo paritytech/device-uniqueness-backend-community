@@ -110,11 +110,11 @@ For anything past that you need, on whichever network you target:
 - a **funded signing key** authorized as that account's `Any`/delay-0 proxy,
 - for invites, an inviter account holding `AvailableInvites` quota.
 
-The binary is **built for one network**: `DUB_NETWORK` is `previewnet` (the
-default), `paseo` or `polkadot` (polkadot-test). It picks the vendored People
-metadata and, on `polkadot` — whose runtime has no `Game` / `ProofOfInk` —
-leaves the invite-tickets services out. Set it in `.env` before building, together
-with `COMPOSE_PROFILES` and the RPC endpoints; see
+The binary is **built for one People runtime**: `DUB_NETWORK` is `testnet` (the
+default — previewnet and paseo-next-v2) or `polkadot` (polkadot-test). It picks
+the vendored People metadata and, on `polkadot` — whose runtime has no `Game` /
+`ProofOfInk` — leaves the invite-tickets services out. Set it in `.env` before
+building, together with `COMPOSE_PROFILES` and the RPC endpoints; see
 [Choosing a network](docs/operations.md#choosing-a-network).
 
 Paseo's People Chain is
@@ -164,11 +164,17 @@ test in `just check` fails if either is stale. Never hand-edit them.
 `vX.Y.Z` tag via the [release workflow](.github/workflows/release.yml). Each one
 attaches:
 
-- `dub-<version>-<target>.tar.gz` — the single `dub` binary for
+Every asset is built twice, once per People runtime — `testnet` (previewnet and
+paseo-next-v2) and `polkadot` (polkadot-test) — because `DUB_NETWORK` is fixed
+when the binary is built. Take the pair matching the chain you point at;
+`dub --help` prints the network a binary was built for.
+
+- `dub-<version>-<network>-<target>.tar.gz` — the single `dub` binary for
   `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` and
   `aarch64-apple-darwin`;
-- `dub-compose-<version>.tar.gz` — `docker-compose.yml`, `.env.example` and the
-  gateway config, so the stack stands up on a host with no source tree;
+- `dub-compose-<version>-<network>.tar.gz` — `docker-compose.yml`,
+  `.env.example` (already naming that network) and the gateway config, so the
+  stack stands up on a host with no source tree;
 - `SHA256SUMS`, covering every asset above.
 
 **Verifying a tagged build.** Download `SHA256SUMS` alongside the assets and run
@@ -186,13 +192,14 @@ older than this release. Treat it as a convenience, not as the artifact
 corresponding to a tag here.
 
 Because of that, the compose bundle does not blindly pin to it. The release
-workflow checks whether an image exists at the release's exact tag and is
-anonymously pullable; if it is, the bundle pins to it, and if it is not, the
+workflow checks whether an image exists at `<tag>-<network>` and is anonymously
+pullable — one image per network, since an image carries a binary built for one
+runtime; if it is, that network's bundle pins to it, and if it is not, the
 bundle keeps its `build:` stanzas and the release notes say so. Either way the
 bundle works — the second case just needs a source checkout beside it:
 
 ```bash
-tar xzf dub-compose-<version>.tar.gz && cp .env.example .env
+tar xzf dub-compose-<version>-<network>.tar.gz && cp .env.example .env
 docker network create dub-edge dub-metrics
 docker buildx bake all      # only if the bundle was not pinned to an image
 docker compose up -d

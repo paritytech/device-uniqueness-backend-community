@@ -370,10 +370,11 @@ Operational invariants an agent must respect when touching the code.
   configures it separately. Both pallets see that same account as the attester — under
   `Proxy.proxy(real = P)`, `P` is what `GET /api/v1/attester` returns, on People and Asset Hub
   alike.
-- **The target network is a build input.** `DUB_NETWORK` (`polkadot`, `previewnet` — the
-  default — or `paseo`) is read by `crates/chain-types/build.rs`, which every crate that compiles
-  differently per network shares. It picks the vendored blob the People types are generated from,
-  and it decides whether invite-tickets exists: `polkadot`'s runtime has no `Game` or
+- **The target runtime is a build input.** `DUB_NETWORK` (`testnet` — the default, covering
+  previewnet and paseo-next-v2, which run one runtime — or `polkadot`) is read by
+  `crates/chain-types/build.rs`, which every crate that compiles differently per network shares. It
+  picks the vendored blob the People types are generated from, and it decides whether invite-tickets
+  exists: the `polkadot` runtime has no `Game` or
   `ProofOfInk`, so there the crate compiles to nothing and `dub` has no invite-tickets roles. The
   signing path, the transaction-extension tuples and the edge route table are the same on every
   network (the tuples are the union of every known runtime's extensions).

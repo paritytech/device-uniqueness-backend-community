@@ -69,7 +69,7 @@ else
   expected_roles=6
 fi
 [ "${#roles[@]}" -eq "$expected_roles" ] ||
-  fail "dub (DUB_NETWORK=${DUB_NETWORK:-previewnet}) accepts ${#roles[@]} roles, expected $expected_roles"
+  fail "dub (DUB_NETWORK=${DUB_NETWORK:-testnet}) accepts ${#roles[@]} roles, expected $expected_roles"
 
 # COMPOSE_PROFILES cleared so a .env or shell selecting profiles cannot widen or
 # narrow what is checked; the build decides.

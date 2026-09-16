@@ -11,15 +11,24 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 ### Added
 
 - **One tree for every network: `DUB_NETWORK`.** The `fork` line and `main`
-  are merged. The network is chosen at build time — `previewnet` (default),
-  `paseo` or `polkadot` — and selects the vendored People metadata
-  (`crates/chain-types/metadata/metadata.<network>.scale`, replacing
-  `people.scale`) and whether invite-tickets is built. On `polkadot`
-  (`people-polkadot` 2005000, no `Game` / `ProofOfInk`) `dub --list-roles`
-  lists six roles and the claim path answers the catch-all 404; elsewhere
-  nothing changes. Compose passes it as a build arg and keeps the invite-tickets
-  services behind the `invite-tickets` profile (`COMPOSE_PROFILES`). CI checks
-  all three builds, and `release.yml` takes the network as an input.
+  are merged. The People runtime is chosen at build time — `testnet` (default,
+  covering previewnet and paseo-next-v2) or `polkadot` — and selects the
+  vendored metadata (`crates/chain-types/metadata/metadata.<network>.scale`,
+  replacing `people.scale`) and whether invite-tickets is built. On `polkadot`
+  (no `Game` / `ProofOfInk`) `dub --list-roles` lists six roles and the claim
+  path answers the catch-all 404; on `testnet` nothing changes. Compose passes
+  it as a build arg and keeps the invite-tickets services behind the
+  `invite-tickets` profile (`COMPOSE_PROFILES`). CI checks both builds, and a
+  release ships every asset for both networks under one tag: binaries are
+  `dub-<version>-<network>-<target>.tar.gz`, with a compose bundle per network
+  whose `.env.example` already names it.
+
+  Runtime versions this release targets:
+
+  | build | People runtime | spec_version |
+  | --- | --- | --- |
+  | `testnet` | `next-people-paseo` | 3000000 |
+  | `polkadot` | `people-polkadot` | 2005000 |
 
 ### Fixed
 

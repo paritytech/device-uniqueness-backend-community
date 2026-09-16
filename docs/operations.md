@@ -139,9 +139,11 @@ sudo docker compose -f observability/docker-compose.yml -p observability up -d
 ```
 
 To run a tagged release instead of building, use that release's compose bundle
-(`dub-compose-<version>.tar.gz`) rather than pinning the image by hand. The
-release workflow pins the bundle to `<repo>:<tag>` only when an image is
-anonymously pullable at that exact tag; when none is, it ships the compose file
+for your network (`dub-compose-<version>-<network>.tar.gz`, one per People
+runtime) rather than pinning the image by hand. Its bundled `.env.example`
+already carries the right `DUB_NETWORK` and `COMPOSE_PROFILES`. The release
+workflow pins the bundle to `<repo>:<tag>-<network>` only when an image is
+anonymously pullable at that tag; when none is, it ships the compose file
 with its `build:` stanzas, and the release notes say so — that case needs a
 source checkout beside the bundle.
 
@@ -207,24 +209,26 @@ network they are an ask of whoever operates it.
 
 ## Choosing a network
 
-One source tree builds for three networks, selected at **build time** by
+One source tree builds for two People runtimes, selected at **build time** by
 `DUB_NETWORK`. It is not runtime configuration: an image or binary is built for
-one network and stays that network.
+one runtime and stays that runtime.
 
-| `DUB_NETWORK` | People runtime | Vendored metadata | invite-tickets |
-| --- | --- | --- | --- |
-| `previewnet` (default) | `next-people-paseo` | `metadata.previewnet.scale` | yes |
-| `paseo` (paseo-next-v2) | `next-people-paseo` | `metadata.paseo.scale` | yes |
-| `polkadot` (polkadot-test) | `people-polkadot` | `metadata.polkadot.scale` | no — the runtime has no `Game` / `ProofOfInk` |
+| `DUB_NETWORK` | People runtime | Deployments | Vendored metadata | invite-tickets |
+| --- | --- | --- | --- | --- |
+| `testnet` (default) | `next-people-paseo` | previewnet, paseo-next-v2 | `metadata.testnet.scale` | yes |
+| `polkadot` | `people-polkadot` | polkadot-test | `metadata.polkadot.scale` | no — the runtime has no `Game` / `ProofOfInk` |
+
+previewnet and paseo-next-v2 are **one** build: same runtime, same metadata.
+What separates them is `ENV_ID` and their endpoints. Split the flag again only
+if their runtimes diverge.
 
 - **Build**: compose passes `DUB_NETWORK` from `.env` as a build arg;
   `DUB_NETWORK=polkadot docker buildx bake all` for bake; the shell variable
   for `cargo`. Tag images for different networks differently — the default tag
-  is the same `local` for all three.
-- **Run**: set `COMPOSE_PROFILES=invite-tickets` on `previewnet` / `paseo` to
-  start the three invite-tickets services. Leave it empty on `polkadot`: that
-  image rejects both roles. `dub --help` prints the network a binary was built
-  for.
+  is the same `local` for both.
+- **Run**: keep `COMPOSE_PROFILES=invite-tickets` on `testnet` to start the
+  three invite-tickets services. Leave it empty on `polkadot`: that image
+  rejects both roles. `dub --help` prints the network a binary was built for.
 - **Endpoints go with the network.** `PEOPLE_RPC_URL` / `ASSET_HUB_RPC_URL` must
   name the same network the image was built for; `.env.example` lists each
   network's pair. A mismatch shows up at boot as `live runtime and the vendored
