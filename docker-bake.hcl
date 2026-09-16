@@ -24,6 +24,13 @@ variable "IMAGE_TAG" {
   default = "local"
 }
 
+# The network the image targets: polkadot, previewnet or paseo. Baked into
+# the binary (vendored metadata, invite-tickets roles), so give images for
+# different networks different tags.
+variable "DUB_NETWORK" {
+  default = "previewnet"
+}
+
 # Cache refs are opt-in so a laptop build needs no registry. CI sets them to a
 # registry-backed cache; a plain `docker buildx bake` ignores them.
 variable "CACHE_FROM" { default = "" }
@@ -63,6 +70,7 @@ function "cache_to" {
 target "_common" {
   context    = "."
   dockerfile = "Dockerfile"
+  args       = { DUB_NETWORK = DUB_NETWORK }
   cache-from = cache_from()
   cache-to   = cache_to()
 }

@@ -9,6 +9,11 @@ on:
         description: The existing tag to release, e.g. v0.3.0
         required: true
         type: string
+      network:
+        description: The network the binaries are built for (DUB_NETWORK)
+        required: true
+        type: choice
+        options: [previewnet, paseo, polkadot]
 
 concurrency:
   group: release
@@ -80,6 +85,7 @@ jobs:
         run: |
           docker buildx build --target binaries \
             --platform ${{ matrix.platform }} \
+            --build-arg DUB_NETWORK=${{ inputs.network }} \
             --output "type=local,dest=${{ runner.temp }}/bin" .
 
       - name: Package the binary
@@ -109,6 +115,8 @@ jobs:
           ref: refs/tags/${{ needs.version.outputs.tag }}
       - uses: Swatinem/rust-cache@v2
       - name: Build the release binary
+        env:
+          DUB_NETWORK: ${{ inputs.network }}
         run: cargo build --release -p dub
       - name: Package the binary
         env:
@@ -181,7 +189,8 @@ jobs:
             # Every service names the same image, so pinning is two
             # substitutions of one variable each. `command: ["--role", …]` is
             # what still makes each service itself, and survives untouched.
-            sed -e '/^    build:$/,+2d' \
+            # `build:` is five lines: context, target, and the DUB_NETWORK arg.
+            sed -e '/^    build:$/,+4d' \
                 -e "s|\${IMAGE_REPO:-device-uniqueness-backend}|$PINNED|g" \
                 -e "s|\${IMAGE_TAG:-local}|$TAG|g" \
                 docker-compose.yml > bundle/docker-compose.yml
