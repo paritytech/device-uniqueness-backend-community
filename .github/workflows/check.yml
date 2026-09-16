@@ -27,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        network: [previewnet, paseo, polkadot]
+        network: [testnet, polkadot]
     runs-on: ubuntu-latest
     env:
       DUB_NETWORK: ${{ matrix.network }}

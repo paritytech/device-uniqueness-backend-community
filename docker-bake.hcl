@@ -24,11 +24,11 @@ variable "IMAGE_TAG" {
   default = "local"
 }
 
-# The network the image targets: polkadot, previewnet or paseo. Baked into
+# The People runtime the image targets: testnet or polkadot. Baked into
 # the binary (vendored metadata, invite-tickets roles), so give images for
 # different networks different tags.
 variable "DUB_NETWORK" {
-  default = "previewnet"
+  default = "testnet"
 }
 
 # Cache refs are opt-in so a laptop build needs no registry. CI sets them to a
