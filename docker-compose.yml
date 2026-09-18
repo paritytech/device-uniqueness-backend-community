@@ -77,6 +77,26 @@ services:
       ANDROID_PACKAGE_NAMES: ${ANDROID_PACKAGE_NAMES:-}
       ANDROID_SIGNING_DIGEST_PLAYSTORE: ${ANDROID_SIGNING_DIGEST_PLAYSTORE:-}
       ANDROID_SIGNING_DIGEST_WEBSITE: ${ANDROID_SIGNING_DIGEST_WEBSITE:-}
+      # Play Integrity: the self-managed key pair (set both or neither), or the
+      # temporary GOOGLE_CREDENTIALS fallback. Blank = not configured.
+      PLAY_INTEGRITY_MODE: ${PLAY_INTEGRITY_MODE:-strict}
+      PLAY_INTEGRITY_DECRYPTION_KEY: ${PLAY_INTEGRITY_DECRYPTION_KEY:-}
+      PLAY_INTEGRITY_VERIFICATION_KEY: ${PLAY_INTEGRITY_VERIFICATION_KEY:-}
+      GOOGLE_CREDENTIALS: ${GOOGLE_CREDENTIALS:-}
+      # Apple DeviceCheck. Enabled, the team id, key id and key are required.
+      # The URL keeps a non-blank default: the config reads a blank one as-is.
+      DEVICE_CHECK_IOS_ENABLED: ${DEVICE_CHECK_IOS_ENABLED:-false}
+      APPLE_TEAM_ID: ${APPLE_TEAM_ID:-}
+      DEVICE_CHECK_KEY_ID: ${DEVICE_CHECK_KEY_ID:-}
+      DEVICE_CHECK_PRIVATE_KEY: ${DEVICE_CHECK_PRIVATE_KEY:-}
+      DEVICE_CHECK_URL: ${DEVICE_CHECK_URL:-https://api.devicecheck.apple.com/v1}
+      # Widevine dedup. Enabled, the HMAC key is required.
+      WIDEVINE_DEDUP_ENABLED: ${WIDEVINE_DEDUP_ENABLED:-false}
+      WIDEVINE_DEDUP_ENFORCE: ${WIDEVINE_DEDUP_ENFORCE:-false}
+      WIDEVINE_DEDUP_HMAC_KEY: ${WIDEVINE_DEDUP_HMAC_KEY:-}
+      REGISTRATION_VOUCHERS_ENABLED: ${REGISTRATION_VOUCHERS_ENABLED:-false}
+      # ANDROID_ATTESTATION_CRL_* are left out on purpose: the built-in
+      # defaults are correct and .env.example forbids overriding them outside tests.
       QUEUE_ENABLED: ${QUEUE_ENABLED:-false}
       # The PEOPLE_RPC_URL and ASSET_HUB_RPC_URL
       # defaults both name PreviewNet, and that pairing IS the safety property:

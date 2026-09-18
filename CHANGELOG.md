@@ -8,6 +8,17 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Compose now passes device-attestation-api its attestation settings.** The
+  service's environment allowlist was missing the Play Integrity
+  (`PLAY_INTEGRITY_*`, `GOOGLE_CREDENTIALS`), DeviceCheck (`DEVICE_CHECK_*`,
+  `APPLE_TEAM_ID`), Widevine dedup (`WIDEVINE_DEDUP_*`) and
+  `REGISTRATION_VOUCHERS_ENABLED` variables. Values set in `.env` never reached
+  the container, so these features stayed off under Docker. The Android CRL
+  variables stay out on purpose. `verify_compose_boundaries.sh` now requires the
+  verification keys on the api and forbids them on every other service.
+
 ## [0.6.0] - 2026-09-16
 
 ### Added
