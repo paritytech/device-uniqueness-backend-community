@@ -162,6 +162,18 @@ for service in device-attestation-api device-attestation-chain-writer registrati
   forbid_key "$service" POC_HMAC_SECRET
 done
 
+# Attestation verification material belongs to device-attestation-api, the only
+# service that verifies device attestations. Its allowlist must carry every key
+# (a missing line silently drops the .env value), and no other service gets one.
+for key in PLAY_INTEGRITY_DECRYPTION_KEY PLAY_INTEGRITY_VERIFICATION_KEY GOOGLE_CREDENTIALS \
+           DEVICE_CHECK_PRIVATE_KEY WIDEVINE_DEDUP_HMAC_KEY; do
+  require_key device-attestation-api "$key"
+  for service in device-attestation-chain-writer registration-queue username-indexer \
+                 invite-tickets-api invite-tickets-pool turn-api notify-relay; do
+    forbid_key "$service" "$key"
+  done
+done
+
 # Only the edge publishes. The base file must expose nothing on the host, so a
 # second environment cannot collide and no service is reachable from outside.
 if grep -Fq "published:" <<<"$rendered"; then
