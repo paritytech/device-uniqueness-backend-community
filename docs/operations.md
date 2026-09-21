@@ -492,8 +492,9 @@ sudo docker compose exec -T postgres psql -U device_attestation -d device_attest
 
 ### Batch size is adaptive
 
-`CHAIN_WRITER_BATCH_SIZE` (default 25) is the *maximum*.
-`dub_chain_batch_size{lane="people"|"dotns"}` is the size actually in use: it
+`CHAIN_WRITER_BATCH_SIZE` (default 25, the People lane) and
+`CHAIN_WRITER_DOTNS_BATCH_SIZE` (default 3, the dotNS lane) are *maxima*, one
+per lane. `dub_chain_batch_size{lane="people"|"dotns"}` is the size actually in use: it
 halves on every whole-batch failure (floor 1) and climbs back one per successful
 submission, but never back into the smallest size it has seen fail — that one is
 retried only after 20 consecutive successful submissions. A chain that rejects
@@ -506,8 +507,17 @@ of 1 rather than alternating 1 → 2 → fail and paying a fee on every other pa
   carries the reason and the next size. The usual cause is the block's weight
   budget (each `attest` verifies two sr25519 signatures and writes storage),
   which the halving search resolves on its own within a few passes. If it settles
-  much lower than 25, lower `CHAIN_WRITER_BATCH_SIZE` to near it so a fresh
+  much lower than its maximum, lower that lane's maximum to near it so a fresh
   writer does not re-run the search on every restart.
+- The dotNS lane's maximum is 3 for exactly that reason: `reserve_name`
+  dispatches through the DotNS contract on `pallet_revive`, and Asset Hub
+  refuses a `force_batch` of four or more at submission with `Transaction would
+  exhaust the block limits` — the declared weight of the single extrinsic does
+  not fit a block. That refusal is handled (the set is re-queued at an unchanged
+  `attempt` and the lane halves), so the only cost is a few minutes of delay per
+  burst; starting at 3 avoids paying it after every restart, wipe or queue
+  promotion. Raise it only against a runtime whose `reserve_name` got cheaper,
+  and watch `dub_chain_batch_failed_total{lane="dotns"}` when you do.
 - A whole-batch failure does **not** advance any row toward `FAILED_TERMINAL`:
   `attempt` is unchanged and the set is deferred on one shared backoff. Rows
   piling up in `RETRY_AFTER` with a low `attempt` is the batch failing, not the
