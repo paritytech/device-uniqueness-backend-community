@@ -257,12 +257,15 @@ Operational invariants an agent must respect when touching the code.
   of the batch itself re-queues the set as `RETRY_AFTER` at an **unchanged** `attempt`, on one shared
   backoff. Only per-item failures spend a row's attempt budget. Without this, eight flapping-RPC
   passes would send a whole claimed set to `FAILED_TERMINAL` for a fault no row caused.
-- **`CHAIN_WRITER_BATCH_SIZE` is a maximum, not a fixed claim size.** Each lane holds an adaptive
+- **The batch-size ceiling is a maximum, not a fixed claim size, and each lane has its own.** Each lane holds an adaptive
   size (AIMD, `chain_client::settle_batch_size`): halved on a whole-batch failure (floor 1), grown by
   one per successful submission, capped at the configured value and at one below the smallest size
   known to have failed — the lane re-probes that size only after a long clean run, so a chain that
-  rejects every batch of two or more converges on 1 instead of alternating forever. The two lanes size independently —
-  Asset Hub's weight budget and `reserve_name`'s cost are unrelated to People's. Published as
+  rejects every batch of two or more converges on 1 instead of alternating forever. The two lanes size independently,
+  from separate ceilings — `CHAIN_WRITER_BATCH_SIZE` (People) and `CHAIN_WRITER_DOTNS_BATCH_SIZE` (dotNS) — because
+  Asset Hub's weight budget and `reserve_name`'s cost are unrelated to People's: `reserve_name` dispatches through the
+  DotNS contract on `pallet_revive` and declares enough weight that a handful of them in one `force_batch` exceeds what
+  fits in a block, so the dotNS ceiling defaults an order of magnitude lower. Published as
   `dub_chain_batch_size{lane}`.
 - **The registration queue is an outbox entry state, not a second pipeline.** With
   `QUEUE_ENABLED` (default off), `POST /api/v1/usernames` inserts claims as `QUEUED` rows with a

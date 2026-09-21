@@ -8,6 +8,18 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Changed
+
+- **The dotNS lane has its own batch-size ceiling, `CHAIN_WRITER_DOTNS_BATCH_SIZE`
+  (default 3).** Both writer lanes used to climb back to `CHAIN_WRITER_BATCH_SIZE`
+  (25), but `reserve_name` dispatches through the DotNS contract on
+  `pallet_revive` and declares enough weight that Asset Hub refuses a
+  `force_batch` of four or more at submission (`Transaction would exhaust the
+  block limits`). The lane already recovered — it re-queued the set without
+  spending an attempt and halved its way down — but it paid a few minutes of
+  delay for that search after every restart and on every burst. It now starts at
+  the size that fits. `CHAIN_WRITER_BATCH_SIZE` no longer caps the dotNS lane.
+
 ### Fixed
 
 - **Compose now passes device-attestation-api its attestation settings.** The
