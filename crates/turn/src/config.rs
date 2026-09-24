@@ -189,7 +189,7 @@ fn provider_from_env() -> Result<ProviderConfig, ConfigError> {
                 secret: decode_secret(&required_var("TURN_SECRET")?)?,
                 algorithm,
                 realm: validated_realm(&required_var("TURN_REALM")?)?,
-                ice_servers: parse_ice_servers(&std::env::var("ICE_SERVERS").unwrap_or_default())?,
+                ice_servers: parse_ice_servers(&required_var("ICE_SERVERS")?)?,
             })
         }
         other => Err(ConfigError::Invalid {
@@ -233,12 +233,19 @@ fn validated_realm(raw: &str) -> Result<String, ConfigError> {
     Ok(realm.to_string())
 }
 
-/// Parse the comma-separated `ICE_SERVERS` list (unset/empty → empty list).
+/// Parse the comma-separated `ICE_SERVERS` list.
+///
+/// Required on the coturn path: there is no upstream to learn the relay
+/// addresses from, so an empty list would mint credentials with nothing to use
+/// them against and fail silently at the client instead of loudly at boot.
 /// Entries are echoed verbatim on the wire, so only shape is checked:
 /// non-empty, with a URL scheme separator.
 fn parse_ice_servers(raw: &str) -> Result<Vec<String>, ConfigError> {
     if raw.trim().is_empty() {
-        return Ok(Vec::new());
+        return Err(ConfigError::Invalid {
+            key: "ICE_SERVERS",
+            reason: "must list at least one ICE server URL".to_string(),
+        });
     }
     raw.split(',')
         .map(|entry| {
@@ -402,7 +409,8 @@ mod tests {
 
     #[test]
     fn ice_servers_split_trim_and_reject_schemeless_entries() {
-        assert_eq!(parse_ice_servers("").expect("valid"), Vec::<String>::new());
+        assert!(parse_ice_servers("").is_err());
+        assert!(parse_ice_servers("  ").is_err());
         assert_eq!(
             parse_ice_servers(" stun:a.example:3478 , turn:b.example:3478?transport=udp ")
                 .expect("valid"),
@@ -519,6 +527,20 @@ mod provider_tests {
             }
             other => panic!("expected coturn, got {other:?}"),
         }
+    }
+
+    /// Nothing upstream supplies the relay addresses on this path, so an
+    /// unset `ICE_SERVERS` would mint credentials with nothing to use them
+    /// against — a 201 that fails silently at the client.
+    #[test]
+    fn coturn_refuses_to_boot_without_ice_servers() {
+        let _guard = ENV_LOCK.lock().expect("lock");
+        let _env = Env::set(&[
+            ("TURN_PROVIDER", "coturn"),
+            ("TURN_SECRET", SECRET_B64),
+            ("TURN_REALM", "example.org"),
+        ]);
+        assert!(provider_from_env().is_err());
     }
 
     /// The upgrade trap: a relay deployment that sets no `TURN_PROVIDER` would

@@ -40,6 +40,8 @@ pub enum CloudflareError {
     /// Retryable, and the trigger for falling back to cache.
     #[error("cloudflare request failed: {0}")]
     Unreachable(String),
+    #[error("cloudflare rejected the request: {0}")]
+    Rejected(String),
     /// A 2xx whose body was not the documented shape.
     #[error("cloudflare response malformed: {0}")]
     Malformed(String),
@@ -74,6 +76,8 @@ pub struct Client {
     api_token: String,
     base_url: String,
     ttl_secs: u64,
+    /// Minimum life a cached credential must have left to be served.
+    min_useful_remaining: u64,
     /// Last successful response, served when Cloudflare is unreachable.
     last_good: RwLock<Option<IceCredentials>>,
     breaker: Mutex<Breaker>,
@@ -107,6 +111,7 @@ impl Client {
             api_token,
             base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
             ttl_secs,
+            min_useful_remaining: min_useful_remaining(ttl_secs),
             last_good: RwLock::new(None),
             breaker: Mutex::new(Breaker::default()),
         })
@@ -129,6 +134,10 @@ impl Client {
                 self.store(&fresh);
                 self.record_success();
                 Ok(fresh)
+            }
+            Err(err @ CloudflareError::Rejected(_)) => {
+                tracing::error!(error = %err, "cloudflare rejected TURN issuance");
+                Err(err)
             }
             Err(err) => {
                 let tripped = self.record_failure(now);
@@ -158,7 +167,7 @@ impl Client {
         let guard = self.last_good.read().ok()?;
         guard
             .as_ref()
-            .filter(|cached| cached.remaining(now) >= MIN_USEFUL_REMAINING)
+            .filter(|cached| cached.remaining(now) >= self.min_useful_remaining)
             .cloned()
     }
 
@@ -210,7 +219,21 @@ impl Client {
 
         let status = response.status();
         if !status.is_success() {
-            return Err(CloudflareError::Unreachable(format!("status {status}")));
+            let message = format!("status {status}");
+            // 408 and 429 are the two 4xx that say "later", not "never".
+            return Err(
+                if status.is_client_error()
+                    && !matches!(
+                        status,
+                        reqwest::StatusCode::REQUEST_TIMEOUT
+                            | reqwest::StatusCode::TOO_MANY_REQUESTS
+                    )
+                {
+                    CloudflareError::Rejected(message)
+                } else {
+                    CloudflareError::Unreachable(message)
+                },
+            );
         }
 
         let body: serde_json::Value = response
@@ -220,6 +243,10 @@ impl Client {
 
         parse_response(&body, now, self.ttl_secs).map_err(CloudflareError::Malformed)
     }
+}
+
+fn min_useful_remaining(ttl_secs: u64) -> u64 {
+    MIN_USEFUL_REMAINING.min((ttl_secs / 4).max(1))
 }
 
 fn parse_response(
@@ -428,6 +455,45 @@ mod tests {
             .cached(credentials.expires_at - MIN_USEFUL_REMAINING + 1)
             .is_none());
         assert!(client.cached(credentials.expires_at + 1).is_none());
+    }
+
+    #[test]
+    fn a_short_ttl_still_has_a_usable_cache() {
+        let client = Client::new("key".to_string(), SECRET.to_string(), 40, None).expect("builds");
+        assert_eq!(client.min_useful_remaining, 10);
+        let credentials = parse_response(&cloudflare_body(), 1_000, 40).expect("parses");
+        client.store(&credentials);
+        assert!(client.cached(1_000).is_some());
+        assert!(client.cached(credentials.expires_at - 10).is_some());
+        assert!(client.cached(credentials.expires_at - 9).is_none());
+    }
+
+    #[test]
+    fn the_floor_never_reaches_the_ttl_it_is_measured_against() {
+        for ttl in [1_u64, 2, 3, 4, 59, 60, 240, 241, 3_600] {
+            let floor = min_useful_remaining(ttl);
+            assert!(floor >= 1, "ttl {ttl}");
+            assert!(floor <= ttl, "ttl {ttl}");
+            assert!(floor <= MIN_USEFUL_REMAINING, "ttl {ttl}");
+        }
+        assert_eq!(min_useful_remaining(3_600), MIN_USEFUL_REMAINING);
+    }
+
+    #[test]
+    fn a_client_error_is_not_retryable_and_a_server_error_is() {
+        let classify = |status: reqwest::StatusCode| {
+            status.is_client_error()
+                && !matches!(
+                    status,
+                    reqwest::StatusCode::REQUEST_TIMEOUT | reqwest::StatusCode::TOO_MANY_REQUESTS
+                )
+        };
+        assert!(classify(reqwest::StatusCode::UNAUTHORIZED));
+        assert!(classify(reqwest::StatusCode::FORBIDDEN));
+        assert!(classify(reqwest::StatusCode::NOT_FOUND));
+        assert!(!classify(reqwest::StatusCode::TOO_MANY_REQUESTS));
+        assert!(!classify(reqwest::StatusCode::REQUEST_TIMEOUT));
+        assert!(!classify(reqwest::StatusCode::BAD_GATEWAY));
     }
 
     #[test]

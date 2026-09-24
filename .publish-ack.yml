@@ -84,18 +84,20 @@ accepted:
     paths:
       - .env.example
     finding: >-
-      A dev TURN_SECRET was committed in .env.example and remains in history,
-      though no longer in the working tree.
+      A dev TURN_SECRET is committed in .env.example, and also remains in
+      history.
     reason: >-
-      turn-api now gets its credentials from Cloudflare Realtime TURN, which
-      mints both halves per request, so the service holds no relay-shared
-      secret and .env.example ships no such value. The committed one was
-      base64 of the literal string "dev-only-turn-secret-change-me", published
-      on purpose, and authenticated against no real relay even when it was
-      live. History still carries it, so the full-history scan still finds it.
+      It is base64 of the literal string "dev-only-turn-secret-change-me",
+      published on purpose and authenticating against no real relay. turn-api
+      reads it only under TURN_PROVIDER=coturn, which .env.example selects
+      because that provider computes credentials locally and so lets the
+      quickstart stack boot with no account anywhere; under the default
+      cloudflare provider Cloudflare Realtime TURN mints both halves per
+      request and the service holds no relay-shared secret at all. A real
+      deployment replaces it along with every other dev credential in the file.
     action: >-
-      removed from the working tree with the coturn credential path; the
-      historical occurrence stays allowlisted by regex in .gitleaks.toml
+      kept as a documented dev placeholder and allowlisted by regex in
+      .gitleaks.toml, which covers the historical occurrence too
 
   - id: unfixable_advisories
     paths:

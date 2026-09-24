@@ -57,6 +57,45 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ### Fixed
 
+- **The quickstart stack boots again.** `.env.example` and compose selected the
+  `cloudflare` provider with no credentials to go with it — no placeholder can
+  stand in for a real Cloudflare account — so `cp .env.example .env && docker
+  compose up` crash-looped `turn-api` at boot, and so did `--role all-in-one`.
+  Both now default to `coturn`, which computes credentials locally and needs
+  nothing off the machine, with the documented dev-only secret and a loopback
+  `ICE_SERVERS`. The code default is unchanged: `TURN_PROVIDER` unset is still
+  `cloudflare`, which is what a deployment wants.
+
+- **`ICE_SERVERS` is required under `TURN_PROVIDER=coturn`.** It was optional
+  and defaulted to empty, so a relay deployment that forgot it booted clean and
+  answered every request `201 {"servers": []}` — a credential with no relay to
+  use it against, failing at the client rather than at boot.
+
+- **A Cloudflare 4xx is no longer served out of the outage cache.** Every
+  non-2xx was classified retryable, so a revoked, wrong or mis-scoped
+  `TURN_API_TOKEN` was indistinguishable from an outage: the stale credential
+  went to every caller at `warn` level for up to `TURN_TTL_SECS` while the
+  breaker suppressed the calls that would have surfaced it. 4xx other than 408
+  and 429 now fail immediately with `cloudflare rejected TURN issuance`.
+
+- **A short `TURN_TTL_SECS` no longer empties the Cloudflare outage cache.** The
+  floor on a cached credential's remaining life was a fixed 60s, so any TTL at
+  or under a minute rejected each credential the instant it was stored and every
+  Cloudflare blip became a 503. The floor is now derived from the TTL.
+
+- **An upstream 503 no longer spends the caller's rate-limit slot.** Both TURN
+  routes admit against the limit before issuing; the slot is now handed back if
+  issuance then fails upstream. It mattered most on `/turn/issue-with-proof`,
+  where the budget is per person and per product and a ring-VRF proof for a
+  given second is one fixed value, so a caller could not cheaply retry until the
+  window rolled.
+
+- **`verify_compose_boundaries.sh` enforces the TURN secret boundary it
+  documents.** `TURN_API_TOKEN` and `TURN_SECRET` were forbidden only on a
+  named handful of services, so `device-attestation-*` or `invite-tickets-*`
+  could have gained a billable Cloudflare minting credential with the gate
+  still passing. Both are now forbidden on every service but `turn-api`.
+
 - **Compose now passes device-attestation-api its attestation settings.** The
   service's environment allowlist was missing the Play Integrity
   (`PLAY_INTEGRITY_*`, `GOOGLE_CREDENTIALS`), DeviceCheck (`DEVICE_CHECK_*`,

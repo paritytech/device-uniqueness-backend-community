@@ -179,14 +179,16 @@ pub(crate) async fn issue_credentials(
         validate_body(&body).map_err(AppError::InvalidBody)?;
     }
 
-    let () = check_rate_limit(&state, auth.subject).await?;
+    let () = check_rate_limit(&state, auth.subject.clone()).await?;
 
     let now_unix = now_unix();
-    let issued = state
-        .source
-        .issue(now_unix)
-        .await
-        .map_err(|_| AppError::UpstreamUnavailable)?;
+    let issued = match state.source.issue(now_unix).await {
+        Ok(issued) => issued,
+        Err(_) => {
+            state.limiter.refund(auth.subject);
+            return Err(AppError::UpstreamUnavailable);
+        }
+    };
 
     tracing::info!(
         ttl_secs = issued.ttl,

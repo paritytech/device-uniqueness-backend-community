@@ -152,9 +152,10 @@ pub(crate) async fn issue_with_proof(
     })?;
 
     // Keep the alias confined to private throttle and keyed-derivation inputs.
+    let throttle_key = hex::encode(alias);
     let () = proof_state
         .alias_limiter
-        .allow(hex::encode(alias))
+        .allow(throttle_key.clone())
         .await
         .map_err(|err| AppError::RateLimited {
             retry_after_secs: err.wait_time_from(state.limiter.current_time()).as_secs(),
@@ -164,11 +165,17 @@ pub(crate) async fn issue_with_proof(
     // input to a keyed digest, on the Cloudflare path it is not used at all.
     // Either way nothing recoverable from it reaches the response.
     let issued_at = now_unix();
-    let issued = state
+    let issued = match state
         .source
         .issue_for_proof(issued_at, &body.product_id, alias.as_ref())
         .await
-        .map_err(|_| AppError::UpstreamUnavailable)?;
+    {
+        Ok(issued) => issued,
+        Err(_) => {
+            proof_state.alias_limiter.refund(throttle_key);
+            return Err(AppError::UpstreamUnavailable);
+        }
+    };
 
     tracing::info!(
         ttl_secs = issued.ttl,

@@ -252,11 +252,14 @@ for key in TURN_PROVIDER TURN_KEY_ID TURN_API_TOKEN \
            TURN_SECRET TURN_AUTH_ALGORITHM TURN_REALM ICE_SERVERS; do
   require_key turn-api "$key"
 done
-# The non-secret selectors are still service-scoped: a stray copy elsewhere
-# means another service was meant to mint credentials.
+# And no other app service may carry any of them — the two secrets above all,
+# since TURN_API_TOKEN mints against the org's Cloudflare account and is billed
+# to it. The non-secret selectors are scoped too: a stray copy elsewhere means
+# another service was meant to mint credentials.
 for service in "${APP_SERVICES[@]}"; do
   if [ "$service" != turn-api ]; then
-    for key in TURN_PROVIDER TURN_KEY_ID TURN_AUTH_ALGORITHM TURN_REALM ICE_SERVERS; do
+    for key in TURN_PROVIDER TURN_KEY_ID TURN_API_TOKEN \
+               TURN_SECRET TURN_AUTH_ALGORITHM TURN_REALM ICE_SERVERS; do
       forbid_key "$service" "$key"
     done
   fi

@@ -509,6 +509,32 @@ async fn a_verified_proof_with_no_credential_upstream_is_a_503() {
 }
 
 #[tokio::test]
+async fn an_upstream_outage_does_not_spend_the_alias_budget() {
+    let ring = test_ring();
+    let state = state_with_base_url(
+        Some((proof_config(), Some(snapshot_of(ring.commitment.clone())))),
+        1,
+        "http://127.0.0.1:1/v1".to_string(),
+    );
+    let app = turn::routes(state);
+
+    for attempt in 0..3 {
+        let (status, json) = post_json(
+            &app,
+            "/api/v1/turn/issue-with-proof",
+            Some(fresh_body(&ring, 2)),
+        )
+        .await;
+        // 429 here would mean the first 503 had taken the slot with it.
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "attempt {attempt}: {json}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn each_request_reports_the_full_remaining_ttl() {
     let ring = test_ring();
     let app = app(Some((
