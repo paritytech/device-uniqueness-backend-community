@@ -435,10 +435,12 @@ services:
       replicas: 1
 
   # TURN credential issuer: stateless (no DB; read-only People Chain root cache
-  # when proof issuance is enabled). Credentials come from Cloudflare Realtime
-  # TURN, one per request, so the only secret is the Cloudflare API token and
-  # there is no relay-shared key to keep in step. Safe to scale within one
-  # environment; each environment pins its own RPC/genesis.
+  # when proof issuance is enabled). TURN_PROVIDER picks the credential source —
+  # Cloudflare Realtime TURN (default; one credential fetched per request) or a
+  # self-hosted coturn relay (credential computed from a shared secret). Only
+  # the selected provider's variables are read, so a deployment holds one
+  # provider's secret and not the other's. Safe to scale within one environment;
+  # each environment pins its own RPC/genesis.
   turn-api:
     build:
       context: .
@@ -453,9 +455,23 @@ services:
     environment:
       BIND_ADDR: 0.0.0.0:8080
       TURN_TTL_SECS: ${TURN_TTL_SECS:-1800}
-      # Cloudflare Realtime TURN, the credential authority.
+      # Which credential source to use: cloudflare (default) | coturn.
+      TURN_PROVIDER: ${TURN_PROVIDER:-cloudflare}
+      # TURN_PROVIDER=cloudflare. The key id names the app (not a secret: it is
+      # in the request path); the token is service-owned, from the server's
+      # chmod-600 .env. No dev default — no fake value can mint a working
+      # credential, so turn-api fails at boot rather than at request time.
       TURN_KEY_ID: ${TURN_KEY_ID:-}
       TURN_API_TOKEN: ${TURN_API_TOKEN:-}
+      # TURN_PROVIDER=coturn. Ignored unless that provider is selected, and
+      # setting TURN_SECRET while the provider is cloudflare is refused at boot
+      # rather than silently ignored. The secret and algorithm MUST match the
+      # relay's `--use-auth-secret` configuration; rotate relay and issuer
+      # together. ICE_SERVERS is what the relay answers on.
+      TURN_SECRET: ${TURN_SECRET:-}
+      TURN_AUTH_ALGORITHM: ${TURN_AUTH_ALGORITHM:-SHA1}
+      TURN_REALM: ${TURN_REALM:-}
+      ICE_SERVERS: ${ICE_SERVERS:-}
       # Verifies device-attestation JWTs. Dev default = the public half of
       # device-attestation-api's dev JWT_ED25519_SECRET above; in prod prefer
       # JWT_JWKS_JSON from device-attestation's /.well-known/jwks.json.
