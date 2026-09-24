@@ -971,7 +971,7 @@
         },
         "responses": {
           "201": {
-            "description": "Credentials issued by Cloudflare Realtime TURN: `username` and `password` are the pair Cloudflare minted for this request, `servers` is the ICE server list it returned, and `ttl` is the seconds of life remaining on the credential.",
+            "description": "Credentials issued: `username` and `password` are an opaque pair from the deployment's configured `TURN_PROVIDER` — do not parse either — `servers` is the ICE server list to use them against, and `ttl` is the seconds of life remaining on the credential.",
             "content": {
               "application/json": {
                 "schema": {
@@ -990,7 +990,7 @@
             "description": "Per-subject rate limit exceeded (with `Retry-After`)."
           },
           "503": {
-            "description": "Cloudflare could not be reached and no cached credential was usable (with `Retry-After`)."
+            "description": "The credential provider could not issue and no cached credential was usable (with `Retry-After`). Only reachable on the Cloudflare provider, which depends on an upstream call; a coturn deployment computes credentials locally and never returns this."
           }
         },
         "security": [
@@ -1019,7 +1019,7 @@
         },
         "responses": {
           "201": {
-            "description": "Proof accepted; returns the servers, username and password Cloudflare minted for this request, and `ttl`, the seconds of life remaining on them. No alias appears in the response.",
+            "description": "Proof accepted; returns the servers and an opaque username/password pair from the configured `TURN_PROVIDER`, and `ttl`, the seconds of life remaining on them. No alias appears in the response, and nothing recoverable from the proof is derivable from the credential.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1038,7 +1038,7 @@
             "description": "This person's redemption limit was exceeded (with `Retry-After`)."
           },
           "503": {
-            "description": "Verification unavailable: no ring-root snapshot yet (chain unreachable since boot), the bounded waiter queue is full, or all verification slots remained busy for the bounded wait. Also returned when the proof verified but Cloudflare could not be reached and no cached credential was usable. Saturation and upstream responses include `Retry-After`."
+            "description": "Verification unavailable: no ring-root snapshot yet (chain unreachable since boot), the bounded waiter queue is full, or all verification slots remained busy for the bounded wait. Also returned when the proof verified but the credential provider could not issue and no cached credential was usable, which only the Cloudflare provider can do. Saturation and provider responses include `Retry-After`."
           }
         }
       }
@@ -1712,7 +1712,7 @@
       },
       "IssueResponse": {
         "type": "object",
-        "description": "The 201 body: the ephemeral credential Cloudflare Realtime TURN minted for\nthis request, plus the ICE server list it returned.",
+        "description": "The 201 body: an ephemeral TURN credential and the ICE servers to use it\nagainst.\n\nBoth fields' provenance depends on the deployment's `TURN_PROVIDER`, and the\nshape of `username`/`password` differs between them — treat both as opaque\nstrings to stay portable across providers.",
         "required": [
           "servers",
           "username",
@@ -1725,7 +1725,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Every ICE server URL Cloudflare returned (`stun:` / `turn:` / `turns:`\nforms), flattened into one list in response order.",
+            "description": "The ICE server URLs (`stun:` / `turn:` / `turns:` forms) to negotiate\nagainst. On the Cloudflare provider these are what Cloudflare returned\nwith the credential, flattened into one list in response order; on the\ncoturn provider they are the operator's configured `ICE_SERVERS`.",
             "example": [
               "stun:stun.cloudflare.com:3478",
               "turn:turn.cloudflare.com:3478?transport=udp",
@@ -1735,18 +1735,18 @@
           },
           "username": {
             "type": "string",
-            "description": "The username Cloudflare minted for this request. Opaque: it carries no\nstructure to parse, and nothing derived from the caller's identity.",
+            "description": "The credential's username. **Opaque — do not parse.** Cloudflare mints\nan unstructured value per request; a coturn deployment uses that relay's\nREST-API form, `{unixExpiry}:{hexId}`. Neither carries anything\nrecoverable about the caller.",
             "example": "d2f4a1c6b8e05379"
           },
           "password": {
             "type": "string",
-            "description": "The matching credential Cloudflare minted. Opaque.",
+            "description": "The matching password. **Opaque — do not parse.** Minted by Cloudflare,\nor on the coturn provider the base64 HMAC over `username` under the\nrelay-shared secret.",
             "example": "9f83b1e6c0a74d25b3f8e1a70c4d69b2"
           },
           "ttl": {
             "type": "integer",
             "format": "int64",
-            "description": "Seconds of life remaining on this credential. Normally the TTL granted\nby Cloudflare; lower if a cached credential was served because\nCloudflare was briefly unreachable.",
+            "description": "Seconds of life remaining on this credential. On the coturn provider\nalways the configured `TURN_TTL_SECS`, since the credential is minted to\norder. On the Cloudflare provider the TTL Cloudflare granted, or less if\na cached credential was served because Cloudflare was briefly\nunreachable.",
             "example": 1800,
             "minimum": 0
           }
@@ -1975,7 +1975,7 @@
     },
     {
       "name": "TURN",
-      "description": "Short-lived TURN credentials for WebRTC ICE negotiation, issued by Cloudflare Realtime TURN. Each request gets its own credential, so callers are mutually unlinkable; nothing is stored beyond the last response, which is served if Cloudflare is briefly unreachable. Issuance is authorized either by an access JWT (`/issue`) or, when enabled, by a personhood ring-VRF proof over a client-timestamped message (`/issue-with-proof`)."
+      "description": "Short-lived TURN credentials for WebRTC ICE negotiation. The credential source is the deployment's `TURN_PROVIDER`: **Cloudflare Realtime TURN** (the default), which mints each credential itself — one per request, so callers are mutually unlinkable, with the last response cached and served if Cloudflare is briefly unreachable — or a self-hosted **coturn** relay, where this service computes the credential from a secret shared with the relay and callers are kept unlinkable by an opaque keyed id instead. Either way nothing is persisted. Issuance is authorized either by an access JWT (`/issue`) or, when enabled, by a personhood ring-VRF proof over a client-timestamped message (`/issue-with-proof`)."
     },
     {
       "name": "Notifications",

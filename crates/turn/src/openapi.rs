@@ -15,13 +15,19 @@ pub struct IssueRequest {
     pub region_hint: Option<String>,
 }
 
-/// The 201 body: the ephemeral credential Cloudflare Realtime TURN minted for
-/// this request, plus the ICE server list it returned.
+/// The 201 body: an ephemeral TURN credential and the ICE servers to use it
+/// against.
+///
+/// Both fields' provenance depends on the deployment's `TURN_PROVIDER`, and the
+/// shape of `username`/`password` differs between them — treat both as opaque
+/// strings to stay portable across providers.
 #[derive(Serialize, ToSchema)]
 #[allow(dead_code)] // documentation-only mirror of the wire shape
 pub struct IssueResponse {
-    /// Every ICE server URL Cloudflare returned (`stun:` / `turn:` / `turns:`
-    /// forms), flattened into one list in response order.
+    /// The ICE server URLs (`stun:` / `turn:` / `turns:` forms) to negotiate
+    /// against. On the Cloudflare provider these are what Cloudflare returned
+    /// with the credential, flattened into one list in response order; on the
+    /// coturn provider they are the operator's configured `ICE_SERVERS`.
     #[schema(example = json!([
         "stun:stun.cloudflare.com:3478",
         "turn:turn.cloudflare.com:3478?transport=udp",
@@ -29,16 +35,22 @@ pub struct IssueResponse {
         "turns:turn.cloudflare.com:5349?transport=tcp"
     ]))]
     pub servers: Vec<String>,
-    /// The username Cloudflare minted for this request. Opaque: it carries no
-    /// structure to parse, and nothing derived from the caller's identity.
+    /// The credential's username. **Opaque — do not parse.** Cloudflare mints
+    /// an unstructured value per request; a coturn deployment uses that relay's
+    /// REST-API form, `{unixExpiry}:{hexId}`. Neither carries anything
+    /// recoverable about the caller.
     #[schema(example = "d2f4a1c6b8e05379")]
     pub username: String,
-    /// The matching credential Cloudflare minted. Opaque.
+    /// The matching password. **Opaque — do not parse.** Minted by Cloudflare,
+    /// or on the coturn provider the base64 HMAC over `username` under the
+    /// relay-shared secret.
     #[schema(example = "9f83b1e6c0a74d25b3f8e1a70c4d69b2")]
     pub password: String,
-    /// Seconds of life remaining on this credential. Normally the TTL granted
-    /// by Cloudflare; lower if a cached credential was served because
-    /// Cloudflare was briefly unreachable.
+    /// Seconds of life remaining on this credential. On the coturn provider
+    /// always the configured `TURN_TTL_SECS`, since the credential is minted to
+    /// order. On the Cloudflare provider the TTL Cloudflare granted, or less if
+    /// a cached credential was served because Cloudflare was briefly
+    /// unreachable.
     #[schema(example = 1800)]
     pub ttl: u64,
 }
@@ -70,12 +82,14 @@ impl Modify for SecurityAddon {
 #[openapi(
     tags(
         (name = "TURN",
-         description = "Short-lived TURN credentials for WebRTC ICE negotiation, issued by \
-Cloudflare Realtime TURN. Each request gets its own credential, so callers are mutually \
-unlinkable; nothing is stored beyond the last response, which is served if Cloudflare is \
-briefly unreachable. Issuance is authorized either by an access JWT (`/issue`) or, when \
-enabled, by a personhood ring-VRF proof over a client-timestamped message \
-(`/issue-with-proof`).")
+         description = "Short-lived TURN credentials for WebRTC ICE negotiation. The credential \
+source is the deployment's `TURN_PROVIDER`: **Cloudflare Realtime TURN** (the default), which \
+mints each credential itself — one per request, so callers are mutually unlinkable, with the \
+last response cached and served if Cloudflare is briefly unreachable — or a self-hosted \
+**coturn** relay, where this service computes the credential from a secret shared with the \
+relay and callers are kept unlinkable by an opaque keyed id instead. Either way nothing is \
+persisted. Issuance is authorized either by an access JWT (`/issue`) or, when enabled, by a \
+personhood ring-VRF proof over a client-timestamped message (`/issue-with-proof`).")
     ),
     paths(
         crate::http::issue_credentials,

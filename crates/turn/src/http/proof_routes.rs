@@ -53,9 +53,10 @@ pub(crate) struct IssueWithProofBody {
     tag = "TURN",
     request_body = IssueWithProofBody,
     responses(
-        (status = 201, description = "Proof accepted; returns the servers, username and password \
-Cloudflare minted for this request, and `ttl`, the seconds of life remaining on them. No alias \
-appears in the response.",
+        (status = 201, description = "Proof accepted; returns the servers and an opaque \
+username/password pair from the configured `TURN_PROVIDER`, and `ttl`, the seconds of life \
+remaining on them. No alias appears in the response, and nothing recoverable from the proof is \
+derivable from the credential.",
          body = crate::openapi::IssueResponse),
         (status = 400, description = "Unparseable body, invalid hex, a collection outside the \
 canonical People Lite/People allowlist, a proof that is not a single-context ring-VRF signature, \
@@ -67,8 +68,9 @@ this deployment still holds (deliberately unspecific)."),
 `Retry-After`)."),
         (status = 503, description = "Verification unavailable: no ring-root snapshot yet (chain \
 unreachable since boot), the bounded waiter queue is full, or all verification slots remained busy \
-for the bounded wait. Also returned when the proof verified but Cloudflare could not be reached and \
-no cached credential was usable. Saturation and upstream responses include `Retry-After`."),
+for the bounded wait. Also returned when the proof verified but the credential provider could not \
+issue and no cached credential was usable, which only the Cloudflare provider can do. Saturation and \
+provider responses include `Retry-After`."),
     )
 )]
 pub(crate) async fn issue_with_proof(

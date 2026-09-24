@@ -140,9 +140,10 @@ fn validate_body(body: &serde_json::Value) -> Result<(), Vec<FieldError>> {
     security(("bearer_jwt" = [])),
     request_body = crate::openapi::IssueRequest,
     responses(
-        (status = 201, description = "Credentials issued by Cloudflare Realtime TURN: \
-`username` and `password` are the pair Cloudflare minted for this request, `servers` is the \
-ICE server list it returned, and `ttl` is the seconds of life remaining on the credential.",
+        (status = 201, description = "Credentials issued: `username` and `password` are an \
+opaque pair from the deployment's configured `TURN_PROVIDER` — do not parse either — `servers` \
+is the ICE server list to use them against, and `ttl` is the seconds of life remaining on the \
+credential.",
          body = crate::openapi::IssueResponse),
         (status = 400, description = "Body validation failed (with per-field `fields`), or \
 `Malformed JSON in request body` when a body is present but not JSON. An empty body is \
@@ -158,8 +159,10 @@ verification.",
          })),
         (status = 429, description = "Per-subject rate limit exceeded (with `Retry-After`).",
          example = json!({ "error": "Rate limit exceeded. Please retry after 60 seconds." })),
-        (status = 503, description = "Cloudflare could not be reached and no cached credential \
-was usable (with `Retry-After`).",
+        (status = 503, description = "The credential provider could not issue and no cached \
+credential was usable (with `Retry-After`). Only reachable on the Cloudflare provider, which \
+depends on an upstream call; a coturn deployment computes credentials locally and never returns \
+this.",
          example = json!({ "error": "Credentials are temporarily unavailable." })),
     )
 )]
