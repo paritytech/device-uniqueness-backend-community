@@ -107,6 +107,34 @@ fn state_with_base_url(
     rate_limit: u32,
     base_url: String,
 ) -> AppState {
+    state_with_provider(
+        proof,
+        rate_limit,
+        turn::config::ProviderConfig::Cloudflare {
+            key_id: "test-key-id".to_string(),
+            api_token: "test-api-token".to_string(),
+            base_url: Some(base_url),
+        },
+    )
+}
+
+/// The coturn provider, which computes credentials locally from this secret.
+const COTURN_SECRET: &[u8] = b"relay-shared-secret";
+
+fn coturn_provider() -> turn::config::ProviderConfig {
+    turn::config::ProviderConfig::Coturn {
+        secret: COTURN_SECRET.to_vec(),
+        algorithm: turn::credentials::Algorithm::Sha1,
+        realm: "example.org".to_string(),
+        ice_servers: vec!["turn:turn.example.org:3478?transport=udp".to_string()],
+    }
+}
+
+fn state_with_provider(
+    proof: Option<(ProofConfig, Option<Snapshot>)>,
+    rate_limit: u32,
+    provider: turn::config::ProviderConfig,
+) -> AppState {
     let key = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
     let (proof_config, snapshot) = match proof {
         Some((config, snapshot)) => (Some(config), snapshot),
@@ -115,11 +143,7 @@ fn state_with_base_url(
     let config = Config {
         bind_addr: "127.0.0.1:0".parse().expect("valid addr"),
         ttl_secs: 1800,
-        provider: turn::config::ProviderConfig::Cloudflare {
-            key_id: "test-key-id".to_string(),
-            api_token: "test-api-token".to_string(),
-            base_url: Some(base_url),
-        },
+        provider,
         jwt_verifier: jwt_verify::Verifier::from_public_key(None, key.verifying_key().as_bytes()),
         rate_limit,
         rate_window: Duration::from_secs(60),
@@ -818,4 +842,98 @@ fn spawn_cloudflare_stub() -> String {
         axum::serve(listener, router).await.ok();
     });
     format!("http://{addr}")
+}
+
+/// On the coturn provider the proof route's unlinkability comes from the
+/// credential id rather than from Cloudflare minting a fresh one: a keyed digest
+/// over the product and the caller's contextual alias. These pin the property
+/// the derivation exists for — the id is opaque, and it is scoped to one person
+/// and one product.
+#[tokio::test]
+async fn the_coturn_provider_derives_an_opaque_id_from_product_and_alias() {
+    let ring = test_ring();
+    let app = turn::routes(state_with_provider(
+        Some((proof_config(), Some(snapshot_of(ring.commitment.clone())))),
+        100,
+        coturn_provider(),
+    ));
+
+    let (status, json) = post_json(
+        &app,
+        "/api/v1/turn/issue-with-proof",
+        Some(fresh_body(&ring, 2)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{json}");
+
+    let username = json["username"].as_str().expect("username");
+    let (_, id) = username.split_once(':').expect("expiry:id");
+    // Sixteen bytes of keyed digest, not the eight random ones the JWT route
+    // uses — a caller cannot tell the two routes' credentials apart by shape.
+    assert_eq!(id.len(), 32, "id half: {id}");
+    assert!(id
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+
+    // The alias itself must not appear anywhere in the response.
+    let body = json.to_string();
+    assert!(!body.contains("alias"), "{body}");
+    let mut keys: Vec<_> = json.as_object().expect("object").keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["password", "servers", "ttl", "username"]);
+}
+
+/// The same person proving for two different products must not be correlatable
+/// across them by credential id.
+///
+/// Note this asserts the end-to-end property, not its mechanism: the ids differ
+/// here because each product has its own proof context and so its own alias.
+/// That the product is *also* bound into the digest is pinned separately, by
+/// `proof_credentials_change_across_product_alias_or_time` in `credentials`.
+#[tokio::test]
+async fn one_person_gets_unrelated_ids_for_two_products() {
+    let ring = test_ring();
+    let app = turn::routes(state_with_provider(
+        Some((proof_config(), Some(snapshot_of(ring.commitment.clone())))),
+        100,
+        coturn_provider(),
+    ));
+
+    let mut ids = Vec::new();
+    for product in [PRODUCT, OTHER_PRODUCT] {
+        let timestamp = now_unix() + PROOF_MAX_SKEW_SECS;
+        let context = turn::proof::context::product_context(product, SUFFIX);
+        let proof = prove(&ring, 2, &context, timestamp);
+        let (status, json) = post_json(
+            &app,
+            "/api/v1/turn/issue-with-proof",
+            Some(body_for(product, &proof, 0, timestamp)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{product}: {json}");
+        let username = json["username"].as_str().expect("username").to_string();
+        ids.push(username.split_once(':').expect("expiry:id").1.to_string());
+    }
+    assert_ne!(ids[0], ids[1], "the same id served two products");
+}
+
+/// Computed locally, so there is no upstream to be unavailable: the route
+/// answers 201 with no Cloudflare stub configured anywhere.
+#[tokio::test]
+async fn the_coturn_provider_cannot_report_credentials_unavailable() {
+    let ring = test_ring();
+    let app = turn::routes(state_with_provider(
+        Some((proof_config(), Some(snapshot_of(ring.commitment.clone())))),
+        100,
+        coturn_provider(),
+    ));
+
+    let (status, json) = post_json(
+        &app,
+        "/api/v1/turn/issue-with-proof",
+        Some(fresh_body(&ring, 1)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{json}");
+    assert_eq!(json["ttl"], serde_json::json!(1800));
 }
