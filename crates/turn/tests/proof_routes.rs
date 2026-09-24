@@ -224,8 +224,6 @@ async fn proof_flow_mints_credentials_and_rejects_bad_proofs() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{json}");
-    // Cloudflare mints the pair; the route passes it through unchanged and
-    // flattens every URL it returned into `servers`.
     assert_eq!(json["username"], serde_json::json!("stub-username"));
     assert_eq!(json["password"], serde_json::json!("stub-credential"));
     assert_eq!(
@@ -459,8 +457,6 @@ async fn each_request_reports_the_full_remaining_ttl() {
     let request = fresh_body(&ring, 1);
     let (status, json) = post_json(&app, "/api/v1/turn/issue-with-proof", Some(request)).await;
     assert_eq!(status, StatusCode::CREATED, "{json}");
-    // A freshly issued credential has its whole life ahead of it, so `ttl` is
-    // the granted TTL exactly — it shrinks only when a cached one is served.
     assert_eq!(json["ttl"], serde_json::json!(1800));
     assert_eq!(json["username"], serde_json::json!("stub-username"));
 }
@@ -756,10 +752,6 @@ async fn wrong_method_returns_the_json_not_found() {
 }
 
 /// A stand-in for Cloudflare Realtime TURN, bound on a loopback port.
-///
-/// Returns the documented response shape — a credential-less STUN entry plus
-/// one credentialed TURN entry — so the routes exercise the real client and
-/// parser without reaching the live API. Returns the base URL to configure.
 fn spawn_cloudflare_stub() -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub");
     listener.set_nonblocking(true).expect("nonblocking");
