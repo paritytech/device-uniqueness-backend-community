@@ -98,7 +98,7 @@ impl WriterConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         let database_url = http_common::config::required_var("DEVICE_ATTESTATION_DATABASE_URL")?;
         let people_rpc_url = std::env::var("PEOPLE_RPC_URL")
-            .unwrap_or_else(|_| "wss://previewnet.substrate.dev/people".to_string());
+            .unwrap_or_else(|_| "wss://paseo-people-next-system-rpc.polkadot.io".to_string());
         let signer_suri = http_common::config::required_var("CHAIN_WRITER_SIGNER_SURI")?;
         let attester = crate::config::attester_account_from_env()?;
         let holder_id = match std::env::var("CHAIN_WRITER_HOLDER_ID") {
@@ -496,7 +496,7 @@ mod tests {
         let config = from_env_with(REQUIRED_ENV).unwrap();
         assert_eq!(
             config.people_rpc_url,
-            "wss://previewnet.substrate.dev/people"
+            "wss://paseo-people-next-system-rpc.polkadot.io"
         );
         assert!(
             config

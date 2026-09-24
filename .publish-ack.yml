@@ -131,16 +131,18 @@ accepted:
       should not depend on; anyone running their own substitutes their domain.
     action: kept, documented in README
 
-  - id: previewnet_rpc
+  - id: paseo_next_rpc
     paths:
       - .env.example
       - docker-compose.yml
-    finding: wss://previewnet.substrate.dev is the default People Chain RPC.
+    finding: >-
+      wss://paseo-people-next-system-rpc.polkadot.io and
+      wss://paseo-asset-hub-next-rpc.polkadot.io are the default chain RPCs.
     reason: >-
-      A public, volunteer-run test network endpoint. The stack cannot start
-      without an RPC URL, so a default is more useful than an empty value.
-      PreviewNet is wiped and re-spawned routinely — documented in the
-      operations guide, along with how to point at a different chain.
+      Public test network endpoints. The stack cannot start without an RPC URL,
+      so a default is more useful than an empty value. Paseo Next v2 is wiped
+      and re-spawned routinely — documented in the operations guide, along with
+      how to point at a different chain.
     action: kept, documented in docs/operations.md
 
   - id: verifiable_git_dep

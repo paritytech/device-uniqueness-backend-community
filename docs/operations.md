@@ -123,7 +123,7 @@ The values you must decide, at minimum:
 | `TURN_SECRET` | Shared with your coturn relay; must match it exactly. |
 
 The defaults in `.env.example` point at a public test network
-(`wss://previewnet.substrate.dev`) and use well-known dev keys (`//Alice`,
+(`wss://paseo-people-next-system-rpc.polkadot.io`) and use well-known dev keys (`//Alice`,
 `//Bob`). They exist so `docker compose up` works on a laptop. **Replace every
 one of them before a deployment anyone else can reach.**
 
@@ -136,12 +136,8 @@ runtime, and changing it means rebuilding.
 
 | `DUB_NETWORK` | People runtime | Deployments | Vendored metadata | invite-tickets |
 | --- | --- | --- | --- | --- |
-| `testnet` (default) | `next-people-paseo` | previewnet, paseo-next-v2 | `metadata.testnet.scale` | yes |
+| `testnet` (default) | `next-people-paseo` | paseo-next-v2 | `metadata.testnet.scale` | yes |
 | `polkadot` | `people-polkadot` | polkadot-test | `metadata.polkadot.scale` | no — the runtime has no `Game` / `ProofOfInk` |
-
-previewnet and paseo-next-v2 are **one** build: same runtime, same metadata.
-What separates them is `ENV_ID` and their endpoints. Split the flag again only
-if their runtimes diverge.
 
 - **Build — the one trap worth reading twice.** `docker compose build` reads
   `DUB_NETWORK` from `.env` and is correct with nothing else set. **`docker

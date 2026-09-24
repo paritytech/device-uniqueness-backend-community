@@ -20,6 +20,19 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
   delay for that search after every restart and on every burst. It now starts at
   the size that fits. `CHAIN_WRITER_BATCH_SIZE` no longer caps the dotNS lane.
 
+- **PreviewNet is gone; `testnet` means paseo-next-v2.** The default endpoints
+  are now `wss://paseo-people-next-system-rpc.polkadot.io` and
+  `wss://paseo-asset-hub-next-rpc.polkadot.io` in `.env.example`, compose and
+  the built-in fallbacks. `DUB_NETWORK=testnet` still selects the same
+  `next-people-paseo` metadata — the runtime did not change, only the deployment
+  it names — so no rebuild is required, but an environment relying on the old
+  `wss://previewnet.substrate.dev` defaults must now set `PEOPLE_RPC_URL` and
+  `ASSET_HUB_RPC_URL` explicitly. The previewnet Prometheus job, the Alloy
+  `dub-previewnet` log label, the `identity-previewnet.dotspark.app` gateway
+  site block and its `PREVIEW_GATEWAY_ADDRESS` variable are removed, as are the
+  two previewnet-only entries in `KNOWN_RUNTIMES` (the signing extension tuples
+  are unchanged — they were already the union).
+
 ### Fixed
 
 - **Compose now passes device-attestation-api its attestation settings.** The
