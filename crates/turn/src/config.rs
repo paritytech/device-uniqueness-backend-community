@@ -39,8 +39,9 @@ pub struct Config {
     pub proof: Option<ProofConfig>,
 }
 
-/// The HMAC secret must never reach logs, spans, or error output, so `Debug`
-/// is implemented by hand. (The JWT material is the public verification key.)
+/// The Cloudflare API token must never reach logs, spans, or error output, so
+/// `Debug` is implemented by hand. (The JWT material is the public
+/// verification key, and the TURN key id is not a secret.)
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")

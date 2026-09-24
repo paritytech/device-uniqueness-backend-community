@@ -99,6 +99,14 @@ fn state_with_rate_limit(
     proof: Option<(ProofConfig, Option<Snapshot>)>,
     rate_limit: u32,
 ) -> AppState {
+    state_with_base_url(proof, rate_limit, spawn_cloudflare_stub())
+}
+
+fn state_with_base_url(
+    proof: Option<(ProofConfig, Option<Snapshot>)>,
+    rate_limit: u32,
+    base_url: String,
+) -> AppState {
     let key = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
     let (proof_config, snapshot) = match proof {
         Some((config, snapshot)) => (Some(config), snapshot),
@@ -109,7 +117,7 @@ fn state_with_rate_limit(
         ttl_secs: 1800,
         turn_key_id: "test-key-id".to_string(),
         turn_api_token: "test-api-token".to_string(),
-        cloudflare_base_url: Some(spawn_cloudflare_stub()),
+        cloudflare_base_url: Some(base_url),
         jwt_verifier: jwt_verify::Verifier::from_public_key(None, key.verifying_key().as_bytes()),
         rate_limit,
         rate_window: Duration::from_secs(60),
@@ -444,6 +452,34 @@ async fn proofs_are_raw_host_bytes_of_exactly_one_signature() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{json}");
+}
+
+#[tokio::test]
+async fn a_verified_proof_with_no_credential_upstream_is_a_503() {
+    let ring = test_ring();
+    let state = state_with_base_url(
+        Some((proof_config(), Some(snapshot_of(ring.commitment.clone())))),
+        100,
+        "http://127.0.0.1:1/v1".to_string(),
+    );
+    let app = turn::routes(state);
+
+    let (status, json) = post_json(
+        &app,
+        "/api/v1/turn/issue-with-proof",
+        Some(fresh_body(&ring, 2)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{json}");
+    assert_eq!(
+        json["error"],
+        serde_json::json!("Credentials are temporarily unavailable.")
+    );
+    assert!(json.get("username").is_none(), "{json}");
+    assert_eq!(
+        json.as_object().expect("object").keys().collect::<Vec<_>>(),
+        vec!["error"]
+    );
 }
 
 #[tokio::test]
