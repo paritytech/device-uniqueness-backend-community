@@ -67,7 +67,8 @@ this deployment still holds (deliberately unspecific)."),
 `Retry-After`)."),
         (status = 503, description = "Verification unavailable: no ring-root snapshot yet (chain \
 unreachable since boot), the bounded waiter queue is full, or all verification slots remained busy \
-for the bounded wait. Saturation responses include `Retry-After`."),
+for the bounded wait. Also returned when the proof verified but Cloudflare could not be reached and \
+no cached credential was usable. Saturation and upstream responses include `Retry-After`."),
     )
 )]
 pub(crate) async fn issue_with_proof(

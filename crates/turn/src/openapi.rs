@@ -15,24 +15,30 @@ pub struct IssueRequest {
     pub region_hint: Option<String>,
 }
 
-/// The 201 body: coturn REST-API ephemeral credentials plus the ICE
-/// server list.
+/// The 201 body: the ephemeral credential Cloudflare Realtime TURN minted for
+/// this request, plus the ICE server list it returned.
 #[derive(Serialize, ToSchema)]
 #[allow(dead_code)] // documentation-only mirror of the wire shape
 pub struct IssueResponse {
-    /// Configured ICE server URLs (`stun:` / `turn:` forms), echoed verbatim.
-    #[schema(example = json!(["stun:stun.example.com:3478", "turn:turn.example.com:3478?transport=udp"]))]
+    /// Every ICE server URL Cloudflare returned (`stun:` / `turn:` / `turns:`
+    /// forms), flattened into one list in response order.
+    #[schema(example = json!([
+        "stun:stun.cloudflare.com:3478",
+        "turn:turn.cloudflare.com:3478?transport=udp",
+        "turn:turn.cloudflare.com:3478?transport=tcp",
+        "turns:turn.cloudflare.com:5349?transport=tcp"
+    ]))]
     pub servers: Vec<String>,
-    /// `{unixExpiry}:{hexId}`. JWT issuance uses mint time + configured TTL
-    /// and 8 random id bytes; proof issuance uses mint time + configured TTL
-    /// and a deterministic opaque 16-byte id derived from product and alias.
-    #[schema(example = "1784757652:0a79e3412921701a")]
+    /// The username Cloudflare minted for this request. Opaque: it carries no
+    /// structure to parse, and nothing derived from the caller's identity.
+    #[schema(example = "d2f4a1c6b8e05379")]
     pub username: String,
-    /// Base64 HMAC over `username` under the relay-shared secret (algorithm
-    /// per deployment config, default HMAC-SHA1).
-    #[schema(example = "qmg5g7d1bXzY0qZkRUqtIPEIKjA=")]
+    /// The matching credential Cloudflare minted. Opaque.
+    #[schema(example = "9f83b1e6c0a74d25b3f8e1a70c4d69b2")]
     pub password: String,
-    /// Credential time-to-live in whole seconds (the configured `ttl_secs`).
+    /// Seconds of life remaining on this credential. Normally the TTL granted
+    /// by Cloudflare; lower if a cached credential was served because
+    /// Cloudflare was briefly unreachable.
     #[schema(example = 1800)]
     pub ttl: u64,
 }
@@ -64,11 +70,12 @@ impl Modify for SecurityAddon {
 #[openapi(
     tags(
         (name = "TURN",
-         description = "Short-lived TURN credentials for WebRTC ICE negotiation: the coturn \
-REST-API construction (username = expiry:id, password = HMAC over the username) minted \
-against a secret shared with the TURN relay. Stateless — nothing is stored. Issuance is \
-authorized either by an access JWT (`/issue`) or, when enabled, by a personhood ring-VRF \
-proof over a client-timestamped message (`/issue-with-proof`).")
+         description = "Short-lived TURN credentials for WebRTC ICE negotiation, issued by \
+Cloudflare Realtime TURN. Each request gets its own credential, so callers are mutually \
+unlinkable; nothing is stored beyond the last response, which is served if Cloudflare is \
+briefly unreachable. Issuance is authorized either by an access JWT (`/issue`) or, when \
+enabled, by a personhood ring-VRF proof over a client-timestamped message \
+(`/issue-with-proof`).")
     ),
     paths(
         crate::http::issue_credentials,

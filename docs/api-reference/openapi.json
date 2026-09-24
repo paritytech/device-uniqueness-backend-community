@@ -971,7 +971,7 @@
         },
         "responses": {
           "201": {
-            "description": "Credentials minted: `username` is `{unixExpiry}:{hexId}` (expiry = now + TTL), `password` is the base64 HMAC over `username` under the secret shared with the TURN relay (the coturn REST-API construction), `servers` echoes the configured ICE server list.",
+            "description": "Credentials issued by Cloudflare Realtime TURN: `username` and `password` are the pair Cloudflare minted for this request, `servers` is the ICE server list it returned, and `ttl` is the seconds of life remaining on the credential.",
             "content": {
               "application/json": {
                 "schema": {
@@ -988,6 +988,9 @@
           },
           "429": {
             "description": "Per-subject rate limit exceeded (with `Retry-After`)."
+          },
+          "503": {
+            "description": "Cloudflare could not be reached and no cached credential was usable (with `Retry-After`)."
           }
         },
         "security": [
@@ -1016,7 +1019,7 @@
         },
         "responses": {
           "201": {
-            "description": "Proof accepted; returns servers, username, password, and the configured TTL. Credentials expire `ttl` seconds after issuance; no alias appears in the response.",
+            "description": "Proof accepted; returns the servers, username and password Cloudflare minted for this request, and `ttl`, the seconds of life remaining on them. No alias appears in the response.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1035,7 +1038,7 @@
             "description": "This person's redemption limit was exceeded (with `Retry-After`)."
           },
           "503": {
-            "description": "Verification unavailable: no ring-root snapshot yet (chain unreachable since boot), the bounded waiter queue is full, or all verification slots remained busy for the bounded wait. Saturation responses include `Retry-After`."
+            "description": "Verification unavailable: no ring-root snapshot yet (chain unreachable since boot), the bounded waiter queue is full, or all verification slots remained busy for the bounded wait. Also returned when the proof verified but Cloudflare could not be reached and no cached credential was usable. Saturation and upstream responses include `Retry-After`."
           }
         }
       }
@@ -1709,7 +1712,7 @@
       },
       "IssueResponse": {
         "type": "object",
-        "description": "The 201 body: coturn REST-API ephemeral credentials plus the ICE\nserver list.",
+        "description": "The 201 body: the ephemeral credential Cloudflare Realtime TURN minted for\nthis request, plus the ICE server list it returned.",
         "required": [
           "servers",
           "username",
@@ -1722,26 +1725,28 @@
             "items": {
               "type": "string"
             },
-            "description": "Configured ICE server URLs (`stun:` / `turn:` forms), echoed verbatim.",
+            "description": "Every ICE server URL Cloudflare returned (`stun:` / `turn:` / `turns:`\nforms), flattened into one list in response order.",
             "example": [
-              "stun:stun.example.com:3478",
-              "turn:turn.example.com:3478?transport=udp"
+              "stun:stun.cloudflare.com:3478",
+              "turn:turn.cloudflare.com:3478?transport=udp",
+              "turn:turn.cloudflare.com:3478?transport=tcp",
+              "turns:turn.cloudflare.com:5349?transport=tcp"
             ]
           },
           "username": {
             "type": "string",
-            "description": "`{unixExpiry}:{hexId}`. JWT issuance uses mint time + configured TTL\nand 8 random id bytes; proof issuance uses mint time + configured TTL\nand a deterministic opaque 16-byte id derived from product and alias.",
-            "example": "1784757652:0a79e3412921701a"
+            "description": "The username Cloudflare minted for this request. Opaque: it carries no\nstructure to parse, and nothing derived from the caller's identity.",
+            "example": "d2f4a1c6b8e05379"
           },
           "password": {
             "type": "string",
-            "description": "Base64 HMAC over `username` under the relay-shared secret (algorithm\nper deployment config, default HMAC-SHA1).",
-            "example": "qmg5g7d1bXzY0qZkRUqtIPEIKjA="
+            "description": "The matching credential Cloudflare minted. Opaque.",
+            "example": "9f83b1e6c0a74d25b3f8e1a70c4d69b2"
           },
           "ttl": {
             "type": "integer",
             "format": "int64",
-            "description": "Credential time-to-live in whole seconds (the configured `ttl_secs`).",
+            "description": "Seconds of life remaining on this credential. Normally the TTL granted\nby Cloudflare; lower if a cached credential was served because\nCloudflare was briefly unreachable.",
             "example": 1800,
             "minimum": 0
           }
@@ -1970,7 +1975,7 @@
     },
     {
       "name": "TURN",
-      "description": "Short-lived TURN credentials for WebRTC ICE negotiation: the coturn REST-API construction (username = expiry:id, password = HMAC over the username) minted against a secret shared with the TURN relay. Stateless — nothing is stored. Issuance is authorized either by an access JWT (`/issue`) or, when enabled, by a personhood ring-VRF proof over a client-timestamped message (`/issue-with-proof`)."
+      "description": "Short-lived TURN credentials for WebRTC ICE negotiation, issued by Cloudflare Realtime TURN. Each request gets its own credential, so callers are mutually unlinkable; nothing is stored beyond the last response, which is served if Cloudflare is briefly unreachable. Issuance is authorized either by an access JWT (`/issue`) or, when enabled, by a personhood ring-VRF proof over a client-timestamped message (`/issue-with-proof`)."
     },
     {
       "name": "Notifications",
