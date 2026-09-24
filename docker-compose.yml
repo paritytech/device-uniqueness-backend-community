@@ -435,10 +435,10 @@ services:
       replicas: 1
 
   # TURN credential issuer: stateless (no DB; read-only People Chain root cache
-  # when proof issuance is enabled). The only secret is the HMAC key shared
-  # with the TURN relay (coturn `--use-auth-secret` mode must use the SAME
-  # secret and algorithm, or minted credentials will not authenticate). Safe
-  # to scale within one environment; each environment pins its own RPC/genesis.
+  # when proof issuance is enabled). Credentials come from Cloudflare Realtime
+  # TURN, one per request, so the only secret is the Cloudflare API token and
+  # there is no relay-shared key to keep in step. Safe to scale within one
+  # environment; each environment pins its own RPC/genesis.
   turn-api:
     build:
       context: .
@@ -452,15 +452,8 @@ services:
     restart: unless-stopped
     environment:
       BIND_ADDR: 0.0.0.0:8080
-      # Dev secret (base64 of 32×0x42 — the golden-capture secret). In prod
-      # this MUST be the relay-shared secret; rotate by restarting relay and
-      # issuer together.
-      TURN_SECRET: ${TURN_SECRET:-QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=}
-      TURN_AUTH_ALGORITHM: ${TURN_AUTH_ALGORITHM:-SHA1}
       TURN_TTL_SECS: ${TURN_TTL_SECS:-1800}
-      TURN_REALM: ${TURN_REALM:-example.org}
-      ICE_SERVERS: ${ICE_SERVERS:-stun:stun.example.com:3478,turn:turn.example.com:3478?transport=udp}
-      # Cloudflare Realtime TURN, the credential authority. 
+      # Cloudflare Realtime TURN, the credential authority.
       TURN_KEY_ID: ${TURN_KEY_ID:-}
       TURN_API_TOKEN: ${TURN_API_TOKEN:-}
       # Verifies device-attestation JWTs. Dev default = the public half of

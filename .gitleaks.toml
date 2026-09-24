@@ -46,10 +46,11 @@ regexes = [
   # The commented-out FCM service-account template in .env.example, whose
   # private_key field is the literal three dots.
   '''PRIVATE KEY-----\\n\.\.\.\\n-----END PRIVATE KEY''',
-  # The dev TURN_SECRET in .env.example: base64 of the literal string
-  # "dev-only-turn-secret-change-me". turn-api refuses to boot on invalid
-  # base64, so the template ships a working value rather than a placeholder
-  # that crash-loops a fresh `docker compose up`. It is published on purpose,
-  # says so in the file, and authenticates against no real relay.
+  # The retired dev TURN_SECRET: base64 of the literal string
+  # "dev-only-turn-secret-change-me". No longer in the working tree — turn-api
+  # gets credentials from Cloudflare Realtime TURN and holds no shared secret
+  # at all — but it remains in history, so the full-history scan still sees it.
+  # It was published on purpose, said so in the file, and authenticates against
+  # nothing that exists any more.
   '''ZGV2LW9ubHktdHVybi1zZWNyZXQtY2hhbmdlLW1l''',
 ]

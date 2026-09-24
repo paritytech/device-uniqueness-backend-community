@@ -126,7 +126,7 @@ done
 # liveness signal, so it needs its cadence knobs.
 for key in JWT_ED25519_SECRET JWT_ED25519_PUBLIC_KEY JWT_JWKS_JSON \
            CHAIN_WRITER_SIGNER_SURI INVITER_SIGNER_SURI INVITE_INVITER_SIGNER_SURI \
-           TURN_SECRET; do
+           TURN_API_TOKEN; do
   forbid_key registration-queue "$key"
 done
 require_key registration-queue QUEUE_ADVANCE_INTERVAL_SECS
@@ -144,7 +144,7 @@ require_key device-attestation-chain-writer QUEUE_FALLBACK_AFTER_SECS
 # service can never mint a token. The signing secret and every other service's
 # secret stay out.
 for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI INVITER_SIGNER_SURI \
-           INVITE_INVITER_SIGNER_SURI TURN_SECRET; do
+           INVITE_INVITER_SIGNER_SURI TURN_API_TOKEN; do
   forbid_key username-indexer "$key"
 done
 require_key username-indexer SEARCH_RATE_LIMIT
@@ -242,6 +242,18 @@ require_key invite-tickets-api INVITE_TICKETS_RATE_LIMIT
 require_key invite-tickets-api INVITE_TICKETS_RATE_LIMIT_WINDOW_SECS
 require_key turn-api TURN_RATE_LIMIT
 require_key turn-api TURN_RATE_LIMIT_WINDOW_SECS
+
+# Cloudflare Realtime TURN is the credential authority: turn-api is the only
+# service that calls it, and the only one that may hold the token. The key id
+# is not a secret (it is in the request path) but is still service-scoped —
+# a stray copy elsewhere means another service was meant to mint credentials.
+require_key turn-api TURN_KEY_ID
+require_key turn-api TURN_API_TOKEN
+for service in "${APP_SERVICES[@]}"; do
+  if [ "$service" != turn-api ]; then
+    forbid_key "$service" TURN_KEY_ID
+  fi
+done
 for service in "${APP_SERVICES[@]}"; do
   forbid_key "$service" RATE_LIMIT
   forbid_key "$service" RATE_LIMIT_WINDOW_SECS
@@ -250,7 +262,7 @@ done
 # notify-relay is verify-only and holds its own push secrets, but never another
 # service's signing/DB secrets.
 for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI INVITER_SIGNER_SURI \
-           INVITE_INVITER_SIGNER_SURI TURN_SECRET "${DB_URL_KEYS[@]}"; do
+           INVITE_INVITER_SIGNER_SURI TURN_API_TOKEN "${DB_URL_KEYS[@]}"; do
   forbid_key notify-relay "$key"
 done
 require_key notify-relay JWT_ED25519_PUBLIC_KEY
@@ -263,7 +275,7 @@ require_key notify-relay NOTIFY_RATE_LIMIT_WINDOW_SECS
 (
   rendered="$rendered_gateway"
   for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI INVITER_SIGNER_SURI \
-             INVITE_INVITER_SIGNER_SURI TURN_SECRET "${DB_URL_KEYS[@]}" JWT_JWKS_JSON \
+             INVITE_INVITER_SIGNER_SURI TURN_API_TOKEN "${DB_URL_KEYS[@]}" JWT_JWKS_JSON \
              JWT_ED25519_PUBLIC_KEY APNS_PRIVATE_KEY APNS_PRIVATE_KEY_FILE \
              FCM_SERVICE_ACCOUNT_JSON POC_HMAC_SECRET \
              ASSET_HUB_RPC_URL DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS \
@@ -300,7 +312,7 @@ fi
   rendered="$rendered_observability"
   for service in prometheus loki alloy grafana; do
     for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI INVITER_SIGNER_SURI \
-               INVITE_INVITER_SIGNER_SURI TURN_SECRET POC_HMAC_SECRET "${DB_URL_KEYS[@]}" \
+               INVITE_INVITER_SIGNER_SURI TURN_API_TOKEN POC_HMAC_SECRET "${DB_URL_KEYS[@]}" \
                APNS_PRIVATE_KEY FCM_SERVICE_ACCOUNT_JSON; do
       forbid_key "$service" "$key"
     done

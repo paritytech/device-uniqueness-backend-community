@@ -83,17 +83,19 @@ accepted:
   - id: dev_turn_secret
     paths:
       - .env.example
-    finding: TURN_SECRET ships a real base64 value rather than a placeholder.
+    finding: >-
+      A dev TURN_SECRET was committed in .env.example and remains in history,
+      though no longer in the working tree.
     reason: >-
-      turn-api refuses to boot on invalid base64, so the previous
-      `<base64-secret>` placeholder crash-looped a fresh `docker compose up` —
-      a real defect for a repository whose quickstart is
-      `cp .env.example .env`. The committed value is base64 of the literal
-      string "dev-only-turn-secret-change-me". It is published on purpose, the
-      file says so in capitals, and it authenticates against no real relay.
+      turn-api now gets its credentials from Cloudflare Realtime TURN, which
+      mints both halves per request, so the service holds no relay-shared
+      secret and .env.example ships no such value. The committed one was
+      base64 of the literal string "dev-only-turn-secret-change-me", published
+      on purpose, and authenticated against no real relay even when it was
+      live. History still carries it, so the full-history scan still finds it.
     action: >-
-      fixed in the snapshot (was a broken placeholder upstream); allowlisted by
-      regex in .gitleaks.toml
+      removed from the working tree with the coturn credential path; the
+      historical occurrence stays allowlisted by regex in .gitleaks.toml
 
   - id: unfixable_advisories
     paths:
