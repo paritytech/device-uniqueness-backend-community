@@ -179,21 +179,24 @@ pub(crate) async fn issue_credentials(
     let () = check_rate_limit(&state, auth.subject).await?;
 
     let now_unix = now_unix();
-    let credentials = state
-        .cloudflare
+    let issued = state
+        .source
         .issue(now_unix)
         .await
         .map_err(|_| AppError::UpstreamUnavailable)?;
-    let ttl = credentials.remaining(now_unix);
 
-    tracing::info!(ttl_secs = ttl, "TURN credentials issued");
+    tracing::info!(
+        ttl_secs = issued.ttl,
+        provider = state.source.name(),
+        "TURN credentials issued"
+    );
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
-            "servers": credentials.servers,
-            "username": credentials.username,
-            "password": credentials.password,
-            "ttl": ttl,
+            "servers": issued.servers,
+            "username": issued.username,
+            "password": issued.password,
+            "ttl": issued.ttl,
         })),
     ))
 }

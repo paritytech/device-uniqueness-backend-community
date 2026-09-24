@@ -158,22 +158,28 @@ pub(crate) async fn issue_with_proof(
             retry_after_secs: err.wait_time_from(state.limiter.current_time()).as_secs(),
         })?;
 
+    // The alias reaches the source and stops there: on the coturn path it is an
+    // input to a keyed digest, on the Cloudflare path it is not used at all.
+    // Either way nothing recoverable from it reaches the response.
     let issued_at = now_unix();
-    let credentials = state
-        .cloudflare
-        .issue(issued_at)
+    let issued = state
+        .source
+        .issue_for_proof(issued_at, &body.product_id, alias.as_ref())
         .await
         .map_err(|_| AppError::UpstreamUnavailable)?;
-    let ttl = credentials.remaining(issued_at);
 
-    tracing::info!(ttl_secs = ttl, "TURN credentials issued via proof");
+    tracing::info!(
+        ttl_secs = issued.ttl,
+        provider = state.source.name(),
+        "TURN credentials issued via proof"
+    );
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
-            "servers": credentials.servers,
-            "username": credentials.username,
-            "password": credentials.password,
-            "ttl": ttl,
+            "servers": issued.servers,
+            "username": issued.username,
+            "password": issued.password,
+            "ttl": issued.ttl,
         })),
     ))
 }

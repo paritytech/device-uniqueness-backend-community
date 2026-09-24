@@ -12,7 +12,7 @@ pub async fn run() -> anyhow::Result<()> {
     tracing::info!(
         bind = %config.bind_addr,
         ttl_secs = config.ttl_secs,
-        turn_key_id = %config.turn_key_id,
+        provider = config.provider.name(),
         "starting turn-api"
     );
 

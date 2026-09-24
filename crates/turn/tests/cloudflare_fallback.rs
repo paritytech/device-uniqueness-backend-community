@@ -95,9 +95,11 @@ fn app(stub: &Stub) -> axum::Router {
     turn::routes(AppState::new(Config {
         bind_addr: "127.0.0.1:0".parse().expect("valid addr"),
         ttl_secs: GRANTED_TTL,
-        turn_key_id: "test-key-id".to_string(),
-        turn_api_token: "test-api-token".to_string(),
-        cloudflare_base_url: Some(stub.base_url.clone()),
+        provider: turn::config::ProviderConfig::Cloudflare {
+            key_id: "test-key-id".to_string(),
+            api_token: "test-api-token".to_string(),
+            base_url: Some(stub.base_url.clone()),
+        },
         jwt_verifier: jwt.verifier().clone(),
         // High enough that the rate limiter never masks what is being tested.
         rate_limit: 1_000,

@@ -16,11 +16,11 @@ fn app(proof: bool) -> axum::Router {
     turn::routes(AppState::new(Config {
         bind_addr: "127.0.0.1:0".parse().expect("valid addr"),
         ttl_secs: 1800,
-        turn_key_id: "test-key-id".to_string(),
-        turn_api_token: "test-api-token".to_string(),
-        // No test here reaches a 201; the stub is wired up so that none can
-        // reach the live API by accident either.
-        cloudflare_base_url: Some(spawn_cloudflare_stub()),
+        provider: turn::config::ProviderConfig::Cloudflare {
+            key_id: "test-key-id".to_string(),
+            api_token: "test-api-token".to_string(),
+            base_url: Some(spawn_cloudflare_stub()),
+        },
         jwt_verifier: jwt_verify::Verifier::from_public_key(None, key.verifying_key().as_bytes()),
         rate_limit: 100,
         rate_window: Duration::from_secs(60),

@@ -115,9 +115,11 @@ fn state_with_base_url(
     let config = Config {
         bind_addr: "127.0.0.1:0".parse().expect("valid addr"),
         ttl_secs: 1800,
-        turn_key_id: "test-key-id".to_string(),
-        turn_api_token: "test-api-token".to_string(),
-        cloudflare_base_url: Some(base_url),
+        provider: turn::config::ProviderConfig::Cloudflare {
+            key_id: "test-key-id".to_string(),
+            api_token: "test-api-token".to_string(),
+            base_url: Some(base_url),
+        },
         jwt_verifier: jwt_verify::Verifier::from_public_key(None, key.verifying_key().as_bytes()),
         rate_limit,
         rate_window: Duration::from_secs(60),

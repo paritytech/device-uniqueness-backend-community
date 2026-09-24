@@ -3,9 +3,11 @@
 
 pub mod cloudflare;
 pub mod config;
+pub mod credentials;
 pub mod http;
 pub mod openapi;
 pub mod proof;
+pub mod source;
 
 pub use config::Config;
 pub use http::routes;
