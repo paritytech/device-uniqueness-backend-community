@@ -10,6 +10,26 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ### Changed
 
+- **`turn-api` issues credentials from Cloudflare Realtime TURN instead of
+  computing them.** The relay this service was built against is decommissioned,
+  and Cloudflare does not do shared-secret HMAC credentials: it mints both
+  halves itself and returns the ICE server list with them. `turn-api` now calls
+  `generate-ice-servers` once per request and passes the result through.
+  **Breaking for operators:** `TURN_SECRET`, `TURN_AUTH_ALGORITHM`, `TURN_REALM`
+  and `ICE_SERVERS` are gone, replaced by `TURN_KEY_ID` and `TURN_API_TOKEN`
+  (both required — the service will not boot without them). The 201 body keeps
+  its shape, so **clients need no release**, but `username` and `password` are
+  now opaque Cloudflare values: anything parsing `username` as
+  `{unixExpiry}:{hexId}` must stop. `ttl` is the life remaining on the
+  credential rather than the configured TTL, and both routes can now answer
+  `503` when Cloudflare is unreachable. Each request gets its own credential,
+  so callers stay mutually unlinkable; the last good response is cached and
+  served during an outage, and after three consecutive failures the client
+  serves that cache directly for 30s rather than making every caller wait out a
+  timeout. The proof route's alias-derived credential id is gone with the HMAC
+  it was keyed by — the alias is now purely an in-memory throttle key, and
+  nothing derived from a proof reaches the response.
+
 - **The dotNS lane has its own batch-size ceiling, `CHAIN_WRITER_DOTNS_BATCH_SIZE`
   (default 3).** Both writer lanes used to climb back to `CHAIN_WRITER_BATCH_SIZE`
   (25), but `reserve_name` dispatches through the DotNS contract on
