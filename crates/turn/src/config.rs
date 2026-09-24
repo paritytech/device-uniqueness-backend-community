@@ -3,14 +3,9 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::str::FromStr as _;
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine as _;
 pub use http_common::config::ConfigError;
 use http_common::config::{jwt_verifier_from_env, parse_var, positive, required_var};
-
-use crate::credentials::Algorithm;
 
 /// Accepted clock skew, either side of server time, for a proof request's
 /// timestamp.
@@ -26,19 +21,8 @@ pub const PROOF_MAX_ROOT_AGE: std::time::Duration = std::time::Duration::from_se
 #[derive(Clone)]
 pub struct Config {
     pub bind_addr: SocketAddr,
-    /// Raw (base64-decoded) HMAC secret shared with the TURN relay
-    /// (required; no default — fail closed).
-    pub turn_secret: Vec<u8>,
-    /// HMAC algorithm for the password (default SHA1, the coturn default).
-    pub algorithm: Algorithm,
-    /// Credential time-to-live in seconds (default 1800 = legacy's
-    /// 30 minutes).
+    /// Credential time-to-live in seconds, requested of Cloudflare
     pub ttl_secs: u64,
-    /// TURN realm (required + validated like legacy; reserved — configured on
-    /// the relay, never on this wire).
-    pub realm: String,
-    /// ICE server URLs echoed verbatim in every 201 body.
-    pub ice_servers: Vec<String>,
     /// Cloudflare Realtime TURN key id.
     pub turn_key_id: String,
     /// Cloudflare Realtime API token (required).
@@ -61,11 +45,7 @@ impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
             .field("bind_addr", &self.bind_addr)
-            .field("turn_secret", &"<redacted>")
-            .field("algorithm", &self.algorithm)
             .field("ttl_secs", &self.ttl_secs)
-            .field("realm", &self.realm)
-            .field("ice_servers", &self.ice_servers)
             .field("turn_key_id", &self.turn_key_id)
             .field("turn_api_token", &"<redacted>")
             .field("cloudflare_base_url", &self.cloudflare_base_url)
@@ -80,23 +60,11 @@ impl std::fmt::Debug for Config {
 impl Config {
     /// Read and validate configuration from the environment.
     ///
-    /// Fails (rather than defaulting) for `TURN_SECRET`, `TURN_REALM`,
-    /// `TURN_KEY_ID`, `TURN_API_TOKEN`, and the JWT key material
-    /// (`JWT_JWKS_JSON` or `JWT_ED25519_PUBLIC_KEY`).
+    /// Fails (rather than defaulting) for `TURN_KEY_ID`, `TURN_API_TOKEN`,
+    /// and the JWT key material (`JWT_JWKS_JSON` or
+    /// `JWT_ED25519_PUBLIC_KEY`).
     pub fn from_env() -> Result<Self, ConfigError> {
-        let turn_secret = decode_secret(&required_var("TURN_SECRET")?)?;
-
-        let algorithm_raw: String = parse_var("TURN_AUTH_ALGORITHM", "SHA1")?;
-        let algorithm =
-            Algorithm::from_str(algorithm_raw.trim()).map_err(|()| ConfigError::Invalid {
-                key: "TURN_AUTH_ALGORITHM",
-                reason: format!("expected SHA1|SHA256|SHA384|SHA512, got {algorithm_raw}"),
-            })?;
-
         let ttl_secs: u64 = positive("TURN_TTL_SECS", parse_var("TURN_TTL_SECS", "1800")?)?;
-        let realm = validated_realm(&required_var("TURN_REALM")?)?;
-        let ice_servers = parse_ice_servers(&std::env::var("ICE_SERVERS").unwrap_or_default())?;
-
         let turn_key_id = required_var("TURN_KEY_ID")?;
         let turn_api_token = required_var("TURN_API_TOKEN")?;
 
@@ -108,11 +76,7 @@ impl Config {
         let proof = ProofConfig::from_env()?;
         Ok(Self {
             bind_addr: parse_var("BIND_ADDR", "0.0.0.0:8080")?,
-            turn_secret,
-            algorithm,
             ttl_secs,
-            realm,
-            ice_servers,
             turn_key_id,
             turn_api_token,
             cloudflare_base_url: None,
@@ -249,81 +213,9 @@ fn hex32(key: &'static str, raw: &str) -> Result<[u8; 32], ConfigError> {
         })
 }
 
-/// Decode the base64 `TURN_SECRET` (legacy stored it base64-encoded too).
-fn decode_secret(raw: &str) -> Result<Vec<u8>, ConfigError> {
-    let bytes = BASE64
-        .decode(raw.trim())
-        .map_err(|_| ConfigError::Invalid {
-            key: "TURN_SECRET",
-            reason: "invalid base64 encoding".to_string(),
-        })?;
-    if bytes.is_empty() {
-        return Err(ConfigError::Invalid {
-            key: "TURN_SECRET",
-            reason: "must not be empty".to_string(),
-        });
-    }
-    Ok(bytes)
-}
-
-/// The legacy realm constraint: alphanumeric, underscores, dots, hyphens.
-fn validated_realm(raw: &str) -> Result<String, ConfigError> {
-    let realm = raw.trim();
-    let valid = !realm.is_empty()
-        && realm
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
-    if !valid {
-        return Err(ConfigError::Invalid {
-            key: "TURN_REALM",
-            reason: "must contain only alphanumeric characters, underscores, dots, and hyphens"
-                .to_string(),
-        });
-    }
-    Ok(realm.to_string())
-}
-
-/// Parse the comma-separated `ICE_SERVERS` list (unset/empty → empty list, as
-/// legacy defaulted). Entries are echoed verbatim on the wire, so only shape
-/// is checked: non-empty, with a URL scheme separator.
-fn parse_ice_servers(raw: &str) -> Result<Vec<String>, ConfigError> {
-    if raw.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    raw.split(',')
-        .map(|entry| {
-            let entry = entry.trim();
-            if entry.is_empty() || !entry.contains(':') {
-                return Err(ConfigError::Invalid {
-                    key: "ICE_SERVERS",
-                    reason: format!("invalid ICE server URL: {entry:?}"),
-                });
-            }
-            Ok(entry.to_string())
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn decodes_the_base64_secret_and_rejects_garbage() {
-        assert_eq!(decode_secret("QUJD").expect("valid"), b"ABC");
-        assert!(decode_secret("not base64!").is_err());
-        assert!(decode_secret("").is_err());
-    }
-
-    #[test]
-    fn realm_enforces_the_legacy_character_set() {
-        assert_eq!(
-            validated_realm(" example.org ").expect("valid"),
-            "example.org"
-        );
-        assert!(validated_realm("with space").is_err());
-        assert!(validated_realm("").is_err());
-    }
 
     #[test]
     fn products_derive_one_distinct_context_each() {
@@ -351,20 +243,5 @@ mod tests {
         assert_eq!(proof_concurrency(" 4 ").expect("explicit limit"), 4);
         assert!(proof_concurrency("0").is_err());
         assert!(proof_concurrency("many").is_err());
-    }
-
-    #[test]
-    fn ice_servers_split_trim_and_reject_schemeless_entries() {
-        assert_eq!(parse_ice_servers("").expect("valid"), Vec::<String>::new());
-        assert_eq!(
-            parse_ice_servers(" stun:a.example:3478 , turn:b.example:3478?transport=udp ")
-                .expect("valid"),
-            vec![
-                "stun:a.example:3478".to_string(),
-                "turn:b.example:3478?transport=udp".to_string(),
-            ]
-        );
-        assert!(parse_ice_servers("stun:a.example:3478,,").is_err());
-        assert!(parse_ice_servers("no-scheme").is_err());
     }
 }

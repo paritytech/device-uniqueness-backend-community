@@ -11,6 +11,8 @@ use crate::proof::message::FreshnessError;
 use crate::proof::roots::PersonhoodCollection;
 use crate::proof::verify::{self, VerifyError};
 
+use super::now_unix;
+
 /// Proof-redemption request.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 pub(crate) struct IssueWithProofBody {
@@ -51,8 +53,9 @@ pub(crate) struct IssueWithProofBody {
     tag = "TURN",
     request_body = IssueWithProofBody,
     responses(
-        (status = 201, description = "Proof accepted; returns servers, username, password, and the \
-configured TTL. Credentials expire `ttl` seconds after issuance; no alias appears in the response.",
+        (status = 201, description = "Proof accepted; returns the servers, username and password \
+Cloudflare minted for this request, and `ttl`, the seconds of life remaining on them. No alias \
+appears in the response.",
          body = crate::openapi::IssueResponse),
         (status = 400, description = "Unparseable body, invalid hex, a collection outside the \
 canonical People Lite/People allowlist, a proof that is not a single-context ring-VRF signature, \
@@ -154,28 +157,22 @@ pub(crate) async fn issue_with_proof(
             retry_after_secs: err.wait_time_from(state.limiter.current_time()).as_secs(),
         })?;
 
+    let issued_at = now_unix();
     let credentials = state
-        .issuer
-        .issue_for_proof(now_unix(), &body.product_id, alias.as_ref());
+        .cloudflare
+        .issue(issued_at)
+        .await
+        .map_err(|_| AppError::UpstreamUnavailable)?;
+    let ttl = credentials.remaining(issued_at);
 
-    tracing::info!(
-        ttl_secs = state.config.ttl_secs,
-        "TURN credentials issued via proof"
-    );
+    tracing::info!(ttl_secs = ttl, "TURN credentials issued via proof");
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
-            "servers": state.config.ice_servers,
+            "servers": credentials.servers,
             "username": credentials.username,
             "password": credentials.password,
-            "ttl": state.config.ttl_secs,
+            "ttl": ttl,
         })),
     ))
-}
-
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock after epoch")
-        .as_secs()
 }

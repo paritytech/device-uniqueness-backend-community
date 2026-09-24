@@ -7,15 +7,14 @@ use http_common::{rate_limiter::Config as RateLimiterConfig, RateLimiter};
 
 use crate::cloudflare;
 use crate::config::{Config, ProofConfig};
-use crate::credentials::Issuer;
 use crate::proof::roots::RootCaches;
 
 /// No database; the only chain-facing state is the proof root cache, refreshed
 /// by a background task and absent when the proof feature is off.
 #[derive(Clone)]
 pub struct AppState {
-    /// The credential minter (holds the relay-shared HMAC secret).
-    pub issuer: Arc<Issuer>,
+    /// Cloudflare Realtime TURN, the credential authority. Holds the API
+    /// token and the last-good response served when Cloudflare is down.
     pub cloudflare: Arc<cloudflare::Client>,
     pub verifier: Arc<jwt_verify::Verifier>,
     pub config: Arc<Config>,
@@ -80,11 +79,6 @@ impl AppState {
         )
         .expect("rate limiter config validated during startup");
 
-        let issuer = Issuer::new(
-            config.turn_secret.clone(),
-            config.algorithm,
-            config.ttl_secs,
-        );
         let cloudflare = cloudflare::Client::new(
             config.turn_key_id.clone(),
             config.turn_api_token.clone(),
@@ -103,7 +97,6 @@ impl AppState {
             None
         };
         Self {
-            issuer: Arc::new(issuer),
             cloudflare: Arc::new(cloudflare),
             verifier: Arc::new(config.jwt_verifier.clone()),
             config: Arc::new(config),

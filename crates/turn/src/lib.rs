@@ -3,7 +3,6 @@
 
 pub mod cloudflare;
 pub mod config;
-pub mod credentials;
 pub mod http;
 pub mod openapi;
 pub mod proof;

@@ -8,7 +8,6 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt as _;
 use tower::ServiceExt as _;
 use turn::config::{Config, ProofConfig, PROOF_MAX_SKEW_SECS};
-use turn::credentials::Algorithm;
 use turn::proof::message::Freshness;
 use turn::proof::roots::{AcceptedRoot, PersonhoodCollection, Snapshot};
 use turn::AppState;
@@ -107,14 +106,10 @@ fn state_with_rate_limit(
     };
     let config = Config {
         bind_addr: "127.0.0.1:0".parse().expect("valid addr"),
-        turn_secret: b"integration-turn-secret".to_vec(),
-        algorithm: Algorithm::Sha1,
         ttl_secs: 1800,
-        realm: "example.org".to_string(),
-        ice_servers: vec!["turn:turn.example.org:3478?transport=udp".to_string()],
         turn_key_id: "test-key-id".to_string(),
         turn_api_token: "test-api-token".to_string(),
-        cloudflare_base_url: None,
+        cloudflare_base_url: Some(spawn_cloudflare_stub()),
         jwt_verifier: jwt_verify::Verifier::from_public_key(None, key.verifying_key().as_bytes()),
         rate_limit,
         rate_window: Duration::from_secs(60),
@@ -229,9 +224,20 @@ async fn proof_flow_mints_credentials_and_rejects_bad_proofs() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{json}");
-    assert!(json["username"].as_str().is_some_and(|u| u.contains(':')));
-    assert!(json["password"].as_str().is_some());
+    // Cloudflare mints the pair; the route passes it through unchanged and
+    // flattens every URL it returned into `servers`.
+    assert_eq!(json["username"], serde_json::json!("stub-username"));
+    assert_eq!(json["password"], serde_json::json!("stub-credential"));
+    assert_eq!(
+        json["servers"],
+        serde_json::json!([
+            "stun:stun.cloudflare.com:3478",
+            "turn:turn.cloudflare.com:3478?transport=udp",
+            "turns:turn.cloudflare.com:5349?transport=tcp"
+        ])
+    );
     assert_eq!(json["ttl"], serde_json::json!(1800));
+    // Nothing derived from the proof may appear alongside them.
     let mut keys: Vec<_> = json.as_object().expect("object").keys().collect();
     keys.sort();
     assert_eq!(keys, ["password", "servers", "ttl", "username"]);
@@ -443,7 +449,7 @@ async fn proofs_are_raw_host_bytes_of_exactly_one_signature() {
 }
 
 #[tokio::test]
-async fn each_request_mints_full_ttl_credentials() {
+async fn each_request_reports_the_full_remaining_ttl() {
     let ring = test_ring();
     let app = app(Some((
         proof_config(),
@@ -453,9 +459,10 @@ async fn each_request_mints_full_ttl_credentials() {
     let request = fresh_body(&ring, 1);
     let (status, json) = post_json(&app, "/api/v1/turn/issue-with-proof", Some(request)).await;
     assert_eq!(status, StatusCode::CREATED, "{json}");
+    // A freshly issued credential has its whole life ahead of it, so `ttl` is
+    // the granted TTL exactly — it shrinks only when a cached one is served.
     assert_eq!(json["ttl"], serde_json::json!(1800));
-    let username = json["username"].as_str().expect("username");
-    assert_eq!(username.split(':').nth(1).expect("id half").len(), 32);
+    assert_eq!(json["username"], serde_json::json!("stub-username"));
 }
 
 #[tokio::test]
@@ -746,4 +753,39 @@ async fn wrong_method_returns_the_json_not_found() {
         serde_json::from_slice::<serde_json::Value>(&body).expect("json"),
         serde_json::json!({ "error": "Not found" })
     );
+}
+
+/// A stand-in for Cloudflare Realtime TURN, bound on a loopback port.
+///
+/// Returns the documented response shape — a credential-less STUN entry plus
+/// one credentialed TURN entry — so the routes exercise the real client and
+/// parser without reaching the live API. Returns the base URL to configure.
+fn spawn_cloudflare_stub() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let addr = listener.local_addr().expect("stub addr");
+    let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+    let router = axum::Router::new().route(
+        "/turn/keys/{key_id}/credentials/generate-ice-servers",
+        axum::routing::post(|| async {
+            axum::Json(serde_json::json!({
+                "iceServers": [
+                    { "urls": ["stun:stun.cloudflare.com:3478"] },
+                    {
+                        "urls": [
+                            "turn:turn.cloudflare.com:3478?transport=udp",
+                            "turns:turn.cloudflare.com:5349?transport=tcp"
+                        ],
+                        "username": "stub-username",
+                        "credential": "stub-credential"
+                    }
+                ],
+                "ttl": 1800
+            }))
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.ok();
+    });
+    format!("http://{addr}")
 }
