@@ -39,6 +39,13 @@ pub struct Config {
     pub realm: String,
     /// ICE server URLs echoed verbatim in every 201 body.
     pub ice_servers: Vec<String>,
+    /// Cloudflare Realtime TURN key id.
+    pub turn_key_id: String,
+    /// Cloudflare Realtime API token (required).
+    pub turn_api_token: String,
+    /// Overrides the Cloudflare API root. No env source: it exists so tests can
+    /// point the client at a local stub instead of the live API.
+    pub cloudflare_base_url: Option<String>,
     /// Verify-only JWT key material (required; no default — fail closed).
     pub jwt_verifier: jwt_verify::Verifier,
     /// Max requests per authenticated subject per window.
@@ -59,6 +66,9 @@ impl std::fmt::Debug for Config {
             .field("ttl_secs", &self.ttl_secs)
             .field("realm", &self.realm)
             .field("ice_servers", &self.ice_servers)
+            .field("turn_key_id", &self.turn_key_id)
+            .field("turn_api_token", &"<redacted>")
+            .field("cloudflare_base_url", &self.cloudflare_base_url)
             .field("jwt_verifier", &"<jwt_verifier>")
             .field("rate_limit", &self.rate_limit)
             .field("rate_window", &self.rate_window)
@@ -70,8 +80,9 @@ impl std::fmt::Debug for Config {
 impl Config {
     /// Read and validate configuration from the environment.
     ///
-    /// Fails (rather than defaulting) for `TURN_SECRET`, `TURN_REALM`, and
-    /// the JWT key material (`JWT_JWKS_JSON` or `JWT_ED25519_PUBLIC_KEY`).
+    /// Fails (rather than defaulting) for `TURN_SECRET`, `TURN_REALM`,
+    /// `TURN_KEY_ID`, `TURN_API_TOKEN`, and the JWT key material
+    /// (`JWT_JWKS_JSON` or `JWT_ED25519_PUBLIC_KEY`).
     pub fn from_env() -> Result<Self, ConfigError> {
         let turn_secret = decode_secret(&required_var("TURN_SECRET")?)?;
 
@@ -86,6 +97,9 @@ impl Config {
         let realm = validated_realm(&required_var("TURN_REALM")?)?;
         let ice_servers = parse_ice_servers(&std::env::var("ICE_SERVERS").unwrap_or_default())?;
 
+        let turn_key_id = required_var("TURN_KEY_ID")?;
+        let turn_api_token = required_var("TURN_API_TOKEN")?;
+
         let rate_limit: u32 = positive("TURN_RATE_LIMIT", parse_var("TURN_RATE_LIMIT", "30")?)?;
         let rate_window_secs: u64 = positive(
             "TURN_RATE_LIMIT_WINDOW_SECS",
@@ -99,6 +113,9 @@ impl Config {
             ttl_secs,
             realm,
             ice_servers,
+            turn_key_id,
+            turn_api_token,
+            cloudflare_base_url: None,
             jwt_verifier: jwt_verifier_from_env()?,
             rate_limit,
             rate_window: std::time::Duration::from_secs(rate_window_secs),

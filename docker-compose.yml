@@ -460,6 +460,9 @@ services:
       TURN_TTL_SECS: ${TURN_TTL_SECS:-1800}
       TURN_REALM: ${TURN_REALM:-example.org}
       ICE_SERVERS: ${ICE_SERVERS:-stun:stun.example.com:3478,turn:turn.example.com:3478?transport=udp}
+      # Cloudflare Realtime TURN, the credential authority. 
+      TURN_KEY_ID: ${TURN_KEY_ID:-}
+      TURN_API_TOKEN: ${TURN_API_TOKEN:-}
       # Verifies device-attestation JWTs. Dev default = the public half of
       # device-attestation-api's dev JWT_ED25519_SECRET above; in prod prefer
       # JWT_JWKS_JSON from device-attestation's /.well-known/jwks.json.

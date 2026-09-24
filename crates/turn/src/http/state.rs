@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use http_common::{rate_limiter::Config as RateLimiterConfig, RateLimiter};
 
+use crate::cloudflare;
 use crate::config::{Config, ProofConfig};
 use crate::credentials::Issuer;
 use crate::proof::roots::RootCaches;
@@ -15,6 +16,7 @@ use crate::proof::roots::RootCaches;
 pub struct AppState {
     /// The credential minter (holds the relay-shared HMAC secret).
     pub issuer: Arc<Issuer>,
+    pub cloudflare: Arc<cloudflare::Client>,
     pub verifier: Arc<jwt_verify::Verifier>,
     pub config: Arc<Config>,
     /// Per-subject rate limiter for the authenticated route.
@@ -83,6 +85,13 @@ impl AppState {
             config.algorithm,
             config.ttl_secs,
         );
+        let cloudflare = cloudflare::Client::new(
+            config.turn_key_id.clone(),
+            config.turn_api_token.clone(),
+            config.ttl_secs,
+            config.cloudflare_base_url.clone(),
+        )
+        .expect("HTTP client builds");
         let proof = if let Some(ref proof_config) = config.proof {
             Some(Arc::new(ProofState::new(
                 proof_config,
@@ -95,6 +104,7 @@ impl AppState {
         };
         Self {
             issuer: Arc::new(issuer),
+            cloudflare: Arc::new(cloudflare),
             verifier: Arc::new(config.jwt_verifier.clone()),
             config: Arc::new(config),
             limiter,

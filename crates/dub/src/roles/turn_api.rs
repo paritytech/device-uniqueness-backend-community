@@ -14,6 +14,7 @@ pub async fn run() -> anyhow::Result<()> {
         algorithm = config.algorithm.as_str(),
         ttl_secs = config.ttl_secs,
         servers = config.ice_servers.len(),
+        turn_key_id = %config.turn_key_id,
         "starting turn-api"
     );
 
