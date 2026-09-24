@@ -40,7 +40,7 @@ each of which deploys independently behind a single-URL
   a new registration is searchable a finality trail sooner.
 - **`invite-tickets-api`** / **`invite-tickets-pool`** — synchronous
   invitation-ticket claim, and the keypair pool that keeps it stocked.
-- **`turn-api`** — a stateless TURN credential issuer (Cloudflare Realtime TURN).
+- **`turn-api`** — a stateless TURN credential issuer (Cloudflare Realtime TURN, or a self-hosted coturn relay).
 - **`notify-relay`** — a stateless APNs / FCM push relay.
 
 Plus **`voucher-mint`**, an operator CLI for minting registration vouchers

@@ -50,10 +50,11 @@ it and a "simplification" here is a real downgrade:
 > The `invite-tickets` services exist only on a `testnet` build — see
 > [Choosing a network](#choosing-a-network). On `polkadot`, ignore every mention
 > of them here; that image has no such roles.
-- `turn-api` additionally holds `TURN_API_TOKEN`, the Cloudflare Realtime TURN
-  API token. No other service sees it. `TURN_KEY_ID` beside it is not a secret
-  (it appears in the request path) but is still service-scoped: a copy
-  elsewhere means another service was meant to mint credentials.
+- `turn-api` additionally holds whichever credential secret its `TURN_PROVIDER`
+  selects — `TURN_API_TOKEN` (Cloudflare) or `TURN_SECRET` (a coturn relay) —
+  and never both. No other service sees either. `TURN_KEY_ID` and the other
+  selectors are not secrets but are still service-scoped: a copy elsewhere means
+  another service was meant to mint credentials.
 - Push credentials (`APNS_*` / `FCM_*`) live only in `notify-relay`.
 
 Compose uses the root `.env` for interpolation only, and gives every application
@@ -121,8 +122,9 @@ The values you must decide, at minimum:
 | `JWT_ED25519_SECRET` | 32 bytes. `device-attestation-api` only. |
 | `JWT_ED25519_PUBLIC_KEY` or `JWT_JWKS_JSON` | The verify-only half, for the other services. |
 | `INVITE_INVITER_SIGNER_SURI` | `testnet` only: the invite pool's own account — **not** the writer's. Unused on `polkadot`. |
-| `TURN_API_TOKEN` | Cloudflare Realtime TURN API token. `turn-api` only. |
-| `TURN_KEY_ID` | Names the Cloudflare TURN app. Not a secret, but `turn-api` only. |
+| `TURN_PROVIDER` | `cloudflare` (default) or `coturn`. Picks which of the two rows below is required. |
+| `TURN_API_TOKEN` + `TURN_KEY_ID` | `cloudflare` only. The token is the secret; the key id is not, but both are `turn-api` only. |
+| `TURN_SECRET` + `TURN_REALM` + `ICE_SERVERS` | `coturn` only. Must match your relay's `--use-auth-secret` config exactly. |
 
 The defaults in `.env.example` point at a public test network
 (`wss://previewnet.substrate.dev`) and use well-known dev keys (`//Alice`,
@@ -307,8 +309,8 @@ WantedBy=multi-user.target
 
 The per-role file is where the secret boundaries are rebuilt by hand: keep
 `JWT_ED25519_SECRET` in `device-attestation-api.env` and nowhere else, the
-writer's SURI in `device-attestation-chain-writer.env`, `TURN_API_TOKEN` in
-`turn-api.env`, and give every other role the verify-only
+writer's SURI in `device-attestation-chain-writer.env`, the TURN credential
+secret (`TURN_API_TOKEN` or `TURN_SECRET`) in `turn-api.env`, and give every other role the verify-only
 `JWT_ED25519_PUBLIC_KEY` instead. The `environment:` block of each service in
 [`docker-compose.yml`](../docker-compose.yml) is the authoritative list of what
 that role should receive.
@@ -404,7 +406,7 @@ choosing, not after.
 **The standard topology is the default**, and it is what the compose file here
 runs. Choosing the small one is a security decision, not a configuration change:
 one process ends up holding `JWT_ED25519_SECRET` (mint a token for any subject),
-`POC_HMAC_SECRET`, `TURN_API_TOKEN` and all three database URLs, in the same address
+`POC_HMAC_SECRET`, the TURN credential secret and all three database URLs, in the same address
 space that serves the unauthenticated public
 `GET /api/v1/usernames/search`. `all-in-one` is deliberately absent from
 `dub --list-roles` for that reason.
@@ -617,7 +619,8 @@ Everything is in the checkout's `.env` (mode 600); apply changes with
 | --- | --- |
 | `JWT_ED25519_SECRET` | Invalidates outstanding JWTs; clients re-authenticate. Update the verify-only half everywhere in the same change. |
 | the writer key | Must be an authorized attester or proxy, and funded, **before** the switch. |
-| `TURN_API_TOKEN` | Does **not** invalidate credentials already issued — Cloudflare honours those until they expire (up to `TURN_TTL_SECS`). Roll the token in Cloudflare, update every `turn-api`, then recreate each service. A stale token only stops *new* issuance, which falls back to the cached credential and then to 503. |
+| `TURN_API_TOKEN` (`cloudflare`) | Does **not** invalidate credentials already issued — Cloudflare honours those until they expire (up to `TURN_TTL_SECS`). Roll the token in Cloudflare, update every `turn-api`, then recreate each service. A stale token only stops *new* issuance, which falls back to the cached credential and then to 503. |
+| `TURN_SECRET` (`coturn`) | **Does** invalidate outstanding credentials (up to `TURN_TTL_SECS` old), because the relay recomputes the HMAC. Update the relay and every `turn-api` together, then recreate each service — a mismatch means the relay rejects everything this service mints. |
 | `POC_HMAC_SECRET` | Invalidates outstanding puzzles (≤90s old); in-flight solvers get a `402` and request a new one. Safe to rotate any time. |
 
 ## After a chain wipe
@@ -769,8 +772,10 @@ you expect.
 | A username appeared in search and then vanished | Expected, and rare: a speculative row whose block was discarded at the tip. `dub_indexer_speculative_retracted_total` counts them. It re-appears once the registration lands on the canonical chain — usually, but not always: the registration is re-submitted against a chain where the name may since have been taken, and a name is owned by one account forever. If the rate is high, the endpoint's fork rate is high — check `dub_chain_finality_trail_blocks`, or set `SPECULATIVE_INDEXING_ENABLED=false` to serve finalized state only. `dub_indexer_speculative_failed_total` climbing instead means the window could not be read at all; the finalized projection is unaffected, but nothing is being admitted early. |
 | `unfinalized window too wide; admitting nothing new` | The best head has run more than `MAX_SPECULATIVE_WINDOW` (64) blocks ahead of finality, so the chain's finality is stalled rather than merely trailing. The indexer stops admitting new speculative rows and search goes back to finalized-only latency for anything new — but rows already held are still re-checked against the best head every pass, so nothing gets stranded for the length of the stall. Investigate finality on the chain, not the indexer. `dub_indexer_speculative_stood_down_total` counts it. |
 | `turn-api` exits: `TURN_PROOF_PRODUCTS: must list at least one product id` | The proof route is enabled with no accepted product. Every proof is made under a product-scoped context, so the list is required — set it, or turn the feature off. |
-| `/api/v1/turn/issue` returns 503 | Cloudflare is unreachable *and* no cached credential is usable. Check the `turn-api` logs for `cloudflare unreachable`: a `warn` means callers are being served the cached credential, an `error` means there is nothing to serve. Most often a wrong or revoked `TURN_API_TOKEN`, or a `TURN_KEY_ID` that does not match it. `turn-api` is stateless, so `readyz` never gates on this. |
-| Every caller gets the same TURN username | The cached credential is being served because Cloudflare is down, which suspends the per-request unlinkability until it returns. Expected during an outage; if it persists, fix issuance — the log line naming the cache is `warn`-level and repeats on every request. |
+| `/api/v1/turn/issue` returns 503 | Only possible on `TURN_PROVIDER=cloudflare`: Cloudflare is unreachable *and* no cached credential is usable. Check the `turn-api` logs for `cloudflare unreachable` — a `warn` means callers are being served the cached credential, an `error` means there is nothing to serve. Most often a wrong or revoked `TURN_API_TOKEN`, or a `TURN_KEY_ID` that does not match it. `turn-api` is stateless, so `readyz` never gates on this. |
+| TURN 201s minted but the relay rejects the credentials | `TURN_PROVIDER=coturn` only: `TURN_SECRET` or `TURN_AUTH_ALGORITHM` has drifted from the relay's config. They must match exactly; rotate together. `turn-api` computes locally and cannot detect this, so `readyz` never gates on it either. |
+| `turn-api` exits: `TURN_SECRET is set but the provider is cloudflare` | A relay deployment upgraded without naming its provider. Set `TURN_PROVIDER=coturn` to keep the relay, or remove `TURN_SECRET` to move to Cloudflare. Deliberately fatal: booting on Cloudflare defaults would fail at request time instead. |
+| Every caller gets the same TURN username | `TURN_PROVIDER=cloudflare` only: the cached credential is being served because Cloudflare is down, which suspends the per-request unlinkability until it returns. Expected during an outage; if it persists, fix issuance — the log line naming the cache is `warn`-level and repeats on every request. |
 | Public search suddenly returning `402` | The proof-of-compute gate is on. Expected for anonymous callers; if *authenticated* clients see it, the indexer's verify-only JWT material is wrong — compare it against `device-attestation-api`'s `/.well-known/jwks.json`. |
 | `402 puzzle has already been used` on a first attempt | The client is reusing a puzzle (one solve = one request), or a proxy is retrying. Each request needs a fresh `POST /api/v1/poc/issue`. |
 | `spent_puzzles` growing without bound | The pruner is failing (`pruning expired spent puzzles failed`). Rows are harmless but unbounded until it recovers. |
