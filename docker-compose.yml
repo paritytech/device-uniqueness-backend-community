@@ -435,10 +435,12 @@ services:
       replicas: 1
 
   # TURN credential issuer: stateless (no DB; read-only People Chain root cache
-  # when proof issuance is enabled). The only secret is the HMAC key shared
-  # with the TURN relay (coturn `--use-auth-secret` mode must use the SAME
-  # secret and algorithm, or minted credentials will not authenticate). Safe
-  # to scale within one environment; each environment pins its own RPC/genesis.
+  # when proof issuance is enabled). TURN_PROVIDER picks the credential source —
+  # Cloudflare Realtime TURN (default; one credential fetched per request) or a
+  # self-hosted coturn relay (credential computed from a shared secret). Only
+  # the selected provider's variables are read, so a deployment holds one
+  # provider's secret and not the other's. Safe to scale within one environment;
+  # each environment pins its own RPC/genesis.
   turn-api:
     build:
       context: .
@@ -452,14 +454,30 @@ services:
     restart: unless-stopped
     environment:
       BIND_ADDR: 0.0.0.0:8080
-      # Dev secret (base64 of 32×0x42 — the golden-capture secret). In prod
-      # this MUST be the relay-shared secret; rotate by restarting relay and
-      # issuer together.
-      TURN_SECRET: ${TURN_SECRET:-QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=}
-      TURN_AUTH_ALGORITHM: ${TURN_AUTH_ALGORITHM:-SHA1}
       TURN_TTL_SECS: ${TURN_TTL_SECS:-1800}
-      TURN_REALM: ${TURN_REALM:-example.org}
-      ICE_SERVERS: ${ICE_SERVERS:-stun:stun.example.com:3478,turn:turn.example.com:3478?transport=udp}
+      # Which credential source to use: cloudflare | coturn. The code default is
+      # cloudflare; the default HERE is coturn for the same reason .env.example
+      # selects it — cloudflare needs real account credentials, so a checkout
+      # with no .env would crash-loop this container at boot rather than run.
+      TURN_PROVIDER: ${TURN_PROVIDER:-coturn}
+      # TURN_PROVIDER=cloudflare. The key id names the app (not a secret: it is
+      # in the request path); the token is service-owned, from the server's
+      # chmod-600 .env. No dev default — no fake value can mint a working
+      # credential, so turn-api fails at boot rather than at request time.
+      TURN_KEY_ID: ${TURN_KEY_ID:-}
+      TURN_API_TOKEN: ${TURN_API_TOKEN:-}
+      # TURN_PROVIDER=coturn. Ignored unless that provider is selected, and
+      # setting TURN_SECRET while the provider is cloudflare is refused at boot
+      # rather than silently ignored. The secret and algorithm MUST match the
+      # relay's `--use-auth-secret` configuration; rotate relay and issuer
+      # together. ICE_SERVERS is what the relay answers on.
+      # The dev defaults are the ones documented in .env.example: a published
+      # placeholder secret that authenticates against no real relay, and a
+      # loopback ICE server. Both are overridden from .env in any deployment.
+      TURN_SECRET: ${TURN_SECRET:-ZGV2LW9ubHktdHVybi1zZWNyZXQtY2hhbmdlLW1l}
+      TURN_AUTH_ALGORITHM: ${TURN_AUTH_ALGORITHM:-SHA1}
+      TURN_REALM: ${TURN_REALM:-dub.local}
+      ICE_SERVERS: ${ICE_SERVERS:-turn:127.0.0.1:3478?transport=udp}
       # Verifies device-attestation JWTs. Dev default = the public half of
       # device-attestation-api's dev JWT_ED25519_SECRET above; in prod prefer
       # JWT_JWKS_JSON from device-attestation's /.well-known/jwks.json.
