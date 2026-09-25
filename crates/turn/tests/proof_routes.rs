@@ -518,20 +518,27 @@ async fn an_upstream_outage_does_not_spend_the_alias_budget() {
     );
     let app = turn::routes(state);
 
-    for attempt in 0..3 {
+    for attempt in 0..2 {
         let (status, json) = post_json(
             &app,
             "/api/v1/turn/issue-with-proof",
             Some(fresh_body(&ring, 2)),
         )
         .await;
-        // 429 here would mean the first 503 had taken the slot with it.
         assert_eq!(
             status,
             StatusCode::SERVICE_UNAVAILABLE,
             "attempt {attempt}: {json}"
         );
     }
+
+    let (status, json) = post_json(
+        &app,
+        "/api/v1/turn/issue-with-proof",
+        Some(fresh_body(&ring, 2)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{json}");
 }
 
 #[tokio::test]

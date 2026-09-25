@@ -16,10 +16,17 @@ use std::{
 mod config;
 mod state_store;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub enum Paid {
+    Quota,
+    Credit,
+}
+
 #[derive(Clone)]
 pub struct RateLimiter {
     limiter: Arc<governor::RateLimiter<String, MokaStateStore, clock::QuantaClock>>,
-    credits: Arc<moka::sync::Cache<String, Arc<AtomicU32>>>,
+    credits: moka::sync::Cache<String, Arc<AtomicU32>>,
     max_burst: u32,
 }
 
@@ -51,7 +58,7 @@ impl RateLimiter {
                 .build();
             Self {
                 limiter: Arc::new(state),
-                credits: Arc::new(credits),
+                credits,
                 max_burst: config.max_burst,
             }
         })
@@ -60,14 +67,17 @@ impl RateLimiter {
 impl RateLimiter {
     /// Checks the limit for a given key
     /// If the rate limit is reached, check_key returns information about the earliest time that a cell might be allowed through again under that key.
-    pub async fn allow(&self, key: String) -> Result<(), NotUntil<clock::QuantaInstant>> {
+    pub async fn allow(&self, key: String) -> Result<Paid, NotUntil<clock::QuantaInstant>> {
         if self.spend_credit(&key) {
-            return Ok(());
+            return Ok(Paid::Credit);
         }
-        self.limiter.check_key(&key)
+        self.limiter.check_key(&key).map(|()| Paid::Quota)
     }
 
-    pub fn refund(&self, key: String) {
+    pub fn refund(&self, key: String, paid: Paid) {
+        if paid != Paid::Quota {
+            return;
+        }
         let banked = self.credits.get_with(key, || Arc::new(AtomicU32::new(0)));
         let _ = banked.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
             (held < self.max_burst).then_some(held + 1)
@@ -112,23 +122,27 @@ impl RateLimiter {
 
 #[cfg(test)]
 mod test {
-    use crate::{rate_limiter::Config, RateLimiter};
+    use crate::{
+        rate_limiter::{Config, Paid},
+        RateLimiter,
+    };
 
     #[tokio::test]
     async fn a_refund_returns_exactly_one_request_to_the_key() {
         let limit =
             RateLimiter::new(Config::default().set_window_secs(10).set_max_burst(1)).unwrap();
 
-        limit.allow("test".to_owned()).await.unwrap();
+        let paid = limit.allow("test".to_owned()).await.unwrap();
+        assert_eq!(paid, Paid::Quota);
         assert!(limit.allow("test".to_owned()).await.is_err());
 
-        limit.refund("test".to_owned());
-        limit.allow("test".to_owned()).await.unwrap();
+        limit.refund("test".to_owned(), paid);
+        assert_eq!(limit.allow("test".to_owned()).await.unwrap(), Paid::Credit);
         // One refund, one request: the credit is not reusable.
         assert!(limit.allow("test".to_owned()).await.is_err());
         // And it is the refunded key alone that got it back.
-        limit.refund("test".to_owned());
-        limit.allow("other".to_owned()).await.unwrap();
+        limit.refund("test".to_owned(), Paid::Quota);
+        let _ = limit.allow("other".to_owned()).await.unwrap();
         assert!(limit.allow("other".to_owned()).await.is_err());
     }
 
@@ -138,15 +152,30 @@ mod test {
             RateLimiter::new(Config::default().set_window_secs(600).set_max_burst(2)).unwrap();
 
         for _ in 0..10 {
-            limit.refund("test".to_owned());
+            limit.refund("test".to_owned(), Paid::Quota);
         }
         for _ in 0..2 {
-            limit.allow("test".to_owned()).await.unwrap();
+            let _ = limit.allow("test".to_owned()).await.unwrap();
         }
         // The two banked credits, then the quota's own two.
         for _ in 0..2 {
-            limit.allow("test".to_owned()).await.unwrap();
+            let _ = limit.allow("test".to_owned()).await.unwrap();
         }
+        assert!(limit.allow("test".to_owned()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_credit_paid_request_cannot_refund_itself() {
+        let limit =
+            RateLimiter::new(Config::default().set_window_secs(600).set_max_burst(1)).unwrap();
+
+        let paid = limit.allow("test".to_owned()).await.unwrap();
+        assert_eq!(paid, Paid::Quota);
+        limit.refund("test".to_owned(), paid);
+
+        let paid = limit.allow("test".to_owned()).await.unwrap();
+        assert_eq!(paid, Paid::Credit);
+        limit.refund("test".to_owned(), paid);
         assert!(limit.allow("test".to_owned()).await.is_err());
     }
 
@@ -155,7 +184,7 @@ mod test {
         let limit =
             RateLimiter::new(Config::default().set_window_secs(10).set_max_burst(1)).unwrap();
 
-        limit.allow("test".to_owned()).await.unwrap();
+        let _ = limit.allow("test".to_owned()).await.unwrap();
         let timeout = limit
             .allow("test".to_owned())
             .await

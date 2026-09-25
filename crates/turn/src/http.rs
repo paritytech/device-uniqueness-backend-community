@@ -13,6 +13,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use http_common::error::not_found;
+use http_common::rate_limiter::Paid;
 use http_common::{health, layers, AuthSubject};
 
 use self::error::{AppError, AppResult, FieldError};
@@ -104,7 +105,7 @@ pub(crate) fn now_unix() -> u64 {
         .as_secs()
 }
 
-async fn check_rate_limit(state: &AppState, subject: String) -> Result<(), AppError> {
+async fn check_rate_limit(state: &AppState, subject: String) -> Result<Paid, AppError> {
     state
         .limiter
         .allow(subject)
@@ -179,13 +180,13 @@ pub(crate) async fn issue_credentials(
         validate_body(&body).map_err(AppError::InvalidBody)?;
     }
 
-    let () = check_rate_limit(&state, auth.subject.clone()).await?;
+    let paid = check_rate_limit(&state, auth.subject.clone()).await?;
 
     let now_unix = now_unix();
     let issued = match state.source.issue(now_unix).await {
         Ok(issued) => issued,
         Err(_) => {
-            state.limiter.refund(auth.subject);
+            state.limiter.refund(auth.subject, paid);
             return Err(AppError::UpstreamUnavailable);
         }
     };

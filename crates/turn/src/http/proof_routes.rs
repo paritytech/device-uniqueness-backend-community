@@ -153,7 +153,7 @@ pub(crate) async fn issue_with_proof(
 
     // Keep the alias confined to private throttle and keyed-derivation inputs.
     let throttle_key = hex::encode(alias);
-    let () = proof_state
+    let paid = proof_state
         .alias_limiter
         .allow(throttle_key.clone())
         .await
@@ -172,7 +172,7 @@ pub(crate) async fn issue_with_proof(
     {
         Ok(issued) => issued,
         Err(_) => {
-            proof_state.alias_limiter.refund(throttle_key);
+            proof_state.alias_limiter.refund(throttle_key, paid);
             return Err(AppError::UpstreamUnavailable);
         }
     };
