@@ -52,7 +52,7 @@ Twelve crates today (plans may add more independently-deployable service crates)
   `metadata/metadata.<network>.scale` that `DUB_NETWORK` selects. Its `build.rs` is **the** network
   switch: `invite-tickets`, `dub` and `apidoc-gen` name it as their own `build =` script, and it
   emits `cfg(dub_network = "…")` plus `cfg(invite_tickets)` (`testnet`, not `polkadot`). Two values,
-  because two People runtimes — previewnet and paseo-next-v2 share one, so they share one build. Gate
+  because two People runtimes — `testnet` is paseo-next-v2, `polkadot` is polkadot-test. Gate
   network-specific code on those cfgs; never read `DUB_NETWORK` at runtime.
 - `chain-client` — reconnecting People Chain connection + the chain-writer signing key (`WriterSigner`); product-agnostic transport shared by the services.
 - `jwt-verify` — the cross-service auth contract: JWKS parsing, Ed25519 signing and verification, claims. It holds **both** halves, but only `device-attestation` is given `JWT_ED25519_SECRET`, so it is the only process that can construct the issuer; every other service builds a verifier from public key material alone. (The crate name predates the issuer moving in.)
