@@ -8,6 +8,25 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+
+- **The container image is published from this repository.** Until now
+  `docker.io/paritytech/device-uniqueness-backend` was pushed from Parity's
+  private tree and its tags did not correspond to tags here. One image
+  workflow now publishes it from this repository, from the same `Dockerfile`
+  stage the release tarballs are exported from:
+  - **Release images**, `<tag>-<network>` (e.g. `v0.7.0-testnet`,
+    `v0.7.0-polkadot`), multi-arch (`linux/amd64` + `linux/arm64`), built when
+    the `vX.Y.Z` tag is pushed; the release workflow, dispatched after that,
+    pins the compose bundle to them. No bare `<tag>`, `stable` or `latest`: an
+    image carries a binary built for one runtime, so a tag must name its
+    network, and pinning an exact version is the only supported mode.
+  - **Commit images**, `YYYYMMDD-HHMMSS-<shortsha>` (`linux/amd64`, `testnet`),
+    one per push to `main`. Pull requests build the image without pushing.
+  - A manual run of the image workflow builds any ref for either network under
+    a tag of the operator's choosing; the commit-image shape is refused there,
+    since it is the key the internal deployment promotes on.
+
 ### Changed
 
 - **`turn-api` gains a credential provider, and defaults to Cloudflare Realtime

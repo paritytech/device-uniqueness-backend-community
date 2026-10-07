@@ -166,9 +166,10 @@ test in `just check` fails if either is stale. Never hand-edit them.
 
 ## Releases
 
-**This repository publishes binaries.** Releases are cut manually from a
-`vX.Y.Z` tag via the [release workflow](.github/workflows/release.yml). Each one
-attaches:
+**This repository publishes binaries and the container image.** Pushing a
+`vX.Y.Z` tag builds the image (see "About the container image" below); the
+[release workflow](.github/workflows/release.yml), dispatched manually for that
+tag once the image is up, creates a GitHub Release. Each one attaches:
 
 Every asset is built twice, once per People runtime — `testnet` (paseo-next-v2)
 and `polkadot` (polkadot-test) — because `DUB_NETWORK` is fixed
@@ -190,19 +191,31 @@ build them yourself: `docker buildx bake all` compiles the very same
 
 ### About the container image
 
-There is a public image at `docker.io/paritytech/device-uniqueness-backend`, but
-it is **not published from this repository** — Parity builds and pushes it from
-its own working tree, and **its tags do not line up with this repository's
-tags**. At the time of first publish it carries `v0.3.0`, built from source
-older than this release. Treat it as a convenience, not as the artifact
-corresponding to a tag here.
+The public image at `docker.io/paritytech/device-uniqueness-backend` is
+published from this repository by the [image workflow](.github/workflows/image.yml),
+which builds the same `Dockerfile` stage the release tarballs are exported
+from:
 
-Because of that, the compose bundle does not blindly pin to it. The release
-workflow checks whether an image exists at `<tag>-<network>` and is anonymously
-pullable — one image per network, since an image carries a binary built for one
-runtime; if it is, that network's bundle pins to it, and if it is not, the
-bundle keeps its `build:` stanzas and the release notes say so. Either way the
-bundle works — the second case just needs a source checkout beside it:
+- **Release images**: pushing a `vX.Y.Z` tag builds `<tag>-<network>`
+  (`v0.7.0-testnet`, `v0.7.0-polkadot`) for `linux/amd64` and `linux/arm64`;
+  let that run finish before dispatching the release workflow, which pins the
+  compose bundle to them. One image per network, because an image carries a
+  binary built for one runtime; there is deliberately no bare `<tag>`,
+  `stable` or `latest` — pin the exact version for your network.
+- **Commit images**: every push to `main` builds `YYYYMMDD-HHMMSS-<shortsha>`
+  (`linux/amd64`, `testnet`). These track unreleased work and exist for
+  Parity's own deployment pipeline; a release tag is what to run.
+
+Tags that predate this arrangement — `v0.5.0` and earlier, `stable` (last moved
+then, and never moved by this workflow), and the commit images before it —
+were pushed from Parity's private tree and do not correspond to tags here.
+
+The compose bundle still does not blindly pin to the image. The release
+workflow checks that `<tag>-<network>` is anonymously pullable; if it is, that
+network's bundle pins to it, and if it is not (the image run has not finished,
+or the Docker Hub repository is private), the bundle keeps its `build:` stanzas
+and the release notes say so. Either way the bundle works — the second case
+just needs a source checkout beside it:
 
 ```bash
 tar xzf dub-compose-<version>-<network>.tar.gz && cp .env.example .env

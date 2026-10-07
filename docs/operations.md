@@ -205,11 +205,14 @@ anonymously pullable at that tag; when none is, it ships the compose file
 with its `build:` stanzas, and the release notes say so — that case needs a
 source checkout beside the bundle.
 
-Do **not** point `IMAGE_REPO` / `IMAGE_TAG` at
-`docker.io/paritytech/device-uniqueness-backend` yourself. That image is not
-published from this repository and its tags do not correspond to this
-repository's tags — see "About the container image" in the
-[README](../README.md).
+To pin the image by hand instead, set `IMAGE_REPO=docker.io/paritytech/device-uniqueness-backend`
+and `IMAGE_TAG=<tag>-<network>` (for example `v0.7.0-polkadot`) in `.env`
+and `up -d --no-build`. Only the `<tag>-<network>` release tags are meant to be
+run: an image carries a binary built for one runtime, so the tag must name the
+same network as `DUB_NETWORK`. The `YYYYMMDD-HHMMSS-<shortsha>` tags are
+unreleased `main` builds for Parity's own pipeline, and `v0.5.0`, `stable` and
+everything earlier were pushed from a different tree — see "About the container
+image" in the [README](../README.md).
 
 Recreate the **whole project**, never a single service — `up -d <service>` on its
 own leaves the rest on the previous image, and a stack split across two builds
