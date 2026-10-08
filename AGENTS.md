@@ -95,7 +95,7 @@ Each service's boundary, persistence, endpoints, and data-flow invariants are in
   (overridable with the `PUBLIC_IMAGE_REPO` repository variable, which `release.yml` also probes;
   `DOCKERHUB_USER`/`DOCKERHUB_PASSWORD` secrets). Its `plan` job picks the lane from the event: a
   PR builds `testnet`/amd64 and pushes nothing; a push to `main` pushes the **commit image**
-  `YYYYMMDD-HHMMSS-<shortsha>` (`testnet`, amd64) — that shape is what Parity's internal
+  `YYYYMMDD-HHMMSS-<shortsha>` (`testnet`, amd64 + arm64) — that shape is what Parity's internal
   deployment promotes on, so nothing else may mint it; a `v*` tag push pushes the **release
   images** `<tag>-<network>` for both networks and both architectures; a `workflow_dispatch`
   (`tag`, `ref`, `network`) builds any ref under any other tag. Every pushing lane pushes by digest

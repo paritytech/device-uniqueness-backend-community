@@ -203,7 +203,7 @@ from:
   binary built for one runtime; there is deliberately no bare `<tag>`,
   `stable` or `latest` — pin the exact version for your network.
 - **Commit images**: every push to `main` builds `YYYYMMDD-HHMMSS-<shortsha>`
-  (`linux/amd64`, `testnet`). These track unreleased work and exist for
+  (`linux/amd64` + `linux/arm64`, `testnet`). These track unreleased work and exist for
   Parity's own deployment pipeline; a release tag is what to run.
 
 Tags that predate this arrangement — `v0.5.0` and earlier, `stable` (last moved
