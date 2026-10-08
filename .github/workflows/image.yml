@@ -223,14 +223,14 @@ jobs:
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
       # Reads the cache anonymously. The Docker Hub repository is public, so a
-      # pull request needs no credential. One cache ref per network: the two
-      # builds share no compiled layer, so a shared ref would have each evict
-      # the other's.
+      # pull request needs no credential. One cache ref per network and arch:
+      # those builds share no compiled layer, so a shared ref would have each
+      # evict the other's.
       - name: Build
         if: needs.plan.outputs.push != 'true'
         env:
           IMAGE_TAG: ${{ needs.plan.outputs.tag }}
-          CACHE_FROM: ${{ needs.plan.outputs.repo }}:buildcache-main-${{ matrix.network }}
+          CACHE_FROM: ${{ needs.plan.outputs.repo }}:buildcache-main-${{ matrix.network }}-${{ matrix.arch }}
         run: docker buildx bake all --set "*.platform=$PLATFORM"
 
       - name: Build and push by digest
@@ -240,8 +240,8 @@ jobs:
           # buildkit refuses to push a tagged ref by digest, so this cannot be a
           # `--set "*.output=..."` override — the tags would still be there.
           PUSH_BY_DIGEST: "true"
-          CACHE_FROM: ${{ needs.plan.outputs.repo }}:buildcache-main-${{ matrix.network }}
-          CACHE_TO: ${{ needs.plan.outputs.cache_to == 'true' && format('{0}:buildcache-main-{1}', needs.plan.outputs.repo, matrix.network) || '' }}
+          CACHE_FROM: ${{ needs.plan.outputs.repo }}:buildcache-main-${{ matrix.network }}-${{ matrix.arch }}
+          CACHE_TO: ${{ needs.plan.outputs.cache_to == 'true' && format('{0}:buildcache-main-{1}-{2}', needs.plan.outputs.repo, matrix.network, matrix.arch) || '' }}
         run: |
           docker buildx bake all \
             --set "*.platform=$PLATFORM" \

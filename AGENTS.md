@@ -101,7 +101,7 @@ Each service's boundary, persistence, endpoints, and data-flow invariants are in
   (`tag`, `ref`, `network`) builds any ref under any other tag. Every pushing lane pushes by digest
   and joins a manifest list per network, then inspects what was published (one binary, `dub`
   entrypoint, no `CMD`, the network's role count). The registry build cache lives at
-  `buildcache-main-<network>` and only `main` writes it.
+  `buildcache-main-<network>-<arch>` and only `main` writes it.
 - Config gates, both in `check.yml` and reachable as `just verify-config`:
   `verify_compose_boundaries.sh` (compose secret allowlists) and `verify_role_split.sh` (one image,
   every service's `--role`, plus the release exporter shape).
