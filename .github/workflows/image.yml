@@ -11,7 +11,7 @@
 #   pull_request  →  build testnet/amd64, push nothing. A fork or an untrusted
 #                    branch cannot publish.
 #   push main     →  the COMMIT image, `YYYYMMDD-HHMMSS-<shortsha>`, testnet,
-#                    amd64. Kargo picks the image to promote with a lexical
+#                    amd64 + arm64. Kargo picks the image to promote with a lexical
 #                    sort over that shape, so an unordered tag such as `<sha>`
 #                    or `latest` leaves "newest build" undefined. The timestamp
 #                    is the commit date, not the run clock, so re-running an
@@ -24,7 +24,7 @@
 #                    image carries a binary built for one runtime, so a bare
 #                    `<tag>` could only be one of them and nothing in the
 #                    manifest would say which.
-#   dispatch      →  any ref, either network, amd64, under a tag of the
+#   dispatch      →  any ref, either network, amd64 + arm64, under a tag of the
 #                    operator's choosing. It may NOT use the commit-image
 #                    shape: that is what Kargo promotes, and a branch build
 #                    sorting ahead of main would be deployed as if it were main.
@@ -116,7 +116,7 @@ jobs:
           push=true
           cache_to=false
           networks='["testnet"]'
-          archs='["amd64"]'
+          archs='["amd64","arm64"]'
           case "$lane" in
             pr|commit)
               stamp="$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d-%H%M%S)"
@@ -130,7 +130,12 @@ jobs:
               }
               # Only main refreshes the registry cache: a pull request must not
               # replace main's layers with its own.
-              if [ "$lane" = pr ]; then push=false; else cache_to=true; fi
+              if [ "$lane" = pr ]; then
+                push=false
+                archs='["amd64"]'
+              else
+                cache_to=true
+              fi
               ;;
             release)
               tag="${REF#refs/tags/}"
@@ -139,7 +144,6 @@ jobs:
                 exit 1
               }
               networks='["testnet","polkadot"]'
-              archs='["amd64","arm64"]'
               ;;
             dispatch)
               tag="$REQUESTED_TAG"
@@ -219,14 +223,14 @@ jobs:
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
       # Reads the cache anonymously. The Docker Hub repository is public, so a
-      # pull request needs no credential. One cache ref per network: the two
-      # builds share no compiled layer, so a shared ref would have each evict
-      # the other's.
+      # pull request needs no credential. One cache ref per network and arch:
+      # those builds share no compiled layer, so a shared ref would have each
+      # evict the other's.
       - name: Build
         if: needs.plan.outputs.push != 'true'
         env:
           IMAGE_TAG: ${{ needs.plan.outputs.tag }}
-          CACHE_FROM: ${{ needs.plan.outputs.repo }}:buildcache-main-${{ matrix.network }}
+          CACHE_FROM: ${{ needs.plan.outputs.repo }}:buildcache-main-${{ matrix.network }}-${{ matrix.arch }}
         run: docker buildx bake all --set "*.platform=$PLATFORM"
 
       - name: Build and push by digest
@@ -236,8 +240,8 @@ jobs:
           # buildkit refuses to push a tagged ref by digest, so this cannot be a
           # `--set "*.output=..."` override — the tags would still be there.
           PUSH_BY_DIGEST: "true"
-          CACHE_FROM: ${{ needs.plan.outputs.repo }}:buildcache-main-${{ matrix.network }}
-          CACHE_TO: ${{ needs.plan.outputs.cache_to == 'true' && format('{0}:buildcache-main-{1}', needs.plan.outputs.repo, matrix.network) || '' }}
+          CACHE_FROM: ${{ needs.plan.outputs.repo }}:buildcache-main-${{ matrix.network }}-${{ matrix.arch }}
+          CACHE_TO: ${{ needs.plan.outputs.cache_to == 'true' && format('{0}:buildcache-main-{1}-{2}', needs.plan.outputs.repo, matrix.network, matrix.arch) || '' }}
         run: |
           docker buildx bake all \
             --set "*.platform=$PLATFORM" \

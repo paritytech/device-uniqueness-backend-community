@@ -21,7 +21,7 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
     pins the compose bundle to them. No bare `<tag>`, `stable` or `latest`: an
     image carries a binary built for one runtime, so a tag must name its
     network, and pinning an exact version is the only supported mode.
-  - **Commit images**, `YYYYMMDD-HHMMSS-<shortsha>` (`linux/amd64`, `testnet`),
+  - **Commit images**, `YYYYMMDD-HHMMSS-<shortsha>` (`linux/amd64` + `linux/arm64`, `testnet`),
     one per push to `main`. Pull requests build the image without pushing.
   - A manual run of the image workflow builds any ref for either network under
     a tag of the operator's choosing; the commit-image shape is refused there,
