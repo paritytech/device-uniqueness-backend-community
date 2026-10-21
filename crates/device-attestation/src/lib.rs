@@ -59,7 +59,7 @@ impl std::fmt::Display for Pallet {
 #[error(
     "{pallet} shape mismatch: this writer builds [{expected}], \
      the connected runtime's {pallet} declares [{found}]. This chain runs a different \
-     runtime version; point relevant network rpc(PEOPLE_RPC_URL,ASSET_HUB_RPC_URL) at one with the signed_at variant."
+     runtime version; point relevant network rpc(PEOPLE_RPC_URL,ASSET_HUB_RPC_URL)."
 )]
 pub struct PalletCallArgsShapeError {
     /// Pallet used by the call
