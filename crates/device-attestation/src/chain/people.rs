@@ -9,7 +9,7 @@ use chain_types::{people, PeopleConfig};
 use subxt::{config::RpcConfigFor, utils::AccountId32, OnlineClient};
 use subxt_rpcs::{LegacyRpcMethods, RpcClient};
 
-use crate::{check_pallet_call_args, Pallet};
+use crate::{check_pallet_call_args, extract_call_fields, Pallet};
 
 const DISCRIMINATORS: u8 = 100;
 
@@ -96,32 +96,18 @@ impl PeopleChain {
     }
 
     async fn check_attest_shape(&self) -> anyhow::Result<()> {
-        let metadata = chain_types::metadata_arc();
-        let metadata_pallet = metadata
-            .pallet_by_name(PALLET)
-            .with_context(|| format!("runtime declares no {PALLET} pallet"))?;
-        let metadata_call = metadata_pallet
-            .call_variant_by_name("attest")
-            .with_context(|| format!("{PALLET} declares no attest call"))?;
-
-        let metadata = self.client.at_current_block().await?.metadata();
-        let pallet = metadata
-            .pallet_by_name(PALLET)
-            .with_context(|| format!("runtime declares no {PALLET} pallet"))?;
-
-        let call = pallet
-            .call_variant_by_name("attest")
-            .with_context(|| format!("{PALLET} declares no attest call"))?;
+        let vendored_call =
+            extract_call_fields(chain_types::metadata_arc(), PALLET, "attest", true)?;
+        let call = extract_call_fields(
+            self.client.at_current_block().await?.metadata(),
+            PALLET,
+            "attest",
+            false,
+        )?;
         check_pallet_call_args(
-            &metadata_call.fields,
+            vendored_call.fields.as_slice(),
             Pallet::PeopleLite,
-            &call.fields,
-            |x| {
-                x.type_name
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_else(|| "<unnamed>".to_owned())
-            },
+            call.fields.as_slice(),
         )?;
         Ok(())
     }

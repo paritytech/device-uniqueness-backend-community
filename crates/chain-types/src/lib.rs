@@ -12,7 +12,6 @@
 //! plus `Game,ProofOfInk` on `testnet`; the `polkadot` runtime dropped them.
 
 use subxt::config::transaction_extensions as tx_ext;
-
 #[allow(clippy::all, missing_docs, rustdoc::all)]
 #[cfg_attr(
     dub_network = "testnet",

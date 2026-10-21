@@ -16,6 +16,7 @@ pub mod widevine;
 
 use std::fmt::Debug;
 
+use anyhow::Context;
 pub use chain::PeopleChain;
 pub use config::Config;
 pub use http::routes;
@@ -26,6 +27,8 @@ pub use jwt_verify::Jwt;
 /// part of the crate's API.
 #[doc(hidden)]
 pub use auth::app_attest::store as app_attest_store;
+use scale_info::form::PortableForm;
+use scale_info::Field;
 
 /// Serializes tests that mutate process-global environment variables
 /// (`Config::from_env`, `WriterConfig::from_env`): cargo runs `#[test]`s on
@@ -67,21 +70,42 @@ pub struct PalletCallArgsShapeError {
     found: String,
 }
 
+pub(crate) fn extract_call_fields(
+    metadata: subxt::ArcMetadata,
+    pallet_name: &str,
+    call_name: &str,
+    vendored: bool,
+) -> anyhow::Result<scale_info::Variant<PortableForm>> {
+    let vendored = if vendored { "vendored " } else { "" };
+    let pallet = metadata
+        .pallet_by_name(pallet_name)
+        .with_context(|| format!("{vendored}runtime declares no {pallet_name} pallet"))?;
+    pallet
+        .call_variant_by_name(call_name)
+        .cloned()
+        .with_context(|| format!("{vendored}{pallet_name} declares no {call_name} call"))
+}
+
 /// Checks the pallet call arguments shape
 ///
 /// Names, in order. A positional-only check would accept a runtime that renamed
 /// an argument. A set check would accept one that reordered it.
-pub(crate) fn check_pallet_call_args<T: PartialEq>(
-    reserve_name_fields: &[T],
+pub(crate) fn check_pallet_call_args(
+    reserve_name_fields: &[Field<PortableForm>],
     pallet: Pallet,
-    fields: &[T],
-    extractor: fn(&T) -> String,
+    fields: &[Field<PortableForm>],
 ) -> Result<(), PalletCallArgsShapeError> {
+    let extractor = |x: &Field<PortableForm>| {
+        x.name
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| "<unnamed>".to_owned())
+    };
     let matches = fields.len() == reserve_name_fields.len()
         && fields
             .iter()
             .zip(reserve_name_fields)
-            .all(|(found, expected)| found == expected);
+            .all(|(found, expected)| found.ty == expected.ty && found.name == expected.name);
     if matches {
         return Ok(());
     }
