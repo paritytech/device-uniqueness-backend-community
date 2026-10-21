@@ -9,10 +9,13 @@ use chain_types::{people, PeopleConfig};
 use subxt::{config::RpcConfigFor, utils::AccountId32, OnlineClient};
 use subxt_rpcs::{LegacyRpcMethods, RpcClient};
 
+use crate::{check_pallet_call_args, Pallet};
+
 const DISCRIMINATORS: u8 = 100;
 
-const HEALTH_PROBE_USERNAME: &str = "readyz-probe.00";
+const PALLET: &str = "PeopleLite";
 
+const HEALTH_PROBE_USERNAME: &str = "readyz-probe.00";
 fn owner_key(
     username: impl AsRef<[u8]>,
 ) -> people::runtime_types::bounded_collections::bounded_vec::BoundedVec<u8> {
@@ -87,7 +90,40 @@ pub struct PeopleChain {
 impl PeopleChain {
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
         let (client, rpc) = chain_client::connect_with_rpc(url).await?;
-        Ok(Self::from_parts(client, rpc))
+        let self_ = Self::from_parts(client, rpc);
+        self_.check_attest_shape().await?;
+        Ok(self_)
+    }
+
+    async fn check_attest_shape(&self) -> anyhow::Result<()> {
+        let metadata = chain_types::metadata_arc();
+        let metadata_pallet = metadata
+            .pallet_by_name(PALLET)
+            .with_context(|| format!("runtime declares no {PALLET} pallet"))?;
+        let metadata_call = metadata_pallet
+            .call_variant_by_name("attest")
+            .with_context(|| format!("{PALLET} declares no attest call"))?;
+
+        let metadata = self.client.at_current_block().await?.metadata();
+        let pallet = metadata
+            .pallet_by_name(PALLET)
+            .with_context(|| format!("runtime declares no {PALLET} pallet"))?;
+
+        let call = pallet
+            .call_variant_by_name("attest")
+            .with_context(|| format!("{PALLET} declares no attest call"))?;
+        check_pallet_call_args(
+            &metadata_call.fields,
+            Pallet::PeopleLite,
+            &call.fields,
+            |x| {
+                x.type_name
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| "<unnamed>".to_owned())
+            },
+        )?;
+        Ok(())
     }
 
     pub fn from_parts(client: OnlineClient<PeopleConfig>, rpc: RpcClient) -> Self {
