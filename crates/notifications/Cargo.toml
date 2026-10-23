@@ -31,7 +31,7 @@ utoipa.workspace = true
 time = "0.3"
 # APNs HTTP/2 transport + ES256 provider-token signing from the .p8 key.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
-jsonwebtoken = "9"
+jsonwebtoken = "11"
 
 [dev-dependencies]
 base64 = "0.22"
