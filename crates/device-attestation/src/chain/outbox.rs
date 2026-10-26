@@ -147,6 +147,7 @@ pub struct NewReservation {
     pub dotns_signature: Option<Vec<u8>>,
     pub dotns_signed_at: Option<i64>,
     pub reserved_username: Option<String>,
+    pub payload_version: i16,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -194,8 +195,8 @@ where
             candidate_signature, ring_vrf_key, proof_of_ownership, \
             consumer_registration_signature, identifier_key, \
             dotns_signature, dotns_signed_at, reserved_username, \
-            status, queue_group, dotns_status) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) \
+            status, queue_group, dotns_status, payload_version) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) \
          RETURNING id",
     )
     .bind(&r.account_id)
@@ -214,6 +215,7 @@ where
     .bind(status.as_str())
     .bind(queue_group)
     .bind(dotns_status)
+    .bind(r.payload_version)
     .fetch_one(executor)
     .await
     .map_err(|e| match &e {
@@ -262,12 +264,14 @@ pub struct Reservation {
     pub dotns_signature: Option<Vec<u8>>,
     pub dotns_signed_at: Option<i64>,
     pub dotns_attempt: i32,
+    pub payload_version: i16,
     pub created_at: OffsetDateTime,
 }
 
 const SELECT_COLS: &str = "id, full_username, candidate_account_id, candidate_signature, \
      ring_vrf_key, proof_of_ownership, consumer_registration_signature, identifier_key, \
-     reserved_username, attempt, dotns_signature, dotns_signed_at, dotns_attempt, created_at";
+     reserved_username, attempt, dotns_signature, dotns_signed_at, dotns_attempt, \
+     payload_version, created_at";
 
 fn row_to_reservation(row: &sqlx::postgres::PgRow) -> Result<Reservation, sqlx::Error> {
     Ok(Reservation {
@@ -284,6 +288,7 @@ fn row_to_reservation(row: &sqlx::postgres::PgRow) -> Result<Reservation, sqlx::
         dotns_signature: row.try_get("dotns_signature")?,
         dotns_signed_at: row.try_get("dotns_signed_at")?,
         dotns_attempt: row.try_get("dotns_attempt")?,
+        payload_version: row.try_get("payload_version")?,
         created_at: row.try_get("created_at")?,
     })
 }
