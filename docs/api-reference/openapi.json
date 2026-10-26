@@ -456,7 +456,7 @@
             }
           },
           "400": {
-            "description": "Validation failed (with per-field `fields`), malformed JSON, a `lifetimePoUDVoucher` that is unknown, already used, or expired (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, or wrong field sizes — the specific reason is logged server-side, never returned).",
+            "description": "Validation failed (with per-field `fields`; an unsupported `payloadVersion` is reported on that field rather than as an invalid signature), malformed JSON, a `lifetimePoUDVoucher` that is unknown, already used, or expired (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, or wrong field sizes — the specific reason is logged server-side, never returned).",
             "content": {
               "application/json": {
                 "schema": {},
@@ -1319,7 +1319,7 @@
       },
       "RegisterRequest": {
         "type": "object",
-        "description": "The flat registration request (documentation mirror — the handler\nvalidates raw JSON so it can report every failing field).",
+        "description": "The flat registration request. Every field is read as received and\nchecked afterwards, so a `400` can report all failing fields at once.",
         "required": [
           "candidateAccountId",
           "username",
@@ -1372,6 +1372,17 @@
             "type": "string",
             "description": "`0x`-hex 65-byte identifier key.",
             "example": "0x...65 bytes..."
+          },
+          "payloadVersion": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The format of the payloads this claim's signatures cover.\nAn unsupported version is a 400 before anything is stored. Omitted\nmeans `1`, the only format today.",
+            "default": 1,
+            "example": 1,
+            "minimum": 1
           },
           "lifetimePoUDVoucher": {
             "type": [
