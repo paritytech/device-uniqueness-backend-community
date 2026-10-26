@@ -1319,7 +1319,7 @@
       },
       "RegisterRequest": {
         "type": "object",
-        "description": "The flat registration request. Every field is read as received and\nchecked afterwards, so a `400` can report all failing fields at once.",
+        "description": "The flat registration request. A missing field or a wrong JSON type is a `400` naming that field; past that, every format failure is reported at once.",
         "required": [
           "candidateAccountId",
           "username",
@@ -1374,10 +1374,7 @@
             "example": "0x...65 bytes..."
           },
           "payloadVersion": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": "integer",
             "format": "int32",
             "description": "The format of the payloads this claim's signatures cover.\nAn unsupported version is a 400 before anything is stored. Omitted\nmeans `1`, the only format today.",
             "default": 1,
@@ -1400,7 +1397,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Optional Android device-uniqueness evidence (Widevine PoUD): leaf-first\nbase64 DER attestation chain, 2-10 entries, whose leaf key was created\nwith `attestationChallenge = SHA-256(domain ‖ deviceChallenge ‖\naccountKey ‖ deviceId)`. All three evidence fields are present\ntogether or not at all; ignored unless `WIDEVINE_DEDUP_ENABLED`.\nSent only when the app measured Widevine L1.",
+            "description": "Optional Android device-uniqueness evidence (Widevine PoUD): leaf-first\nbase64 DER attestation chain, 2-10 entries, whose leaf key was created\nwith `attestationChallenge = SHA-256(domain ‖ deviceChallenge ‖\naccountKey ‖ deviceId)`. All three evidence fields are present\ntogether or not at all. Supplied fields must match their JSON types;\nevidence verification runs only with `WIDEVINE_DEDUP_ENABLED`.\nSent only when the app measured Widevine L1.",
             "example": [
               "base64-der-leaf",
               "base64-der-root"

@@ -1570,7 +1570,8 @@ the PoUD gate and the registration queue. Ignored unless
 base64 DER attestation chain, 2-10 entries, whose leaf key was created
 with <code>attestationChallenge = SHA-256(domain ‖ deviceChallenge ‖
 accountKey ‖ deviceId)</code>. All three evidence fields are present
-together or not at all; ignored unless <code>WIDEVINE_DEDUP_ENABLED</code>.
+together or not at all. Supplied fields must match their JSON types;
+evidence verification runs only with <code>WIDEVINE_DEDUP_ENABLED</code>.
 Sent only when the app measured Widevine L1.</td></tr>
                 <tr><td class="name">deviceChallenge</td><td class="type">string</td><td class="req">no</td><td class="desc">Base64 32-byte single-use challenge from <code>/auth/challenges</code>, bound
 into the leaf key's attestation challenge.</td></tr>
