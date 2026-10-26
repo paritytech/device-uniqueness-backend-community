@@ -69,9 +69,9 @@ pub struct RegisterRequest {
     identifier_key: String,
     /// The format of the payloads this claim's signatures cover.
     /// An unsupported version is a 400 before anything is stored. Omitted
-    /// means `0`, the only format today.
+    /// means `1`, the only format today.
     #[serde(rename = "payloadVersion")]
-    #[schema(rename = "payloadVersion", example = 0, minimum = 0)]
+    #[schema(rename = "payloadVersion", example = 1, minimum = 1, default = 1)]
     payload_version: Option<u16>,
     /// Optional single-use registration voucher (the INSTANT lane): bypasses
     /// the PoUD gate and the registration queue. Ignored unless
@@ -1015,7 +1015,7 @@ fn validate_register(
     );
 
     let payload_version = match get("payloadVersion") {
-        None => Some(PayloadVersion::V0),
+        None => Some(PayloadVersion::V1),
         Some(Value::Number(n)) if n.is_u64() || n.is_i64() => {
             let version = n.as_u64().and_then(PayloadVersion::from_wire);
             if version.is_none() {
@@ -1264,7 +1264,7 @@ fn validate_register(
             consumer_registration_signature_raw.as_deref(),
         ),
         identifier_key: decode_prefixed_hex(identifier_key_raw.as_deref()),
-        payload_version: payload_version.unwrap_or(PayloadVersion::V0),
+        payload_version: payload_version.unwrap_or(PayloadVersion::V1),
         voucher,
         dotns: dotns.map(|(signature, signed_at, reserved_username)| ParsedDotns {
             signature: decode_prefixed_hex(signature.as_deref()),
@@ -1297,11 +1297,11 @@ fn decode_prefixed_hex(value: Option<&str>) -> Vec<u8> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PayloadVersion {
-    V0,
+    V1,
 }
 
 impl PayloadVersion {
-    const SUPPORTED: [Self; 1] = [Self::V0];
+    const SUPPORTED: [Self; 1] = [Self::V1];
 
     fn from_wire(version: u64) -> Option<Self> {
         Self::SUPPORTED
@@ -1311,7 +1311,7 @@ impl PayloadVersion {
 
     fn as_i16(self) -> i16 {
         match self {
-            Self::V0 => 0,
+            Self::V1 => 1,
         }
     }
 
@@ -1332,7 +1332,7 @@ const POP_REGISTER_PREFIX: &[u8] = b"pop:people-lite:register using";
 
 /// Verifies the caller controls `candidate_pubkey`.
 ///
-/// Under [`PayloadVersion::V0`] the candidate's sr25519 key must have signed
+/// Under [`PayloadVersion::V1`] the candidate's sr25519 key must have signed
 /// `POP_REGISTER_PREFIX || candidatePubkey || ringVrfKey`. Uses `subxt_signer`
 /// (schnorrkel with the Substrate signing context). Symmetric with the shipping
 /// Polkadot wallets and the on-chain verifier.
@@ -1346,7 +1346,7 @@ fn verify_candidate_signature(
         return false;
     };
     let message = match version {
-        PayloadVersion::V0 => {
+        PayloadVersion::V1 => {
             let mut message =
                 Vec::with_capacity(POP_REGISTER_PREFIX.len() + 32 + ring_vrf_key.len());
             message.extend_from_slice(POP_REGISTER_PREFIX);
@@ -1886,26 +1886,26 @@ mod tests {
     }
 
     #[test]
-    fn an_undeclared_payload_version_is_format_zero() {
+    fn an_undeclared_payload_version_is_format_one() {
         let parsed = validate_register(&valid_body(), &config()).expect("valid");
-        assert_eq!(parsed.payload_version, PayloadVersion::V0);
+        assert_eq!(parsed.payload_version, PayloadVersion::V1);
 
         let mut declared = valid_body();
-        declared["payloadVersion"] = json!(0);
+        declared["payloadVersion"] = json!(1);
         let parsed = validate_register(&declared, &config()).expect("valid");
-        assert_eq!(parsed.payload_version, PayloadVersion::V0);
+        assert_eq!(parsed.payload_version, PayloadVersion::V1);
     }
 
     #[test]
     fn an_unsupported_payload_version_is_a_400_not_an_invalid_signature() {
-        for version in [json!(1), json!(2), json!(-1), json!(65_536)] {
+        for version in [json!(0), json!(2), json!(-1), json!(65_536)] {
             let mut body = valid_body();
             body["payloadVersion"] = version;
             assert_eq!(
                 errors_of(body),
                 [(
                     "payloadVersion".to_string(),
-                    "Unsupported payload version. Supported: 0.".to_string()
+                    "Unsupported payload version. Supported: 1.".to_string()
                 )]
             );
         }
@@ -1947,13 +1947,13 @@ mod tests {
         let signature = keypair.sign(&message).0;
 
         assert!(verify_candidate_signature(
-            PayloadVersion::V0,
+            PayloadVersion::V1,
             &candidate,
             &signature,
             &ring_vrf_key
         ));
         assert!(!verify_candidate_signature(
-            PayloadVersion::V0,
+            PayloadVersion::V1,
             &candidate,
             &signature,
             &[9u8; 32]
@@ -1963,13 +1963,13 @@ mod tests {
             .public_key()
             .0;
         assert!(!verify_candidate_signature(
-            PayloadVersion::V0,
+            PayloadVersion::V1,
             &other,
             &signature,
             &ring_vrf_key
         ));
         assert!(!verify_candidate_signature(
-            PayloadVersion::V0,
+            PayloadVersion::V1,
             &candidate,
             &[0u8; 10],
             &ring_vrf_key
