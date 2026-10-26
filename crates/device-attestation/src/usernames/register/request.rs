@@ -23,6 +23,10 @@ const PATTERN_HEX_STRING: &str = "^(0x)?[a-fA-F0-9]+$";
 
 /// The flat registration request.
 #[derive(Default, Deserialize, ToSchema)]
+#[schema(
+    description = "The flat registration request. Every field is read as received and\n\
+                   checked afterwards, so a `400` can report all failing fields at once."
+)]
 pub struct RegisterRequest {
     /// SS58 beneficiary account that will own the username.
     #[serde(default, rename = "candidateAccountId")]
@@ -33,11 +37,11 @@ pub struct RegisterRequest {
         example = "5FbRAkhDvNVecNzHLFxBNXFXNwvBaV69S1W3nfBbnxYypkkT"
     )]
     candidate_account_id: Field,
-    /// Base username.
+    /// Base username (lowercase ASCII letters, 6..=29 chars).
     #[serde(default)]
     #[schema(value_type = String, required, example = "tallesx")]
     username: Field,
-    /// Optional two-digit suffix, random-free if omitted.
+    /// Optional two-digit suffix, e.g. `"07"`; random-free if omitted.
     #[serde(default, rename = "preferredDigits")]
     #[schema(rename = "preferredDigits", value_type = Option<String>, example = "07")]
     preferred_digits: Field,
@@ -93,7 +97,8 @@ pub struct RegisterRequest {
         default = 1
     )]
     payload_version: Field,
-    /// Optional single-use registration voucher. Ignored unless
+    /// Optional single-use registration voucher (the INSTANT lane): bypasses
+    /// the PoUD gate and the registration queue. Ignored unless
     /// `REGISTRATION_VOUCHERS_ENABLED`.
     #[serde(default, rename = "lifetimePoUDVoucher")]
     #[schema(
@@ -102,7 +107,12 @@ pub struct RegisterRequest {
         example = "base64url-voucher-key"
     )]
     lifetime_poud_voucher: Field,
-    /// Optional Android device-uniqueness evidence (Widevine PoUD).
+    /// Optional Android device-uniqueness evidence (Widevine PoUD): leaf-first
+    /// base64 DER attestation chain, 2-10 entries, whose leaf key was created
+    /// with `attestationChallenge = SHA-256(domain ‖ deviceChallenge ‖
+    /// accountKey ‖ deviceId)`. All three evidence fields are present
+    /// together or not at all; ignored unless `WIDEVINE_DEDUP_ENABLED`.
+    /// Sent only when the app measured Widevine L1.
     #[serde(default, rename = "attestationChain")]
     #[schema(
         rename = "attestationChain",
@@ -123,7 +133,7 @@ pub struct RegisterRequest {
     device_challenge: Field,
     /// Base64 32-byte device pseudonym:
     /// `SHA-256("dub/poud/widevine-id/v1" ‖ rawWidevineId)`, computed on the
-    /// device.
+    /// device — the raw id never leaves it.
     #[serde(default, rename = "deviceId")]
     #[schema(
         rename = "deviceId",
@@ -149,7 +159,9 @@ pub(crate) struct Dotns {
     #[serde(default, rename = "signedAt")]
     #[schema(rename = "signedAt", value_type = i64, required, example = 1780000000i64)]
     signed_at: Field,
-    /// The bare personhood name to reserve.
+    /// The bare personhood name to reserve. Its own name on chain — it need
+    /// not be `username`, and availability is checked against *this* name, not
+    /// against the base of the lite username in the same claim.
     #[serde(default, rename = "reservedUsername")]
     #[schema(
         rename = "reservedUsername",
