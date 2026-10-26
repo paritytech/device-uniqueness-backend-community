@@ -147,7 +147,7 @@ pub struct NewReservation {
     pub dotns_signature: Option<Vec<u8>>,
     pub dotns_signed_at: Option<i64>,
     pub reserved_username: Option<String>,
-    pub payload_version: i16,
+    pub payload_version: u16,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -189,6 +189,8 @@ where
         .dotns_signature
         .is_some()
         .then_some(DotnsStatus::Pending.as_str());
+    let payload_version =
+        i16::try_from(r.payload_version).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
     let row = sqlx::query(
         "INSERT INTO username_reservations \
            (account_id, candidate_account_id, base, digits, full_username, \
@@ -215,7 +217,7 @@ where
     .bind(status.as_str())
     .bind(queue_group)
     .bind(dotns_status)
-    .bind(r.payload_version)
+    .bind(payload_version)
     .fetch_one(executor)
     .await
     .map_err(|e| match &e {
@@ -264,7 +266,7 @@ pub struct Reservation {
     pub dotns_signature: Option<Vec<u8>>,
     pub dotns_signed_at: Option<i64>,
     pub dotns_attempt: i32,
-    pub payload_version: i16,
+    pub payload_version: u16,
     pub created_at: OffsetDateTime,
 }
 
@@ -288,7 +290,12 @@ fn row_to_reservation(row: &sqlx::postgres::PgRow) -> Result<Reservation, sqlx::
         dotns_signature: row.try_get("dotns_signature")?,
         dotns_signed_at: row.try_get("dotns_signed_at")?,
         dotns_attempt: row.try_get("dotns_attempt")?,
-        payload_version: row.try_get("payload_version")?,
+        payload_version: u16::try_from(row.try_get::<i16, _>("payload_version")?).map_err(
+            |error| sqlx::Error::ColumnDecode {
+                index: "payload_version".to_string(),
+                source: Box::new(error),
+            },
+        )?,
         created_at: row.try_get("created_at")?,
     })
 }

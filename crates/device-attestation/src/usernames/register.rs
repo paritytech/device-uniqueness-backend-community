@@ -795,7 +795,7 @@ fn build_reservation(
         dotns_signature: parsed.dotns.as_ref().map(|d| d.signature.clone()),
         dotns_signed_at: parsed.dotns.as_ref().map(|d| d.signed_at),
         reserved_username: parsed.dotns.and_then(|d| d.reserved_username),
-        payload_version: parsed.payload_version.as_i16(),
+        payload_version: parsed.payload_version.as_u16(),
     }
 }
 
@@ -1306,10 +1306,10 @@ impl PayloadVersion {
     fn from_wire(version: u64) -> Option<Self> {
         Self::SUPPORTED
             .into_iter()
-            .find(|v| u64::try_from(v.as_i16()) == Ok(version))
+            .find(|v| u64::from(v.as_u16()) == version)
     }
 
-    fn as_i16(self) -> i16 {
+    fn as_u16(self) -> u16 {
         match self {
             Self::V1 => 1,
         }
@@ -1318,7 +1318,7 @@ impl PayloadVersion {
     fn unsupported_message() -> String {
         let supported = Self::SUPPORTED
             .iter()
-            .map(|v| v.as_i16().to_string())
+            .map(|v| v.as_u16().to_string())
             .collect::<Vec<_>>()
             .join(", ");
         format!("Unsupported payload version. Supported: {supported}.")
