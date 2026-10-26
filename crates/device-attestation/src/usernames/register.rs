@@ -104,9 +104,10 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
             `payloadVersion` is reported on that field rather than as an invalid signature), malformed JSON, \
             a `lifetimePoUDVoucher` that is unknown, already used, or expired \
             (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), \
-            or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence \
-            (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, or wrong \
-            field sizes — the specific reason is logged server-side, never returned).",
+            a device-evidence field of the wrong JSON type (in every Widevine mode, like any \
+            other field), or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device \
+            evidence (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, \
+            or wrong field sizes — the specific reason is logged server-side, never returned).",
          body = serde_json::Value,
          example = json!({
              "error": "The request body contains invalid values.",

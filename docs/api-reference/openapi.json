@@ -456,7 +456,7 @@
             }
           },
           "400": {
-            "description": "Validation failed (with per-field `fields`; an unsupported `payloadVersion` is reported on that field rather than as an invalid signature), malformed JSON, a `lifetimePoUDVoucher` that is unknown, already used, or expired (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, or wrong field sizes — the specific reason is logged server-side, never returned).",
+            "description": "Validation failed (with per-field `fields`; an unsupported `payloadVersion` is reported on that field rather than as an invalid signature), malformed JSON, a `lifetimePoUDVoucher` that is unknown, already used, or expired (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), a device-evidence field of the wrong JSON type (in every Widevine mode, like any other field), or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, or wrong field sizes — the specific reason is logged server-side, never returned).",
             "content": {
               "application/json": {
                 "schema": {},
@@ -1207,7 +1207,7 @@
           "signedAt": {
             "type": "integer",
             "format": "int64",
-            "description": "Unix timestamp the reservation was signed at.",
+            "description": "Unix timestamp the reservation was signed at, as a JSON integer: a\nfloat is refused even when it is whole (`1780000000.0`).",
             "example": 1780000000
           },
           "reservedUsername": {
@@ -1386,7 +1386,7 @@
               "string",
               "null"
             ],
-            "description": "Optional single-use registration voucher (the INSTANT lane): bypasses\nthe PoUD gate and the registration queue. Ignored unless\n`REGISTRATION_VOUCHERS_ENABLED`.",
+            "description": "Optional single-use registration voucher (the INSTANT lane): bypasses\nthe PoUD gate and the registration queue. Must be a string when\npresent; its value is ignored unless `REGISTRATION_VOUCHERS_ENABLED`.",
             "example": "base64url-voucher-key"
           },
           "attestationChain": {

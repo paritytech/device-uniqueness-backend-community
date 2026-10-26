@@ -58,12 +58,12 @@ pub struct RegisterRequest {
     /// The format of the payloads this claim's signatures cover.
     /// An unsupported version is a 400 before anything is stored. Omitted
     /// means `1`, the only format today.
-    #[serde(default = "PayloadVersion::default_wire")]
+    #[serde(default = "default_payload_version")]
     #[schema(example = 1, minimum = 1, default = 1)]
     payload_version: u16,
     /// Optional single-use registration voucher (the INSTANT lane): bypasses
-    /// the PoUD gate and the registration queue. Ignored unless
-    /// `REGISTRATION_VOUCHERS_ENABLED`.
+    /// the PoUD gate and the registration queue. Must be a string when
+    /// present; its value is ignored unless `REGISTRATION_VOUCHERS_ENABLED`.
     #[serde(default, rename = "lifetimePoUDVoucher")]
     #[schema(rename = "lifetimePoUDVoucher", example = "base64url-voucher-key")]
     lifetime_poud_voucher: Option<String>,
@@ -103,7 +103,8 @@ pub(crate) struct Dotns {
     /// `0x`-hex 64-byte signature.
     #[schema(example = "0x...64 bytes...")]
     signature: String,
-    /// Unix timestamp the reservation was signed at.
+    /// Unix timestamp the reservation was signed at, as a JSON integer: a
+    /// float is refused even when it is whole (`1780000000.0`).
     #[schema(example = 1780000000i64)]
     signed_at: i64,
     /// The bare personhood name to reserve. Its own name on chain — it need
@@ -248,11 +249,14 @@ pub(super) enum PayloadVersion {
     V1,
 }
 
-impl PayloadVersion {
-    const SUPPORTED: [Self; 1] = [Self::V1];
+impl TryFrom<u16> for PayloadVersion {
+    type Error = String;
 
-    fn default_wire() -> u16 {
-        Self::V1.into()
+    fn try_from(version: u16) -> Result<Self, String> {
+        match version {
+            1 => Ok(Self::V1),
+            _ => Err("Unsupported payload version. Supported: 1.".to_string()),
+        }
     }
 }
 
@@ -264,18 +268,8 @@ impl From<PayloadVersion> for u16 {
     }
 }
 
-impl TryFrom<u16> for PayloadVersion {
-    type Error = String;
-
-    fn try_from(version: u16) -> Result<Self, String> {
-        Self::SUPPORTED
-            .into_iter()
-            .find(|v| u16::from(*v) == version)
-            .ok_or_else(|| {
-                let supported = Self::SUPPORTED.map(|v| u16::from(v).to_string()).join(", ");
-                format!("Unsupported payload version. Supported: {supported}.")
-            })
-    }
+fn default_payload_version() -> u16 {
+    1
 }
 
 /// The fully-validated registration request, decoded.
@@ -403,7 +397,10 @@ impl RegisterRequest {
             .clone()
             .filter(|voucher| config.registration_vouchers_enabled && !voucher.is_empty());
 
-        if let (Some(candidate), Some(signature), Some(ring), Some(version)) = (
+        // Signature verification is the one costly check, so it runs only
+        // for a request that can still succeed.
+        if let (true, Some(candidate), Some(signature), Some(ring), Some(version)) = (
+            r.0.is_empty(),
             &candidate,
             &candidate_signature,
             &ring_vrf_key,
