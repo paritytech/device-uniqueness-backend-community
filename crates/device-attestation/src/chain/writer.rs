@@ -28,7 +28,7 @@ mod tx;
 use dotns::Dotns;
 use engine::{Cx, Drain};
 pub use error::WriterError;
-use lanes::{drive, every, supervise, until_lease_lost};
+use lanes::{drive, every, sleep_or_wake, supervise, until_lease_lost};
 use link::{DotnsLink, PeopleLink};
 use observe::{record_writer_info, zero_init_submit_outcomes};
 use passes::Passes;
@@ -261,6 +261,7 @@ impl Writer {
         let proxy_for = *proxy_for;
         let cx = &cx_of(pool, guard, signer, signer_account, proxy_for, config);
         let wait = async || tokio::time::sleep(config.poll_interval).await;
+        let landed = tokio::sync::Notify::new();
 
         let people_lane = supervise(
             "people",
@@ -269,7 +270,13 @@ impl Writer {
             async |drain| {
                 drive(
                     async || cx.heartbeat().await,
-                    async || drain.pass(cx).await,
+                    async || {
+                        let idle = drain.pass(cx).await;
+                        if matches!(idle, Ok(false)) {
+                            landed.notify_one();
+                        }
+                        idle
+                    },
                     wait,
                 )
                 .await
@@ -284,7 +291,7 @@ impl Writer {
                 drive(
                     async || cx.heartbeat().await,
                     async || drain.pass(cx).await,
-                    wait,
+                    async || sleep_or_wake(config.poll_interval, &landed).await,
                 )
                 .await
             },

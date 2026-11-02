@@ -1,7 +1,9 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::{convert::Infallible, future::Future};
+use std::{convert::Infallible, future::Future, time::Duration};
+
+use tokio::sync::Notify;
 
 use super::{error::Op, WriterError};
 
@@ -42,6 +44,14 @@ pub(super) async fn supervise<S>(
         }
         tracing::warn!(lane, error = %e, "lane failed; restarting it");
         backoff().await;
+    }
+}
+
+/// Wait out `period`, or less if `wake` is notified first.
+pub(super) async fn sleep_or_wake(period: Duration, wake: &Notify) {
+    tokio::select! {
+        () = tokio::time::sleep(period) => {}
+        () = wake.notified() => {}
     }
 }
 
@@ -283,5 +293,36 @@ mod tests {
             ticks.get() >= 3,
             "a stuck dotNS lane must not hold the passes"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_wait_runs_its_full_period_unwoken() {
+        let start = tokio::time::Instant::now();
+        sleep_or_wake(Duration::from_secs(2), &Notify::new()).await;
+        assert_eq!(start.elapsed(), Duration::from_secs(2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wake_ends_an_idle_wait_early() {
+        let wake = Notify::new();
+        let start = tokio::time::Instant::now();
+
+        tokio::join!(sleep_or_wake(Duration::from_secs(2), &wake), async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            wake.notify_one();
+        });
+
+        assert_eq!(start.elapsed(), Duration::from_millis(100));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wake_sent_before_the_wait_is_not_lost() {
+        let wake = Notify::new();
+        wake.notify_one();
+        let start = tokio::time::Instant::now();
+
+        sleep_or_wake(Duration::from_secs(2), &wake).await;
+
+        assert_eq!(start.elapsed(), Duration::ZERO);
     }
 }
