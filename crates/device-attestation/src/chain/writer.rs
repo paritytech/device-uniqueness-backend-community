@@ -1,6 +1,7 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use secrecy::{ExposeSecret as _, SecretString};
@@ -247,56 +248,35 @@ impl Writer {
         }
     }
 
-    async fn heartbeat(&self, guard: &Guard) -> Result<bool, WriterError> {
-        Ok(lease::renew(
-            &self.pool,
-            &guard.lease_name,
-            &guard.holder_id,
-            guard.epoch,
-            self.config.lease_ttl,
-        )
-        .await?)
-    }
-
+    /// Drive both lanes concurrently until either stops.
     async fn active_loop(&mut self, guard: &Guard) -> Result<(), WriterError> {
-        loop {
-            if !self.heartbeat(guard).await? {
-                return Err(WriterError::LeaseLost(Op::Draining));
-            }
-            self.periodic().await;
-
-            let people_idle = self.people_pass(guard).await?;
-            self.dotns_pass(guard).await?;
-            if people_idle {
-                tokio::time::sleep(self.config.poll_interval).await;
-            }
-        }
-    }
-
-    async fn periodic(&mut self) {
         let Writer {
             pool,
             chain,
+            signer,
             signer_account,
             proxy_for,
             config,
+            people,
             dotns,
             passes,
-            ..
         } = self;
-        passes
-            .tick(pool, chain, dotns, signer_account, *proxy_for, config)
-            .await;
-    }
+        let (pool, chain, signer_account, config) = (&*pool, &*chain, &*signer_account, &*config);
+        let proxy_for = *proxy_for;
+        let cx = cx_of(pool, guard, signer, signer_account, proxy_for, config);
+        let stop = AtomicBool::new(false);
 
-    async fn people_pass(&mut self, guard: &Guard) -> Result<bool, WriterError> {
-        let (cx, drain) = self.people_pass_parts(guard);
-        drain.pass(&cx).await
-    }
-
-    async fn dotns_pass(&mut self, guard: &Guard) -> Result<bool, WriterError> {
-        let (cx, drain) = self.dotns_pass_parts(guard);
-        drain.pass(&cx).await
+        let people_lane = drive(&cx, &stop, config.poll_interval, async || {
+            people.pass(&cx).await
+        });
+        let dotns_lane = drive(&cx, &stop, config.poll_interval, async || {
+            passes
+                .tick(pool, chain, dotns, signer_account, proxy_for, config)
+                .await;
+            dotns.pass(&cx).await
+        });
+        let (people, dotns) = tokio::join!(people_lane, dotns_lane);
+        people.and(dotns)
     }
 
     async fn reconcile(&mut self, guard: &Guard) {
@@ -340,6 +320,30 @@ impl Writer {
             dotns,
         )
     }
+}
+
+/// Run one lane's passes until it fails, the lease is lost, or `stop` is
+/// raised.
+async fn drive(
+    cx: &Cx<'_>,
+    stop: &AtomicBool,
+    poll_interval: Duration,
+    mut pass: impl AsyncFnMut() -> Result<bool, WriterError>,
+) -> Result<(), WriterError> {
+    let result = async {
+        while !stop.load(Ordering::Relaxed) {
+            if !cx.heartbeat().await? {
+                return Err(WriterError::LeaseLost(Op::Draining));
+            }
+            if pass().await? {
+                tokio::time::sleep(poll_interval).await;
+            }
+        }
+        Ok(())
+    }
+    .await;
+    stop.store(true, Ordering::Relaxed);
+    result
 }
 
 fn hex_account(bytes: &[u8; 32]) -> String {
