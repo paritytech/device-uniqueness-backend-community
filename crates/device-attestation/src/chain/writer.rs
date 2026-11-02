@@ -28,7 +28,7 @@ mod tx;
 use dotns::Dotns;
 use engine::{Cx, Drain};
 pub use error::WriterError;
-use lanes::{drive, supervise, until_lease_lost};
+use lanes::{drive, every, supervise, until_lease_lost};
 use link::{DotnsLink, PeopleLink};
 use observe::{record_writer_info, zero_init_submit_outcomes};
 use passes::Passes;
@@ -181,7 +181,8 @@ pub async fn run(config: WriterConfig) -> Result<(), WriterError> {
     let chain_for_lane = chain.clone();
     let config_attester = config.attester;
     let asset_hub_rpc = config.asset_hub_rpc_url.clone();
-    let passes = Passes::new(&config);
+    let dotns_link = DotnsLink::new(asset_hub_rpc, config_attester);
+    let passes = Passes::new(&config, dotns_link.subscribe());
     let mut writer = Writer {
         pool,
         chain,
@@ -190,10 +191,7 @@ pub async fn run(config: WriterConfig) -> Result<(), WriterError> {
         proxy_for,
         config,
         people: Drain::new(batch_max, PeopleLink(chain_for_lane)),
-        dotns: Drain::new(
-            dotns_batch_max,
-            DotnsLink::new(asset_hub_rpc, config_attester),
-        ),
+        dotns: Drain::new(dotns_batch_max, dotns_link),
         passes,
     };
     writer.run_forever().await
@@ -244,7 +242,8 @@ impl Writer {
         }
     }
 
-    /// Drive both lanes concurrently until one loses the lease. A lane that
+    /// Drive both lanes, and the periodic passes beside them, until a lane
+    /// loses the lease. A lane that
     /// fails otherwise restarts on its own, without the other noticing.
     async fn active_loop(&mut self, guard: &Guard) -> WriterError {
         let Writer {
@@ -284,19 +283,22 @@ impl Writer {
             async |drain| {
                 drive(
                     async || cx.heartbeat().await,
-                    async || {
-                        passes
-                            .tick(pool, chain, drain, signer_account, proxy_for, config)
-                            .await;
-                        drain.pass(cx).await
-                    },
+                    async || drain.pass(cx).await,
                     wait,
                 )
                 .await
             },
             wait,
         );
-        until_lease_lost(people_lane, dotns_lane).await
+        let periodic = every(
+            async || {
+                passes
+                    .tick(pool, chain, signer_account, proxy_for, config)
+                    .await
+            },
+            wait,
+        );
+        until_lease_lost(people_lane, dotns_lane, periodic).await
     }
 }
 

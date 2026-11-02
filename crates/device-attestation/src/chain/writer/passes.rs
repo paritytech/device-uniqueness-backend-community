@@ -4,15 +4,18 @@
 use std::time::{Duration, Instant};
 
 use subxt::utils::AccountId32;
+use tokio::sync::watch;
 
 use super::{
-    engine::Drain,
     error::WriterError,
     hex_account,
     observe::{record_outbox_gauges, record_spec_version},
-    Dotns, WriterConfig,
+    WriterConfig,
 };
-use crate::chain::people::PeopleChain;
+use crate::chain::{asset_hub::AssetHub, people::PeopleChain};
+
+/// How long one attester-resource read may take.
+const RESOURCE_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 // A job that fires on its own interval.
 struct Ticker {
@@ -39,13 +42,15 @@ impl Ticker {
 pub(super) struct Passes {
     resources: Ticker,
     stranded: Ticker,
+    asset_hub: watch::Receiver<Option<AssetHub>>,
 }
 
 impl Passes {
-    pub(super) fn new(config: &WriterConfig) -> Self {
+    pub(super) fn new(config: &WriterConfig, asset_hub: watch::Receiver<Option<AssetHub>>) -> Self {
         Self {
             resources: Ticker::new(config.resource_poll_interval),
             stranded: Ticker::new(config.queue_fallback_after),
+            asset_hub,
         }
     }
 
@@ -54,16 +59,20 @@ impl Passes {
         &mut self,
         pool: &sqlx::PgPool,
         chain: &PeopleChain,
-        dotns: &mut Drain<Dotns>,
         signer_account: &AccountId32,
         proxy_for: Option<[u8; 32]>,
         config: &WriterConfig,
     ) {
         if self.resources.due() {
-            if let Err(e) =
-                attester_resources(chain, dotns, signer_account, proxy_for, config).await
-            {
-                tracing::warn!(error = %e, "attester resources read failed");
+            let asset_hub = self.asset_hub.borrow().clone();
+            let read = attester_resources(chain, asset_hub, signer_account, proxy_for, config);
+            match tokio::time::timeout(RESOURCE_READ_TIMEOUT, read).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(error = %e, "attester resources read failed"),
+                Err(_) => tracing::warn!(
+                    timeout_secs = RESOURCE_READ_TIMEOUT.as_secs(),
+                    "attester resources read timed out"
+                ),
             }
             if let Err(e) = record_outbox_gauges(pool).await {
                 tracing::warn!(error = %e, "outbox gauge pass failed");
@@ -104,7 +113,7 @@ impl Passes {
 
 async fn attester_resources(
     chain: &PeopleChain,
-    dotns: &mut Drain<Dotns>,
+    asset_hub: Option<AssetHub>,
     signer_account: &AccountId32,
     proxy_for: Option<[u8; 32]>,
     config: &WriterConfig,
@@ -159,7 +168,7 @@ async fn attester_resources(
         );
     }
 
-    if let Some(asset_hub) = dotns.chain().await {
+    if let Some(asset_hub) = asset_hub {
         let allowance = asset_hub.attestation_allowance(allowance_account).await?;
         let ah_signer_balance = asset_hub.free_balance(signer_account.0).await?;
         tracing::info!(

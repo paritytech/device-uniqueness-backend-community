@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::future::Future;
+use std::{convert::Infallible, future::Future};
 
 use super::{error::Op, WriterError};
 
@@ -45,14 +45,23 @@ pub(super) async fn supervise<S>(
     }
 }
 
-/// Handle lanes losing lease.
+pub(super) async fn every(mut tick: impl AsyncFnMut(), mut wait: impl AsyncFnMut()) -> Infallible {
+    loop {
+        tick().await;
+        wait().await;
+    }
+}
+
+/// Handle lanes losing lease; the periodic passes stop with them.
 pub(super) async fn until_lease_lost(
     people: impl Future<Output = WriterError>,
     dotns: impl Future<Output = WriterError>,
+    periodic: impl Future<Output = Infallible>,
 ) -> WriterError {
     tokio::select! {
         e = people => e,
         e = dotns => e,
+        never = periodic => match never {},
     }
 }
 
@@ -225,7 +234,7 @@ mod tests {
             async || {},
         );
 
-        let e = until_lease_lost(a, b).await;
+        let e = until_lease_lost(a, b, std::future::pending()).await;
 
         assert!(e.is_lease_lost());
         assert_eq!(a_runs.get(), 3);
@@ -245,8 +254,34 @@ mod tests {
         );
         let losing = async { WriterError::LeaseLost(Op::Finalizing) };
 
-        let e = until_lease_lost(stuck, losing).await;
+        let e = until_lease_lost(stuck, losing, std::future::pending()).await;
 
         assert!(matches!(e, WriterError::LeaseLost(Op::Finalizing)));
+    }
+
+    #[tokio::test]
+    async fn the_periodic_passes_run_while_a_lane_is_stuck_mid_pass() {
+        let ticks = Cell::new(0);
+        let stuck = std::future::pending();
+        let waiting = async {
+            while ticks.get() < 3 {
+                tokio::task::yield_now().await;
+            }
+            WriterError::LeaseLost(Op::Draining)
+        };
+        let periodic = every(
+            async || {
+                bump(&ticks);
+            },
+            tokio::task::yield_now,
+        );
+
+        let e = until_lease_lost(waiting, stuck, periodic).await;
+
+        assert!(e.is_lease_lost());
+        assert!(
+            ticks.get() >= 3,
+            "a stuck dotNS lane must not hold the passes"
+        );
     }
 }

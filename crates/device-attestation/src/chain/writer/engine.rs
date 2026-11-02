@@ -189,12 +189,6 @@ impl<L: Lane> Drain<L> {
         }
     }
 
-    /// This lane's chain for a one-off read, dialling if it is due a retry.
-    /// `None` while the lane is parked.
-    pub(super) async fn chain(&mut self) -> Option<L::Chain> {
-        self.link.up().await
-    }
-
     /// Drain one claimed set. `Ok(true)` means there was nothing due.
     ///
     /// Triage decides each row's fate offline and against one batched owner
