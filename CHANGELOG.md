@@ -8,6 +8,21 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A registration no longer waits behind the previous row's dotNS
+  reservation.** The chain writer ran its People and dotNS (Asset Hub) passes
+  one after the other in one loop, and each pass awaits inclusion. While an
+  Asset Hub `reserve_name` was in flight, no People registration was submitted,
+  so a registration arriving just after another waited out that row's whole
+  People and dotNS round trip before its own began: about 160s to a dotNS name
+  instead of 70–100s. The two lanes now run concurrently under the same lease.
+  They sign on different chains with their own nonces, and a row still reaches
+  the dotNS lane only once it is `ASSIGNED`. If either lane fails or loses the
+  lease, the other stops at the end of its current pass, and the writer
+  re-acquires the lease and reconciles as before. The attester-resource and
+  queue checks now run on the dotNS lane.
+
 ## [0.8.0] - 2026-10-27
 
 Runtime versions this release targets:
