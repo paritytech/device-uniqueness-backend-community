@@ -176,6 +176,19 @@ impl<L: Lane> Drain<L> {
         self.nonce = None;
     }
 
+    /// Bring the lane up from an unknown state.
+    pub(super) async fn restart(&mut self, cx: &Cx<'_>) -> Result<(), WriterError> {
+        self.reset_nonce();
+        match self.reconcile_submitting(cx).await {
+            Err(e) if e.is_lease_lost() => Err(e),
+            Err(e) => {
+                tracing::warn!(error = %e, lane = L::NAME, "reconcile failed");
+                Ok(())
+            }
+            Ok(()) => Ok(()),
+        }
+    }
+
     /// This lane's chain for a one-off read, dialling if it is due a retry.
     /// `None` while the lane is parked.
     pub(super) async fn chain(&mut self) -> Option<L::Chain> {
@@ -581,8 +594,8 @@ impl<L: Lane> Drain<L> {
     /// died mid-batch can leave far more than a batch's worth, and one
     /// unbounded read over all of them would make every stuck row hostage to a
     /// single timeout or unanswered key — and the rows it left behind would
-    /// wait for the next *lease acquisition*, which the active loop may not
-    /// reach for a long time.
+    /// wait for the lane's next restart, which a healthy lane may not reach
+    /// for a long time.
     ///
     /// Rows in a chunk that could not be read stay `SUBMITTING`: unknown is
     /// never read as not-yet-landed.

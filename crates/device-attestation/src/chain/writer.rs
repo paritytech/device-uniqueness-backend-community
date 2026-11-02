@@ -1,7 +1,6 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use secrecy::{ExposeSecret as _, SecretString};
@@ -29,7 +28,7 @@ mod tx;
 use dotns::Dotns;
 use engine::{Cx, Drain};
 pub use error::WriterError;
-use lanes::drive;
+use lanes::{drive, supervise, until_lease_lost};
 use link::{DotnsLink, PeopleLink};
 use observe::{record_writer_info, zero_init_submit_outcomes};
 use passes::Passes;
@@ -218,12 +217,8 @@ impl Writer {
         loop {
             let guard = self.acquire_lease().await?;
             tracing::info!(epoch = guard.epoch, "acquired writer lease");
-            self.people.reset_nonce();
-            self.dotns.reset_nonce();
-            self.reconcile(&guard).await;
-            if let Err(e) = self.active_loop(&guard).await {
-                tracing::warn!(error = %e, "writer loop exited; re-acquiring lease");
-            }
+            let e = self.active_loop(&guard).await;
+            tracing::warn!(error = %e, "writer lease lost; re-acquiring it");
             tokio::time::sleep(self.config.poll_interval).await;
         }
     }
@@ -249,8 +244,9 @@ impl Writer {
         }
     }
 
-    /// Drive both lanes concurrently until either stops.
-    async fn active_loop(&mut self, guard: &Guard) -> Result<(), WriterError> {
+    /// Drive both lanes concurrently until one loses the lease. A lane that
+    /// fails otherwise restarts on its own, without the other noticing.
+    async fn active_loop(&mut self, guard: &Guard) -> WriterError {
         let Writer {
             pool,
             chain,
@@ -264,72 +260,43 @@ impl Writer {
         } = self;
         let (pool, chain, signer_account, config) = (&*pool, &*chain, &*signer_account, &*config);
         let proxy_for = *proxy_for;
-        let cx = cx_of(pool, guard, signer, signer_account, proxy_for, config);
-        let stop = AtomicBool::new(false);
+        let cx = &cx_of(pool, guard, signer, signer_account, proxy_for, config);
+        let wait = async || tokio::time::sleep(config.poll_interval).await;
 
-        let idle = async || tokio::time::sleep(config.poll_interval).await;
-
-        let people_lane = drive(
-            &stop,
-            async || cx.heartbeat().await,
-            async || people.pass(&cx).await,
-            idle,
-        );
-        let dotns_lane = drive(
-            &stop,
-            async || cx.heartbeat().await,
-            async || {
-                passes
-                    .tick(pool, chain, dotns, signer_account, proxy_for, config)
-                    .await;
-                dotns.pass(&cx).await
+        let people_lane = supervise(
+            "people",
+            people,
+            async |drain| drain.restart(cx).await,
+            async |drain| {
+                drive(
+                    async || cx.heartbeat().await,
+                    async || drain.pass(cx).await,
+                    wait,
+                )
+                .await
             },
-            idle,
+            wait,
         );
-        let (people, dotns) = tokio::join!(people_lane, dotns_lane);
-        people.and(dotns)
-    }
-
-    async fn reconcile(&mut self, guard: &Guard) {
-        let (cx, drain) = self.people_pass_parts(guard);
-        if let Err(e) = drain.reconcile_submitting(&cx).await {
-            tracing::warn!(error = %e, lane = "people", "startup reconcile failed");
-        }
-        let (cx, drain) = self.dotns_pass_parts(guard);
-        if let Err(e) = drain.reconcile_submitting(&cx).await {
-            tracing::warn!(error = %e, lane = "dotns", "startup reconcile failed");
-        }
-    }
-    fn people_pass_parts<'a>(&'a mut self, guard: &'a Guard) -> (Cx<'a>, &'a mut Drain<People>) {
-        let Writer {
-            pool,
-            signer,
-            signer_account,
-            proxy_for,
-            config,
-            people,
-            ..
-        } = self;
-        (
-            cx_of(pool, guard, signer, signer_account, *proxy_for, config),
-            people,
-        )
-    }
-
-    fn dotns_pass_parts<'a>(&'a mut self, guard: &'a Guard) -> (Cx<'a>, &'a mut Drain<Dotns>) {
-        let Writer {
-            pool,
-            signer,
-            signer_account,
-            proxy_for,
-            config,
+        let dotns_lane = supervise(
+            "dotns",
             dotns,
-            ..
-        } = self;
-        (
-            cx_of(pool, guard, signer, signer_account, *proxy_for, config),
-            dotns,
-        )
+            async |drain| drain.restart(cx).await,
+            async |drain| {
+                drive(
+                    async || cx.heartbeat().await,
+                    async || {
+                        passes
+                            .tick(pool, chain, drain, signer_account, proxy_for, config)
+                            .await;
+                        drain.pass(cx).await
+                    },
+                    wait,
+                )
+                .await
+            },
+            wait,
+        );
+        until_lease_lost(people_lane, dotns_lane).await
     }
 }
 
