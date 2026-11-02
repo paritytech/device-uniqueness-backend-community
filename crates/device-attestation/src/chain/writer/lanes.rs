@@ -1,32 +1,59 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::future::Future;
 
 use super::{error::Op, WriterError};
 
-/// Run one lane's passes until it fails, the lease is lost, or `stop` is
-/// raised.
+/// Run one lane's passes until it fails or the lease is lost.
 pub(super) async fn drive(
-    stop: &AtomicBool,
     mut heartbeat: impl AsyncFnMut() -> Result<bool, WriterError>,
     mut pass: impl AsyncFnMut() -> Result<bool, WriterError>,
     mut idle: impl AsyncFnMut(),
-) -> Result<(), WriterError> {
-    let result = async {
-        while !stop.load(Ordering::Relaxed) {
-            if !heartbeat().await? {
-                return Err(WriterError::LeaseLost(Op::Draining));
-            }
-            if pass().await? {
-                idle().await;
-            }
+) -> WriterError {
+    loop {
+        match heartbeat().await {
+            Ok(true) => {}
+            Ok(false) => return WriterError::LeaseLost(Op::Draining),
+            Err(e) => return e,
         }
-        Ok(())
+        match pass().await {
+            Ok(true) => idle().await,
+            Ok(false) => {}
+            Err(e) => return e,
+        }
     }
-    .await;
-    stop.store(true, Ordering::Relaxed);
-    result
+}
+
+pub(super) async fn supervise<S>(
+    lane: &'static str,
+    state: &mut S,
+    mut restart: impl AsyncFnMut(&mut S) -> Result<(), WriterError>,
+    mut run: impl AsyncFnMut(&mut S) -> WriterError,
+    mut backoff: impl AsyncFnMut(),
+) -> WriterError {
+    loop {
+        if let Err(e) = restart(state).await {
+            return e;
+        }
+        let e = run(state).await;
+        if e.is_lease_lost() {
+            return e;
+        }
+        tracing::warn!(lane, error = %e, "lane failed; restarting it");
+        backoff().await;
+    }
+}
+
+/// Handle lanes losing lease.
+pub(super) async fn until_lease_lost(
+    people: impl Future<Output = WriterError>,
+    dotns: impl Future<Output = WriterError>,
+) -> WriterError {
+    tokio::select! {
+        e = people => e,
+        e = dotns => e,
+    }
 }
 
 #[cfg(test)]
@@ -43,103 +70,183 @@ mod tests {
         WriterError::Db(sqlx::Error::PoolTimedOut)
     }
 
+    fn bump(c: &Cell<u32>) -> u32 {
+        c.set(c.get() + 1);
+        c.get()
+    }
+
     #[tokio::test]
     async fn a_busy_pass_loops_without_idling() {
-        let stop = AtomicBool::new(false);
         let (passes, idles) = (Cell::new(0), Cell::new(0));
 
-        let result = drive(
-            &stop,
+        let e = drive(
             held,
-            async || {
-                passes.set(passes.get() + 1);
-                if passes.get() == 3 {
-                    stop.store(true, Ordering::Relaxed);
-                }
-                Ok(false)
+            async || match bump(&passes) {
+                3 => Err(db_error()),
+                _ => Ok(false),
             },
-            async || idles.set(idles.get() + 1),
+            async || {
+                bump(&idles);
+            },
         )
         .await;
 
-        assert!(result.is_ok());
+        assert!(matches!(e, WriterError::Db(_)));
         assert_eq!(passes.get(), 3);
         assert_eq!(idles.get(), 0, "a pass that did work must not wait");
     }
 
     #[tokio::test]
     async fn an_idle_pass_waits_before_the_next() {
-        let stop = AtomicBool::new(false);
         let (passes, idles) = (Cell::new(0), Cell::new(0));
 
         drive(
-            &stop,
             held,
-            async || {
-                passes.set(passes.get() + 1);
-                Ok(true)
+            async || match bump(&passes) {
+                3 => Err(db_error()),
+                _ => Ok(true),
             },
             async || {
-                idles.set(idles.get() + 1);
-                if idles.get() == 2 {
-                    stop.store(true, Ordering::Relaxed);
-                }
+                bump(&idles);
             },
         )
-        .await
-        .unwrap();
+        .await;
 
-        assert_eq!((passes.get(), idles.get()), (2, 2));
+        assert_eq!((passes.get(), idles.get()), (3, 2));
     }
 
     #[tokio::test]
     async fn a_lost_heartbeat_is_lease_lost_and_runs_no_pass() {
-        let stop = AtomicBool::new(false);
         let passes = Cell::new(0);
 
-        let result = drive(
-            &stop,
+        let e = drive(
             async || Ok(false),
             async || {
-                passes.set(passes.get() + 1);
+                bump(&passes);
                 Ok(false)
             },
             async || {},
         )
         .await;
 
-        assert!(matches!(result, Err(WriterError::LeaseLost(Op::Draining))));
+        assert!(matches!(e, WriterError::LeaseLost(Op::Draining)));
         assert_eq!(passes.get(), 0);
-        assert!(stop.load(Ordering::Relaxed), "the other lane must be told");
     }
 
     #[tokio::test]
-    async fn a_failed_pass_is_returned_and_raises_stop() {
-        let stop = AtomicBool::new(false);
-
-        let result = drive(&stop, held, async || Err(db_error()), async || {}).await;
-
-        assert!(matches!(result, Err(WriterError::Db(_))));
-        assert!(stop.load(Ordering::Relaxed));
+    async fn a_failed_heartbeat_is_returned() {
+        let e = drive(async || Err(db_error()), async || Ok(false), async || {}).await;
+        assert!(matches!(e, WriterError::Db(_)));
     }
 
     #[tokio::test]
-    async fn a_raised_stop_ends_the_lane_before_its_next_pass() {
-        let stop = AtomicBool::new(true);
-        let passes = Cell::new(0);
+    async fn a_lane_error_restarts_only_that_lane() {
+        let (restarts, runs, backoffs) = (Cell::new(0), Cell::new(0), Cell::new(0));
 
-        let result = drive(
-            &stop,
-            held,
+        let e = supervise(
+            "test",
+            &mut (),
+            async |_| {
+                bump(&restarts);
+                Ok(())
+            },
+            async |_| match bump(&runs) {
+                3 => WriterError::LeaseLost(Op::Landing),
+                _ => db_error(),
+            },
             async || {
-                passes.set(passes.get() + 1);
-                Ok(false)
+                bump(&backoffs);
+            },
+        )
+        .await;
+
+        assert!(matches!(e, WriterError::LeaseLost(Op::Landing)));
+        assert_eq!(
+            (restarts.get(), runs.get(), backoffs.get()),
+            (3, 3, 2),
+            "every failure but the lease loss is followed by a backoff and a restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lease_lost_during_restart_does_not_run_the_lane() {
+        let runs = Cell::new(0);
+
+        let e = supervise(
+            "test",
+            &mut (),
+            async |_| Err(WriterError::LeaseLost(Op::Landing)),
+            async |_| {
+                bump(&runs);
+                db_error()
             },
             async || {},
         )
         .await;
 
-        assert!(result.is_ok());
-        assert_eq!(passes.get(), 0);
+        assert!(e.is_lease_lost());
+        assert_eq!(runs.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn one_lane_failing_does_not_restart_the_other() {
+        let (a_runs, b_restarts, b_passes) = (Cell::new(0), Cell::new(0), Cell::new(0));
+        let (mut a_state, mut b_state) = ((), ());
+
+        let a = supervise(
+            "a",
+            &mut a_state,
+            async |_| Ok(()),
+            async |_| match bump(&a_runs) {
+                3 => WriterError::LeaseLost(Op::Draining),
+                _ => db_error(),
+            },
+            tokio::task::yield_now,
+        );
+        let b = supervise(
+            "b",
+            &mut b_state,
+            async |_| {
+                bump(&b_restarts);
+                Ok(())
+            },
+            async |_| {
+                drive(
+                    held,
+                    async || {
+                        bump(&b_passes);
+                        tokio::task::yield_now().await;
+                        Ok(false)
+                    },
+                    async || {},
+                )
+                .await
+            },
+            async || {},
+        );
+
+        let e = until_lease_lost(a, b).await;
+
+        assert!(e.is_lease_lost());
+        assert_eq!(a_runs.get(), 3);
+        assert_eq!(b_restarts.get(), 1, "b must not restart for a's errors");
+        assert!(b_passes.get() >= 1, "b kept passing while a restarted");
+    }
+
+    #[tokio::test]
+    async fn a_lease_loss_cancels_a_lane_stuck_mid_pass() {
+        let mut state = ();
+        let stuck = supervise(
+            "stuck",
+            &mut state,
+            async |_| Ok(()),
+            async |_| std::future::pending().await,
+            async || {},
+        );
+        let losing = async { WriterError::LeaseLost(Op::Finalizing) };
+
+        let e = until_lease_lost(stuck, losing).await;
+
+        assert!(matches!(e, WriterError::LeaseLost(Op::Finalizing)));
     }
 }
