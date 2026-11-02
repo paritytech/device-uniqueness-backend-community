@@ -13,15 +13,22 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 - **A registration no longer waits behind the previous row's dotNS
   reservation.** The chain writer ran its People and dotNS (Asset Hub) passes
   one after the other in one loop, and each pass awaits inclusion. While an
-  Asset Hub `reserve_name` was in flight, no People registration was submitted,
-  so a registration arriving just after another waited out that row's whole
-  People and dotNS round trip before its own began: about 160s to a dotNS name
-  instead of 70–100s. The two lanes now run concurrently under the same lease.
-  They sign on different chains with their own nonces, and a row still reaches
-  the dotNS lane only once it is `ASSIGNED`. If either lane fails or loses the
-  lease, the other stops at the end of its current pass, and the writer
-  re-acquires the lease and reconciles as before. The attester-resource and
-  queue checks now run on the dotNS lane.
+  Asset Hub `reserve_name` was in flight, no People registration was
+  submitted, so a registration arriving just after another waited out that
+  row's whole People and dotNS round trip before its own began: about 160s to
+  a dotNS name instead of 70–100s. The two lanes now run concurrently under
+  the same lease. They sign on different chains with their own nonces, and a
+  row still reaches the dotNS lane only once it is `ASSIGNED`. An idle dotNS
+  lane is woken as soon as a People pass lands, rather than finishing its
+  `CHAIN_WRITER_POLL_SECS` sleep first. A lane that fails restarts on its own
+  (its nonce forgotten, its `SUBMITTING` rows reconciled) while the other
+  keeps submitting, so an Asset Hub or dotNS fault no longer interrupts People
+  registration. Only a lost lease stops both, immediately rather than at the
+  end of the current pass, and the writer re-acquires it and reconciles as
+  before. The attester-resource and queue checks run beside the lanes rather
+  than on either, so neither chain's round trips delay them (the queue
+  janitor's fallback drain included), and a hung resource read times out after
+  30s instead of stalling the queue check behind it.
 
 ## [0.8.0] - 2026-10-27
 

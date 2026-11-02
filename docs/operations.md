@@ -602,6 +602,10 @@ always pin `chain="people"` or `chain="asset-hub"` in alerts and dashboards.
   real serializer.
 - Restart-safe: reconciles `SUBMITTING` rows on both chains against chain state
   rather than resubmitting.
+- **A lane fails alone.** `lane failed; restarting it` (with a `lane` field,
+  `people` or `dotns`) means only that lane restarted, after one
+  `CHAIN_WRITER_POLL_SECS`; the other kept running. `writer lease lost;
+  re-acquiring it` means both stopped and the writer is re-acquiring the lease.
 - **One dotNS condition refuses to start:** a missing `ASSET_HUB_RPC_URL`. The
   dotNS lane is not optional, so a writer without an endpoint would accept
   blocks nothing submits. Not restart-fixable; correct the `.env`.
