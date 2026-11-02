@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use secrecy::{ExposeSecret as _, SecretString};
@@ -19,6 +19,7 @@ mod events;
 #[cfg(test)]
 mod fixtures;
 mod lane;
+mod lanes;
 mod link;
 mod observe;
 mod passes;
@@ -27,8 +28,8 @@ mod tx;
 
 use dotns::Dotns;
 use engine::{Cx, Drain};
-use error::Op;
 pub use error::WriterError;
+use lanes::drive;
 use link::{DotnsLink, PeopleLink};
 use observe::{record_writer_info, zero_init_submit_outcomes};
 use passes::Passes;
@@ -266,15 +267,25 @@ impl Writer {
         let cx = cx_of(pool, guard, signer, signer_account, proxy_for, config);
         let stop = AtomicBool::new(false);
 
-        let people_lane = drive(&cx, &stop, config.poll_interval, async || {
-            people.pass(&cx).await
-        });
-        let dotns_lane = drive(&cx, &stop, config.poll_interval, async || {
-            passes
-                .tick(pool, chain, dotns, signer_account, proxy_for, config)
-                .await;
-            dotns.pass(&cx).await
-        });
+        let idle = async || tokio::time::sleep(config.poll_interval).await;
+
+        let people_lane = drive(
+            &stop,
+            async || cx.heartbeat().await,
+            async || people.pass(&cx).await,
+            idle,
+        );
+        let dotns_lane = drive(
+            &stop,
+            async || cx.heartbeat().await,
+            async || {
+                passes
+                    .tick(pool, chain, dotns, signer_account, proxy_for, config)
+                    .await;
+                dotns.pass(&cx).await
+            },
+            idle,
+        );
         let (people, dotns) = tokio::join!(people_lane, dotns_lane);
         people.and(dotns)
     }
@@ -320,30 +331,6 @@ impl Writer {
             dotns,
         )
     }
-}
-
-/// Run one lane's passes until it fails, the lease is lost, or `stop` is
-/// raised.
-async fn drive(
-    cx: &Cx<'_>,
-    stop: &AtomicBool,
-    poll_interval: Duration,
-    mut pass: impl AsyncFnMut() -> Result<bool, WriterError>,
-) -> Result<(), WriterError> {
-    let result = async {
-        while !stop.load(Ordering::Relaxed) {
-            if !cx.heartbeat().await? {
-                return Err(WriterError::LeaseLost(Op::Draining));
-            }
-            if pass().await? {
-                tokio::time::sleep(poll_interval).await;
-            }
-        }
-        Ok(())
-    }
-    .await;
-    stop.store(true, Ordering::Relaxed);
-    result
 }
 
 fn hex_account(bytes: &[u8; 32]) -> String {
