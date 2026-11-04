@@ -606,6 +606,14 @@ always pin `chain="people"` or `chain="asset-hub"` in alerts and dashboards.
   `people` or `dotns`) means only that lane restarted, after one
   `CHAIN_WRITER_POLL_SECS`; the other kept running. `writer lease lost;
   re-acquiring it` means both stopped and the writer is re-acquiring the lease.
+  A `lane stalled` error means a pass or restart ran past twice
+  `CHAIN_WRITER_FINALIZE_SECS` (usually a hung RPC) and was cancelled.
+- **A database outage still ends the process.** `writer lease renewal failed`
+  repeats while the database is unreachable; once the lease has gone
+  unrenewed for about two thirds of `CHAIN_WRITER_LEASE_TTL_SECS` the writer
+  gives it up, fails to re-acquire it while the database is still down, and
+  exits non-zero — so the
+  orchestrator's restart count shows the outage.
 - **One dotNS condition refuses to start:** a missing `ASSET_HUB_RPC_URL`. The
   dotNS lane is not optional, so a writer without an endpoint would accept
   blocks nothing submits. Not restart-fixable; correct the `.env`.

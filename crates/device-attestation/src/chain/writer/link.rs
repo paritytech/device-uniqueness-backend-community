@@ -113,6 +113,8 @@ impl DotnsLink {
         }
     }
 
+    /// Follow the connected Asset Hub client: `None` until the lane's first
+    /// successful dial, then the latest client it connected.
     pub(super) fn subscribe(&self) -> watch::Receiver<Option<AssetHub>> {
         self.published.subscribe()
     }
