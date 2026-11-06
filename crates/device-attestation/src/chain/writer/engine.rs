@@ -165,9 +165,10 @@ pub(super) struct Drain<L: Lane> {
     /// This lane's connection and park state.
     link: L::Link,
     /// Whether rows a previous run left `SUBMITTING` still need reconciling.
-    /// Set by every restart and cleared only once the link is up to read
-    /// them, so a lane that restarts while its chain is unreachable
-    /// reconciles on the first pass that reaches it.
+    /// Set by every restart and cleared only once a reconcile has read them,
+    /// so a lane that restarts while its chain is unreachable — or whose
+    /// reconcile fails on a flaky read — reconciles on the next pass that
+    /// reaches it.
     reconcile_due: bool,
     /// Whether a row has reached its chain since [`Drain::take_landed`] last
     /// read it.
@@ -209,16 +210,29 @@ impl<L: Lane> Drain<L> {
     }
 
     /// Run a due reconcile against a reachable chain. Failures other than a
-    /// lost lease are logged, not returned: the rows a failed read left
-    /// behind stay `SUBMITTING` for the next restart.
+    /// lost lease are logged, not returned, and leave the reconcile due: the
+    /// rows a failed read left behind stay `SUBMITTING`, and the next pass
+    /// retries them.
     async fn reconcile_on(&mut self, cx: &Cx<'_>, chain: &L::Chain) -> Result<(), WriterError> {
         if !std::mem::take(&mut self.reconcile_due) {
             return Ok(());
         }
         match self.reconcile_submitting(cx, chain).await {
-            Err(e) if e.is_lease_lost() => Err(e),
+            Err(e) if e.is_lease_lost() => {
+                tracing::error!(
+                    error = %e,
+                    lane = L::NAME,
+                    "reconcile failed terminally"
+                );
+                Err(e)
+            },
             Err(e) => {
-                tracing::warn!(error = %e, lane = L::NAME, "reconcile failed");
+                tracing::warn!(
+                    error = %e,
+                    lane = L::NAME,
+                    "reconcile failed; retrying on the next pass"
+                );
+                self.reconcile_due = true;
                 Ok(())
             }
             Ok(()) => Ok(()),
