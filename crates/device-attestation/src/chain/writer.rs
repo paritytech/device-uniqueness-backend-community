@@ -60,7 +60,19 @@ pub struct WriterConfig {
     pub lease_name: String,
     /// Lease TTL / heartbeat expiry.
     pub lease_ttl: Duration,
-    /// Idle poll interval between outbox scans.
+    /// The writer's one pacing interval, used wherever it waits with nothing
+    /// better to do:
+    /// - a lane's wait after a pass that settles nothing: nothing was due, or
+    ///   every claimed row was etried, parked or deferred, so a
+    ///   row that is not yet submittable cannot spin it. An idle dotNS lane is
+    ///   also woken early when a People pass lands.
+    /// - the backoff before a failed lane restarts.
+    /// - the cadence of the periodic checks that run beside the lanes. With
+    ///   the queue disabled its janitor drain runs on every one; the attester
+    ///   resource reads and the stranded-queue warning run only when their own
+    ///   interval is also due;
+    /// - the retry while another instance holds the lease, and the pause
+    ///   before re-acquiring a lost one.
     pub poll_interval: Duration,
     /// **Maximum** rows claimed per scan, and the ceiling the adaptive batch
     /// size climbs back to. Not a fixed claim size: a whole-batch failure
