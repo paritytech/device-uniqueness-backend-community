@@ -225,7 +225,7 @@ impl<L: Lane> Drain<L> {
                     "reconcile failed terminally"
                 );
                 Err(e)
-            },
+            }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
