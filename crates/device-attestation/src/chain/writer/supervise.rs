@@ -23,6 +23,9 @@ use super::{error::Op, WriterError};
 /// lease has gone unrenewed for long enough that another writer could take it
 /// before the next renewal, the lease is given up as lost. That also bounds a
 /// database outage: the writer stops writing, fails to re-acquire, and exits.
+///
+/// A renewal counts from when it was sent. The new expiry is set when the `UPDATE`
+///  runs, which may be well before a slow reply arrives.
 pub(super) async fn hold_lease(
     mut renew: impl AsyncFnMut() -> Result<bool, WriterError>,
     ttl: Duration,
@@ -31,8 +34,9 @@ pub(super) async fn hold_lease(
     let mut renewed_at = Instant::now();
     loop {
         tokio::time::sleep(period).await;
+        let sent_at = Instant::now();
         match tokio::time::timeout(period, renew()).await {
-            Ok(Ok(true)) => renewed_at = Instant::now(),
+            Ok(Ok(true)) => renewed_at = sent_at,
             Ok(Ok(false)) => return WriterError::LeaseLost(Op::Renewing),
             Ok(Err(e)) => tracing::warn!(error = %e, "writer lease renewal failed"),
             Err(_) => tracing::warn!(
@@ -450,6 +454,31 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(30),
             "a writer that cannot renew must stop before another can take over"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_heartbeat_counts_a_slow_renewal_from_when_it_was_sent() {
+        let renewals = Cell::new(0);
+        let start = Instant::now();
+
+        let e = hold_lease(
+            async || {
+                tokio::time::sleep(Duration::from_secs(9)).await;
+                if bump(&renewals) == 1 {
+                    Ok(true)
+                } else {
+                    Err(db_error())
+                }
+            },
+            Duration::from_secs(30),
+        )
+        .await;
+
+        assert!(matches!(e, WriterError::LeaseLost(Op::Renewing)));
+        assert!(
+            start.elapsed() < Duration::from_secs(40),
+            "a slow reply must not stretch the lease past the expiry the renewal set"
         );
     }
 
