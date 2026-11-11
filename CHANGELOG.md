@@ -34,6 +34,13 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ### Changed
 
+- **The reserved personhood name is checked on the dotNS contracts.** Intake
+  answers `409` and availability reports `EXHAUSTED` when the bare name exists
+  on `DotnsRegistrar` or its `DotnsPopController` reservation queue is full,
+  read on Asset Hub, as well as on People while its runtime keeps usernames.
+  Before, a claim like that was accepted and then reverted on chain, taking the
+  lite username with it. No new configuration: the contracts are found from
+  `DotnsGateway::DispatcherAddress`.
 - **`device-attestation-api` now needs `ASSET_HUB_RPC_URL`, and refuses to
   start without it.** Availability and the intake's digit choice read Asset
   Hub's `DotnsGateway::LiteLabelOwner`, as well as People's
