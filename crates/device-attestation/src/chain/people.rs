@@ -10,6 +10,7 @@ use subxt::{config::RpcConfigFor, utils::AccountId32, OnlineClient};
 use subxt_rpcs::{LegacyRpcMethods, RpcClient};
 
 use crate::chain::attest::AttestShape;
+use crate::chain::registry::Claim;
 use crate::{check_pallet_call_arg_names, extract_call_fields, Pallet};
 
 /// The People Chain client pinned to one block.
@@ -22,7 +23,15 @@ const DISCRIMINATORS: u8 = 100;
 
 const PALLET: &str = "PeopleLite";
 
-const HEALTH_PROBE_USERNAME: &str = "readyz-probe.00";
+/// The pallet that keeps consumer records. Read dynamically, because the
+/// paritytech/individuality-community#129 upgrade changes `Consumers`' value
+/// type, which a vendored storage address would refuse to read.
+const RESOURCES_PALLET: &str = "Resources";
+
+/// The account whose `PeopleLite::AttestationAllowance` key `/readyz` asks
+/// for. Any account works: the probe needs the read served, not a value.
+const HEALTH_PROBE_ACCOUNT: [u8; 32] = [0; 32];
+
 fn owner_key(
     username: impl AsRef<[u8]>,
 ) -> people::runtime_types::bounded_collections::bounded_vec::BoundedVec<u8> {
@@ -141,16 +150,22 @@ impl PeopleChain {
         }
     }
 
+    /// Proves the node serves `state_queryStorageAt`, which every batched read
+    /// here relies on. The key is `PeopleLite::AttestationAllowance`, which
+    /// exists before and after paritytech/individuality-community#129; that
+    /// upgrade removes the `Resources::UsernameOwnerOf` this probe used to
+    /// read.
     pub async fn health(&self) -> anyhow::Result<()> {
         let at = self
             .client
             .at_current_block()
             .await
             .context("People Chain unreachable")?;
+        let address = subxt::dynamic::storage::<_, u32>(PALLET, "AttestationAllowance");
         let key = at
             .storage()
-            .entry(people::storage().resources().username_owner_of())?
-            .fetch_key((owner_key(HEALTH_PROBE_USERNAME),))?;
+            .entry(address)?
+            .fetch_key((AccountId32(HEALTH_PROBE_ACCOUNT),))?;
         self.rpc
             .state_query_storage_at([key.as_slice()], Some(at.block_hash()))
             .await
@@ -319,10 +334,18 @@ impl PeopleChain {
         if names.is_empty() {
             return Ok(HashMap::new());
         }
-        let unique: BTreeSet<&str> = names.iter().copied().collect();
-
         let at = self.client.at_current_block().await?;
-        let block_hash = at.block_hash();
+        self.username_owners_at(names, &at).await
+    }
+
+    /// The owners of those of `names` registered in
+    /// `Resources::UsernameOwnerOf` at `at`, in one batched read.
+    async fn username_owners_at(
+        &self,
+        names: &[&str],
+        at: &PeopleAt,
+    ) -> anyhow::Result<HashMap<String, [u8; 32]>> {
+        let unique: BTreeSet<&str> = names.iter().copied().collect();
         let entry = at
             .storage()
             .entry(people::storage().resources().username_owner_of())?;
@@ -331,10 +354,61 @@ impl PeopleChain {
             .map(|name| entry.fetch_key((owner_key(name),)))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let values = storage::fetch_many(&self.rpc, &keys, block_hash)
+        let values = storage::fetch_many(&self.rpc, &keys, at.block_hash())
             .await
             .context("reading username owners")?;
         Ok(storage::owners_by_name(&unique, values)?)
+    }
+
+    /// Which of `claims` the People Chain shows as registered to their
+    /// candidate, keyed by name, at the current block. The writer's "already
+    /// landed" read.
+    ///
+    /// A runtime whose `attest` takes the username records it in
+    /// `Resources::UsernameOwnerOf`, so the name is the key and its owner may
+    /// be someone else. One without it records only the consumer, so a claim
+    /// has landed once its candidate is in `Resources::Consumers`. The shape
+    /// is read at the same block as the storage, so a read that straddles the
+    /// runtime upgrade still asks the storage that block has.
+    ///
+    /// The account-keyed read only tests for presence, so it is right while
+    /// the stepped migration is still translating `Consumers` records.
+    pub async fn registered_owners(
+        &self,
+        claims: &[Claim<'_>],
+    ) -> anyhow::Result<HashMap<String, [u8; 32]>> {
+        if claims.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let at = self.client.at_current_block().await?;
+        match AttestShape::try_from(at.metadata_ref())? {
+            AttestShape::WithUsername => {
+                let names: Vec<&str> = claims.iter().map(|(name, _)| *name).collect();
+                self.username_owners_at(&names, &at).await
+            }
+            AttestShape::WithoutUsername => self.registered_consumers_at(claims, &at).await,
+        }
+    }
+
+    /// Each of `claims` whose candidate has a `Resources::Consumers` record at
+    /// `at`, as `name -> candidate`, in one batched read.
+    async fn registered_consumers_at(
+        &self,
+        claims: &[Claim<'_>],
+        at: &PeopleAt,
+    ) -> anyhow::Result<HashMap<String, [u8; 32]>> {
+        let address =
+            subxt::dynamic::storage::<_, subxt::dynamic::Value>(RESOURCES_PALLET, "Consumers");
+        let entry = at.storage().entry(address)?;
+        let mut keys: Vec<Vec<u8>> = Vec::with_capacity(claims.len());
+        for (_, candidate) in claims {
+            keys.push(entry.fetch_key((AccountId32(*candidate),))?);
+        }
+
+        let present = storage::fetch_present(&self.rpc, &keys, at.block_hash())
+            .await
+            .context("reading consumer records")?;
+        Ok(owners_of_registered(claims, &present))
     }
 
     pub async fn next_nonce(&self, account: &AccountId32) -> anyhow::Result<u64> {
@@ -343,6 +417,20 @@ impl PeopleChain {
             .await
             .context("system_accountNextIndex on People Chain")
     }
+}
+
+/// Each claim whose candidate's key is in `present`, as `name -> candidate`.
+#[must_use]
+fn owners_of_registered(
+    claims: &[Claim<'_>],
+    present: &BTreeSet<usize>,
+) -> HashMap<String, [u8; 32]> {
+    claims
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| present.contains(index))
+        .map(|(_, (name, candidate))| ((*name).to_owned(), *candidate))
+        .collect()
 }
 
 #[cfg(test)]
@@ -355,6 +443,37 @@ mod tests {
             .map(|i| ([i as u8; 32], 1_750_000_000u64 + i as u64))
             .collect::<Vec<_>>()
             .encode()
+    }
+
+    #[test]
+    fn a_claim_whose_candidate_is_a_consumer_reads_as_owned_by_it() {
+        let claims: [Claim<'_>; 3] = [
+            ("alice.01", [1; 32]),
+            ("bob.02", [2; 32]),
+            ("carol.03", [3; 32]),
+        ];
+        let present = BTreeSet::from([0, 2]);
+
+        let owners = owners_of_registered(&claims, &present);
+
+        assert_eq!(
+            owners,
+            HashMap::from([
+                ("alice.01".to_owned(), [1; 32]),
+                ("carol.03".to_owned(), [3; 32])
+            ]),
+            "only the claims whose consumer record exists have landed, each to its own candidate"
+        );
+    }
+
+    #[test]
+    fn no_consumer_record_means_nothing_landed() {
+        let claims: [Claim<'_>; 1] = [("alice.01", [1; 32])];
+
+        assert!(
+            owners_of_registered(&claims, &BTreeSet::new()).is_empty(),
+            "an absent consumer record must leave the claim submittable"
+        );
     }
 
     #[test]
