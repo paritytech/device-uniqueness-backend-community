@@ -24,6 +24,16 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
   boot check on `attest` now compares argument names and accepts either
   consumer shape, instead of requiring the vendored types.
 
+### Changed
+
+- **The writer's "already landed" read and `/readyz` survive the People
+  runtime's username removal.** On a runtime whose `attest` takes no username,
+  a People row counts as landed once its candidate has a `Resources::Consumers`
+  record, instead of reading the removed `Resources::UsernameOwnerOf`.
+  `/readyz`'s People Chain probe reads a `PeopleLite::AttestationAllowance` key
+  instead of a `UsernameOwnerOf` one, so readiness stays green through that
+  upgrade.
+
 ### Fixed
 
 - **A registration no longer waits behind the previous row's dotNS

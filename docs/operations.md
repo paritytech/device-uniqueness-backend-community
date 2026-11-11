@@ -530,6 +530,14 @@ sudo docker compose exec -T postgres psql -U device_attestation -d device_attest
   runtime and is waiting for this one; it spends no attempt. The writer logs the
   connected runtime's shape and accepted payload version at boot (`connected
   People runtime's attest shape`).
+- **While that upgrade's stepped migration runs**, blocks carry inherents only,
+  so nothing the writer submits is included. Each submission waits out
+  `CHAIN_WRITER_FINALIZE_SECS` and is deferred as `finalization timed out`
+  without spending an attempt, and the lane resumes once the migration has
+  finished. Expect a burst of `outcome="deferred"` for the length of the
+  migration. The writer's "already landed" read only tests whether the
+  candidate has a consumer record, so a half-translated `Consumers` does not
+  mislead it.
 - **Not every failure spends one of those 8.** A refusal that belongs to the
   *signer* rather than the row — its next nonce still held by an earlier
   transaction of ours waiting in the node's pool, or a submission the writer
@@ -543,7 +551,9 @@ sudo docker compose exec -T postgres psql -U device_attestation -d device_attest
   while `outcome="ok"` stays flat is one slow inclusion holding the lane, and it
   clears itself; a sustained one is a pool or RPC problem worth looking at.
 - Independent check: query `Resources.UsernameOwnerOf("<base>.<NN>")` on the
-  People Chain.
+  People Chain. On a runtime whose `PeopleLite.attest` takes no username, query
+  `Resources.Consumers(<candidate account>)` instead: that runtime records the
+  account, not the name.
 - A pass submits its whole claimed set as **one** `Utility.force_batch`, so rows
   share a `tx_hash` and a `nonce`. Many rows on one hash is normal, not a
   duplicate submission.
@@ -827,7 +837,7 @@ you expect.
 | Writer: `submission deferred without spending an attempt` | The signer's next nonce is held by an earlier transaction of ours still in the node's pool (`priority of the transaction is too low`, `Transaction Already Imported`) or a submit passed `CHAIN_WRITER_FINALIZE_SECS` without being seen finalized. Rows wait 30s at an unchanged `attempt` and resume by themselves; nothing is lost and no restart is needed. Expect a short burst behind one slow inclusion — that is the mechanism working. Persisting for many minutes means the incumbent transaction is not being included: check finality lag and the RPC endpoint, and confirm the signer can pay fees (an unfunded signer parks instead, see the row above). Do **not** restart the writer to clear it — a restart re-reads the nonce and hits the same pool. |
 | Writer: `submission deferred …; the signer's nonce was already consumed on chain` | The node refused the signed nonce as `Transaction is outdated`: it is below the signer's current nonce. The writer reads its nonce with `system_accountNextIndex` (best block plus our pool transactions), so an occasional one after a reconnect or finalize timeout is expected; rows wait 6s at an unchanged `attempt` and re-read. A steady stream means **something else is signing from the writer's account** on that chain (another deployment or a manual script) — find and stop it; the writer cannot out-race it. |
 | Writer: `rejected deterministically, not retried` in `last_error` | Another submission would buy the same answer, so the row fails on the first pass instead of paying `CHAIN_WRITER_MAX_ATTEMPTS` fees. All three causes are the row's `reserved_username` (the personhood name) leg, which `attest` checks **before** it writes the lite username: `Resources::UsernameReservationTaken` (that name is owned by someone else), `Resources::QueueFull` (its reservation queue is at `MaxReservationQueueLength`, 10 on next-people-paseo), `Resources::AlreadyHasReservation` (the candidate already reserved another name). Intake refuses these claims with a `409` before a row exists, so a row that reaches here raced that check — a queue that filled in between. The writer **cannot** resubmit without the reservation: the consumer signature covers `reserved_username`, so only the client can re-sign. The client must re-register for another `dotns.reservedUsername` — dropping the reservation leg is not an option any client implements. Note `QueueFull` is not immutable in principle — entries expire and `remove_expired_username_reservation` is permissionless — but nothing drains within the seconds the backoff spans. The lite username is unaffected only if `status` is `ASSIGNED`; if it is `FAILED_TERMINAL` the discriminator that row holds stays consumed until the row is deleted. |
-| Availability checks failing while `readyz` is green | The endpoint does not serve the legacy `state_queryStorageAt` method (a trimmed or `chainHead`-only RPC or proxy). Availability reads all 100 `{base}.{NN}` keys in one such request, and the writer resolves `UsernameOwnerOf` (People) and `LiteLabelOwner` (Asset Hub) for a whole claimed set the same way, so writer passes fail wholesale too — but `readyz` only probes it on People, so readiness can stay green. Repoint `PEOPLE_RPC_URL` (and `ASSET_HUB_RPC_URL`) at a full node. A response that is incomplete, doubled, or for another block also fails closed by design — never as "available". |
+| Availability checks failing while `readyz` is green | The endpoint does not serve the legacy `state_queryStorageAt` method (a trimmed or `chainHead`-only RPC or proxy). Availability reads all 100 `{base}.{NN}` keys in one such request, and the writer resolves `UsernameOwnerOf` or `Consumers` (People, depending on the runtime) and `LiteLabelOwner` (Asset Hub) for a whole claimed set the same way, so writer passes fail wholesale too — but `readyz` only probes it on People, so readiness can stay green. Repoint `PEOPLE_RPC_URL` (and `ASSET_HUB_RPC_URL`) at a full node. A response that is incomplete, doubled, or for another block also fails closed by design — never as "available". |
 | Claims returning `422 Pool exhausted` (`testnet` builds only) | The ticket pool drained. Check `invite-tickets-pool` logs: `ticket batch finalized … registered=0` means the inviter is out of `AvailableInvites` quota or unauthorized; `pool tick failed` means RPC or signer trouble. Pool size is logged each tick — treat sustained `available < ~10% of POOL_TARGET_SIZE` as the alert threshold. |
 | `invite-tickets-pool`: `another maintainer instance holds the pool lock` (`testnet` builds only) | A second replica or a stuck deploy overlap. Scale back to exactly one. |
 | `unknown role: invite-tickets-api` / `-pool` at startup | A `polkadot` image was started with `COMPOSE_PROFILES=invite-tickets`. That runtime has no `Game` / `ProofOfInk`, so the build has no such roles. Clear `COMPOSE_PROFILES` in `.env`, or rebuild with `DUB_NETWORK=testnet` if you meant the other network. |
