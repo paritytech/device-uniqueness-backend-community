@@ -1884,7 +1884,7 @@ against the base of the lite username in the same claim.</td></tr>
                 <span class="sc-code c200">200</span>
                 <span class="sc-label">OK</span>
               </div>
-              <div class="sc-desc">Per-base availability read from People Chain UsernameOwnerOf plus pending outbox reservations, tagged <code>{_tag: &quot;v1&quot;, value}</code> with availableDigits. <code>EXHAUSTED</code> means nothing claimable under this base: no free discriminator, or the bare personhood name is owned or its reservation queue is full — the last two would make a claim carrying <code>dotns.reservedUsername</code> fail on chain and take the lite username with it.</div>
+              <div class="sc-desc">Per-base availability read from Asset Hub <code>DotnsGateway::LiteLabelOwner</code>, People Chain <code>Resources::UsernameOwnerOf</code> while the People runtime still keeps usernames, and pending outbox reservations, tagged <code>{_tag: &quot;v1&quot;, value}</code> with availableDigits. <code>EXHAUSTED</code> means nothing claimable under this base: no free discriminator, or, on a People runtime that keeps usernames, the bare personhood name is owned or its reservation queue is full. The last two would make a claim carrying <code>dotns.reservedUsername</code> fail on chain and take the lite username with it.</div>
             </div>
             <div class="status-card">
               <div class="sc-head">
@@ -1912,7 +1912,7 @@ against the base of the lite username in the same claim.</td></tr>
                 <span class="sc-code c500">500</span>
                 <span class="sc-label">Internal server error. Please try again.</span>
               </div>
-              <div class="sc-desc">People Chain failure or reservation-outbox failure.</div>
+              <div class="sc-desc">People Chain, Asset Hub, or reservation-outbox failure.</div>
             </div>
           </div>
         </div>
