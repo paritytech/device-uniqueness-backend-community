@@ -456,7 +456,7 @@
             }
           },
           "400": {
-            "description": "Validation failed (with per-field `fields`; an unsupported `payloadVersion` is reported on that field rather than as an invalid signature), malformed JSON, a `lifetimePoUDVoucher` that is unknown, already used, or expired (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), a device-evidence field of the wrong JSON type (in every Widevine mode, like any other field), or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, or wrong field sizes — the specific reason is logged server-side, never returned).",
+            "description": "Validation failed (with per-field `fields`; an unsupported `payloadVersion`, or one the connected People runtime does not take — `1` once `PeopleLite.attest` dropped the username, `2` before — is reported on that field rather than as an invalid signature), malformed JSON, a `lifetimePoUDVoucher` that is unknown, already used, or expired (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), a device-evidence field of the wrong JSON type (in every Widevine mode, like any other field), or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, or wrong field sizes — the specific reason is logged server-side, never returned).",
             "content": {
               "application/json": {
                 "schema": {},
@@ -1376,9 +1376,10 @@
           "payloadVersion": {
             "type": "integer",
             "format": "int32",
-            "description": "The format of the payloads this claim's signatures cover.\nAn unsupported version is a 400 before anything is stored. Omitted\nmeans `1`, the only format today.",
+            "description": "The format of the payloads this claim's signatures cover. Omitted\nmeans `1`. `1`: `consumerRegistrationSignature` covers the username\nbase and the reserved name. `2`: it covers `(account, verifier,\nidentifierKey)` only, for a People runtime whose `PeopleLite.attest`\ntakes no username. The `candidateSignature` message is the same in\nboth. Intake takes only the version the connected People runtime\naccepts; any other is a 400 on this field before anything is stored.",
             "default": 1,
             "example": 1,
+            "maximum": 2,
             "minimum": 1
           },
           "lifetimePoUDVoucher": {
