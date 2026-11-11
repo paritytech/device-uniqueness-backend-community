@@ -1,12 +1,11 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-use chain_types::people;
-use chain_types::people::runtime_types::indiv_pallet_resources::types::ConsumerInfo;
 use sqlx::{PgPool, Row as _};
 use subxt::utils::AccountId32;
 
-use crate::chain::{BoxError, ChainError, PeopleChain};
+use crate::chain::{AssetHubChain, BoxError, ChainError};
+use crate::gateway::{self, AccountNameRecord};
 use crate::projection::{self, AssignedUsername, PROJECTION_LOCK_ID};
 use crate::ss58::Ss58Error;
 
@@ -39,7 +38,7 @@ pub enum BootstrapError {
     #[error(transparent)]
     Chain(#[from] ChainError),
     /// Subxt rejected a storage or constant operation.
-    #[error("reading finalized People Chain storage: {0}")]
+    #[error("reading finalized Asset Hub storage: {0}")]
     Storage(#[source] BoxError),
     /// The chain's SS58 prefix could not encode account identifiers.
     #[error(transparent)]
@@ -74,7 +73,7 @@ enum CheckpointState {
 /// [`reconcile_chain_identity`].
 pub async fn ensure_seeded(
     pool: &PgPool,
-    chain: &PeopleChain,
+    chain: &AssetHubChain,
     page_size: u32,
 ) -> Result<Option<BootstrapReport>, BootstrapError> {
     let mut lock_connection = pool.acquire().await?;
@@ -106,7 +105,7 @@ pub async fn ensure_seeded(
 /// treated as a mismatch. Both writes share one transaction.
 async fn reconcile_chain_identity(
     pool: &PgPool,
-    chain: &PeopleChain,
+    chain: &AssetHubChain,
 ) -> Result<CheckpointState, BootstrapError> {
     let live_genesis = chain.online().genesis_hash().0;
 
@@ -155,7 +154,7 @@ async fn reconcile_chain_identity(
 
 async fn bootstrap_locked(
     pool: &PgPool,
-    chain: &PeopleChain,
+    chain: &AssetHubChain,
     page_size: u32,
     trigger: BootstrapTrigger,
 ) -> Result<BootstrapReport, BootstrapError> {
@@ -168,16 +167,11 @@ async fn bootstrap_locked(
     let snapshot_number = at.block_number();
     let snapshot_number_db = i64::try_from(snapshot_number)
         .map_err(|_| BootstrapError::SnapshotNumber(snapshot_number))?;
-    let ss58_prefix = crate::ss58::validate_prefix(
-        at.constants()
-            .entry(people::constants().system().ss58_prefix())
-            .map_err(|source| BootstrapError::Storage(Box::new(source)))?,
-    )?;
+    let ss58_prefix = crate::ss58::validate_prefix(chain_types::people_ss58_prefix())?;
 
-    let address = people::storage().resources().consumers();
     let mut entries = at
         .storage()
-        .entry(address)
+        .entry(gateway::account_names())
         .map_err(|source| BootstrapError::Storage(Box::new(source)))?
         .iter(())
         .await
@@ -193,7 +187,11 @@ async fn bootstrap_locked(
             Err(error) => {
                 skipped += 1;
                 iterator_errors += 1;
-                tracing::warn!(stage = "iterator", error = ?error, "skipping malformed consumer");
+                tracing::warn!(
+                    stage = "iterator",
+                    error = ?error,
+                    "skipping malformed account names"
+                );
                 continue;
             }
         };
@@ -201,24 +199,27 @@ async fn bootstrap_locked(
             Ok(key) => key,
             Err(error) => {
                 skipped += 1;
-                tracing::warn!(stage = "key", error = ?error, "skipping malformed consumer");
+                tracing::warn!(stage = "key", error = ?error, "skipping malformed account names");
                 continue;
             }
         };
-        let consumer: ConsumerInfo = match entry.value().decode() {
+        let names: AccountNameRecord = match entry.value().decode() {
             Ok(value) => value,
             Err(error) => {
                 skipped += 1;
-                tracing::warn!(stage = "value", account_id = ?account_id, error = ?error, "skipping malformed consumer");
+                tracing::warn!(
+                    stage = "value",
+                    account_id = ?account_id,
+                    error = ?error,
+                    "skipping malformed account names"
+                );
                 continue;
             }
         };
 
-        match projection::decode_consumer(
+        match gateway::assigned_username(
             account_id.0,
-            consumer.identifier_key,
-            consumer.lite_username.0,
-            consumer.full_username.map(|username| username.0),
+            names,
             ss58_prefix,
             snapshot_hash,
             snapshot_number,
@@ -226,7 +227,12 @@ async fn bootstrap_locked(
             Ok(record) => batch.push(record),
             Err(error) => {
                 skipped += 1;
-                tracing::warn!(stage = "username", account_id = ?account_id, error = ?error, "skipping malformed consumer");
+                tracing::warn!(
+                    stage = "username",
+                    account_id = ?account_id,
+                    error = %error,
+                    "skipping unindexable account names"
+                );
             }
         }
 

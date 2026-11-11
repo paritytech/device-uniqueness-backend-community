@@ -25,7 +25,7 @@ const DEFAULT_DOCS_ROOT: &str = "/srv/docs";
 #[derive(Clone)]
 struct Health {
     attestation: (sqlx::PgPool, device_attestation::PeopleChain),
-    indexer: (sqlx::PgPool, username_indexer::PeopleChain),
+    indexer: (sqlx::PgPool, username_indexer::AssetHubChain),
     #[cfg(invite_tickets)]
     invite_tickets: invite_tickets::AppState,
     turn: turn::AppState,
@@ -68,14 +68,14 @@ pub async fn run() -> anyhow::Result<()> {
 
     let attestation_chain =
         device_attestation::PeopleChain::connect(&attestation_config.people_rpc_url).await?;
-    let indexer_chain = username_indexer::PeopleChain::connect(
-        &indexer_config.people_rpc_url,
-        indexer_config.storage_page_size,
-    )
-    .await?;
     tracing::info!("connected to People Chain");
     let attestation_asset_hub =
         AssetHub::connect_for_reads(&attestation_config.asset_hub_rpc_url).await?;
+    let indexer_chain = username_indexer::AssetHubChain::connect(
+        &indexer_config.asset_hub_rpc_url,
+        indexer_config.storage_page_size,
+    )
+    .await?;
     tracing::info!("connected to Asset Hub");
 
     let jwt = device_attestation::Jwt::new(

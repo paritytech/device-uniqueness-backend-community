@@ -9,7 +9,7 @@ use serde::Serialize;
 use sqlx::{PgPool, Row as _};
 use time::OffsetDateTime;
 
-use crate::chain::PeopleChain;
+use crate::chain::AssetHubChain;
 use crate::config::Config;
 use crate::incremental::{
     index_finalized_range_locked, index_speculative_window, try_projection_lock, IndexError,
@@ -116,7 +116,7 @@ impl Wake {
     }
 }
 
-pub async fn run(pool: PgPool, chain: PeopleChain, config: Config, freshness: Freshness) {
+pub async fn run(pool: PgPool, chain: AssetHubChain, config: Config, freshness: Freshness) {
     let fallback = Duration::from_secs(config.sync_interval_secs.into());
     let mut subscribe_failures = 0_u32;
     let mut state = PassState {
@@ -204,7 +204,7 @@ struct PassState {
 
 async fn degraded_pass(
     pool: &PgPool,
-    chain: &PeopleChain,
+    chain: &AssetHubChain,
     config: &Config,
     freshness: &Freshness,
     state: &mut PassState,
@@ -222,7 +222,7 @@ fn fallback_is_due(last_pass: Option<Instant>, fallback: Duration) -> bool {
 
 async fn run_pass(
     pool: &PgPool,
-    chain: &PeopleChain,
+    chain: &AssetHubChain,
     config: &Config,
     freshness: &Freshness,
     state: &mut PassState,
@@ -364,7 +364,7 @@ struct PassReport {
 /// Only the finalized half can fail the pass; see [`reconcile_speculative`].
 async fn pass(
     pool: &PgPool,
-    chain: &PeopleChain,
+    chain: &AssetHubChain,
     best_head: Option<u64>,
     speculative_indexing: bool,
     cache: &mut SpeculativeCache,
@@ -398,7 +398,7 @@ async fn pass(
 
 async fn reconcile_speculative(
     pool: &PgPool,
-    chain: &PeopleChain,
+    chain: &AssetHubChain,
     finalized: u64,
     best_head: Option<u64>,
     cache: &mut SpeculativeCache,

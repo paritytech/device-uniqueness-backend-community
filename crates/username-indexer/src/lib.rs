@@ -5,6 +5,7 @@ pub mod bootstrap;
 pub mod chain;
 pub mod config;
 pub mod db;
+pub(crate) mod gateway;
 pub mod http;
 pub mod incremental;
 pub mod openapi;
@@ -15,7 +16,7 @@ pub mod ss58;
 pub mod sync;
 
 pub use bootstrap::{ensure_seeded, BootstrapError, BootstrapReport, BootstrapTrigger};
-pub use chain::{ChainError, PeopleChain};
+pub use chain::{AssetHubChain, ChainError};
 pub use config::{Config, ConfigError};
 pub use http::{routes, AppState};
 pub use incremental::{
