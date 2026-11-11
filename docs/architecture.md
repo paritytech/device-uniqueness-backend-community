@@ -245,12 +245,21 @@ Operational invariants an agent must respect when touching the code.
   labels, so it has all of them), the outbox, and, while the People runtime's `attest` still takes
   a username, `Resources::UsernameOwnerOf`, which also holds names registered before the dotNS
   lane existed. Which People reads run is decided from the `attest` shape at the block the
-  request reads, as for the payload version. Once that runtime keeps no usernames, the bare-name
-  owner and queue are gone with them, so the reservation leg no longer makes a base `EXHAUSTED`
-  and a taken personhood name is only caught on chain. A check against the dotNS contracts
-  (`DotnsRegistrar.exists`, the `DotnsPopController` reservation queue) is planned to close
-  that gap. `device-attestation-api` reads Asset Hub through a read-only client and never
-  submits there.
+  request reads, as for the payload version. `device-attestation-api` reads Asset Hub through a
+  read-only client and never submits there.
+- **The reservation leg is checked on the dotNS contracts too.** The gateway forwards a claim's
+  `reserved_base_label` to `DotnsPopController.reserveBaseName`, which reverts, lite label and
+  all, when the name exists on `DotnsRegistrar` or its reservation queue holds
+  `MAX_RESERVATION_QUEUE` entries. Intake and availability make those two reads first, as
+  `ReviveApi_call` dry runs, and treat either one like People's own reservation check: a `409`
+  on the reserved name, `EXHAUSTED` on the base. This is the only reservation check left once the
+  People runtime keeps no usernames. The contracts are resolved once per process from
+  `DotnsGateway::DispatcherAddress` (through `TARGET()` where that is a `RootGatewayDispatcher`),
+  then the controller's `protocolRegistry()`, so no contract address is configured.
+  *Trade-off:* the queue length counts expired slots still in the live window. The controller
+  clears up to four of them before it checks, so a queue read as full can occasionally still take
+  a claim, and intake refuses it anyway. A governance change to the dispatcher address is picked
+  up on restart.
   *Trade-off:* `base.NN` is genuinely claimable by a caller that sends no `dotns.reservedUsername`,
   and reporting `EXHAUSTED` withholds it. That costs nothing in practice: every client reserves
   unconditionally and no client is planned that can register without the reservation leg, so the
