@@ -653,9 +653,10 @@ where
 mod tests {
     use super::*;
 
-    fn depth(depth: i64) -> StatusDepth {
+    /// A status holding `rows` rows, of no particular age.
+    fn holding(rows: i64) -> StatusDepth {
         StatusDepth {
-            depth,
+            depth: rows,
             oldest_age_secs: None,
         }
     }
@@ -677,7 +678,7 @@ mod tests {
     fn rows_left_outside_the_terminal_statuses_keep_the_outbox_undrained() {
         let depths: Vec<(Status, StatusDepth)> = Status::ALL
             .into_iter()
-            .map(|status| (status, depth(3)))
+            .map(|status| (status, holding(3)))
             .collect();
 
         assert_eq!(
@@ -698,7 +699,7 @@ mod tests {
             .into_iter()
             .map(|status| {
                 let rows = if status.is_terminal() { 5 } else { 0 };
-                (status, depth(rows))
+                (status, holding(rows))
             })
             .collect();
 
