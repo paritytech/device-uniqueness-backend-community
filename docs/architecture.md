@@ -315,13 +315,25 @@ Operational invariants an agent must respect when touching the code.
   equal the JWT subject. Stored `account_id` (JWT subject) is the abuse-control/rate-limit key;
   `candidate_account_id` is the on-chain beneficiary the writer submits for.
 - **A claim declares the format its signatures cover.** A signature is not introspectable, so
-  `payloadVersion` names the signed-payload format; omitted means `1`, the only format so far (the
-  `candidateSignature` message above). Intake refuses a version it does not support with a `400` on
-  that field — before verifying, so a client on a newer format is told so rather than told its
-  signature is invalid — and before a row exists. The row stores it (`payload_version`), and the
-  writer logs it on retries and terminal failures, so a chain signature rejection is attributable to
-  the format the client declared. Supporting a new format is a new `PayloadVersion` variant, which the
-  candidate verifier matches exhaustively.
+  `payloadVersion` names the signed-payload format; omitted means `1`. The two formats differ in what
+  `consumerRegistrationSignature` covers: `1` includes the username base and reserved name, `2`
+  covers `(account, verifier, identifierKey)` only (paritytech/individuality-community#129). The
+  `candidateSignature` message above is the same in both. Intake refuses a version it does not
+  support with a `400` on that field — before verifying, so a client on a newer format is told so
+  rather than told its signature is invalid — and before a row exists. The row stores it
+  (`payload_version`), and the writer logs it on retries and terminal failures, so a chain signature
+  rejection is attributable to the format the client declared. Supporting a new format is a new
+  `PayloadVersion` variant, which the candidate verifier matches exhaustively.
+- **The People runtime's `attest` shape decides the accepted format.** `PeopleLite.attest`'s consumer
+  registration either carries `username` and `reserved_username` (format `1`) or does not (format
+  `2`). The backend reads which from the live runtime metadata, never from the vendored copy, the
+  same way it reads the signing context, so one release spans the runtime upgrade and runs against a
+  network that has not taken it. Boot refuses a runtime whose `attest` is neither shape. Intake takes
+  only the format the runtime accepts at that block. The writer re-reads the shape every pass and
+  builds `attest` from the row's format, which its gate has matched to the shape: a row in the
+  older format fails terminally (only the client can re-sign the consumer payload), and a row in a
+  format the runtime does not take yet is deferred without spending an attempt. So format-`1` rows
+  still in the outbox when the upgrade is enacted are lost to the People lane; drain first.
 - **`device-attestation-chain-writer` is single-instance by design** — a nonce lane is **(signing account,
   chain)**, and one process holds one lane per chain. The `writer_lease` table is a best-effort
   deploy-overlap guard only; the chain nonce + outbox reconciliation is the real serializer.
