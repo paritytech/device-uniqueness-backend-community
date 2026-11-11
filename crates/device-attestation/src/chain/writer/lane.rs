@@ -56,7 +56,10 @@ pub(super) enum Defer {
     /// condition rather than the row's, but nothing is queued ahead of it: the
     /// next pass re-reads the nonce and goes again.
     StaleNonce,
-    /// DotNS signature future-dated, doesn't count as attempt since we just need to wait.
+    /// The row will become submittable without anyone touching it: a dotNS
+    /// signature dated ahead of the gateway's skew bound, or a People row
+    /// signed for a runtime upgrade not enacted yet. Spends no attempt;
+    /// `reason` says which.
     NotYet,
 }
 
@@ -198,7 +201,7 @@ pub(super) fn observe_defer(
             username = %r.full_username,
             until = %until,
             reason,
-            "dotns reservation deferred; not yet within the gateway's skew bound"
+            "submission deferred without spending an attempt; the row is not submittable yet"
         ),
     }
 }

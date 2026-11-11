@@ -9,6 +9,7 @@ use serde_json::Value;
 use subxt::utils::AccountId32;
 use utoipa::ToSchema;
 
+use crate::chain::attest::PayloadVersion;
 use crate::config::Config;
 use crate::signature::{candidate_message, verify_account_signature, AccountSignatureForm};
 use crate::usernames::{
@@ -56,11 +57,15 @@ pub struct RegisterRequest {
     /// `0x`-hex 65-byte identifier key.
     #[schema(example = "0x...65 bytes...")]
     identifier_key: String,
-    /// The format of the payloads this claim's signatures cover.
-    /// An unsupported version is a 400 before anything is stored. Omitted
-    /// means `1`, the only format today.
+    /// The format of the payloads this claim's signatures cover. Omitted
+    /// means `1`. `1`: `consumerRegistrationSignature` covers the username
+    /// base and the reserved name. `2`: it covers `(account, verifier,
+    /// identifierKey)` only, for a People runtime whose `PeopleLite.attest`
+    /// takes no username. The `candidateSignature` message is the same in
+    /// both. Intake takes only the version the connected People runtime
+    /// accepts; any other is a 400 on this field before anything is stored.
     #[serde(default = "default_payload_version")]
-    #[schema(example = 1, minimum = 1, default = 1)]
+    #[schema(example = 1, minimum = 1, maximum = 2, default = 1)]
     payload_version: u16,
     /// Optional single-use registration voucher (the INSTANT lane): bypasses
     /// the PoUD gate and the registration queue. Must be a string when
@@ -245,27 +250,16 @@ impl TryFrom<&str> for PreferredDigits {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PayloadVersion {
-    V1,
-}
-
-impl TryFrom<u16> for PayloadVersion {
-    type Error = String;
-
-    fn try_from(version: u16) -> Result<Self, String> {
-        match version {
-            1 => Ok(Self::V1),
-            _ => Err("Unsupported payload version. Supported: 1.".to_string()),
-        }
-    }
-}
-
-impl From<PayloadVersion> for u16 {
-    fn from(version: PayloadVersion) -> Self {
-        match version {
-            PayloadVersion::V1 => 1,
-        }
+/// `version` when it is the one the connected People runtime accepts.
+fn accepted_payload_version(
+    version: u16,
+    accepted: PayloadVersion,
+) -> Result<PayloadVersion, String> {
+    match PayloadVersion::try_from(version)? {
+        declared if declared == accepted => Ok(declared),
+        _ => Err(format!(
+            "The connected People runtime accepts payload version {accepted}."
+        )),
     }
 }
 
@@ -354,6 +348,7 @@ impl RegisterRequest {
         &self,
         config: &Config,
         signature_form: &AccountSignatureForm,
+        accepted_version: PayloadVersion,
     ) -> Result<ParsedRegister, Vec<FieldError>> {
         let mut report = Report::default();
         let r = &mut report;
@@ -391,7 +386,7 @@ impl RegisterRequest {
         let identifier_key = r.check("identifierKey", Hex::<65>::try_from(&*self.identifier_key));
         let payload_version = r.check(
             "payloadVersion",
-            PayloadVersion::try_from(self.payload_version),
+            accepted_payload_version(self.payload_version, accepted_version),
         );
         let dotns = match &self.dotns {
             None => Some(None),
@@ -467,11 +462,12 @@ pub(super) fn validate_register(
     body: &Value,
     config: &Config,
     signature_form: &AccountSignatureForm,
+    accepted_version: PayloadVersion,
 ) -> Result<ParsedRegister, UsernamesError> {
     let request =
         RegisterRequest::decode(body).map_err(|error| UsernamesError::InvalidBody(vec![error]))?;
     request
-        .validate(config, signature_form)
+        .validate(config, signature_form, accepted_version)
         .map_err(UsernamesError::InvalidBody)
 }
 
@@ -486,7 +482,9 @@ fn verify_candidate_signature(
     signature_form: &AccountSignatureForm,
 ) -> bool {
     let message = match version {
-        PayloadVersion::V1 => candidate_message(candidate_pubkey, ring_vrf_key),
+        PayloadVersion::V1 | PayloadVersion::V2 => {
+            candidate_message(candidate_pubkey, ring_vrf_key)
+        }
     };
     verify_account_signature(
         candidate_signature,
@@ -530,7 +528,21 @@ mod tests {
         value: &serde_json::Value,
         config: &Config,
     ) -> Result<ParsedRegister, UsernamesError> {
-        validate_register(value, config, &AccountSignatureForm::Plain)
+        validate_register(
+            value,
+            config,
+            &AccountSignatureForm::Plain,
+            PayloadVersion::V1,
+        )
+    }
+
+    fn validate_upgraded(value: &serde_json::Value) -> Result<ParsedRegister, UsernamesError> {
+        validate_register(
+            value,
+            &config(),
+            &AccountSignatureForm::Plain,
+            PayloadVersion::V2,
+        )
     }
 
     fn errors_of(value: serde_json::Value) -> Vec<(String, String)> {
@@ -979,17 +991,65 @@ mod tests {
 
     #[test]
     fn an_unsupported_payload_version_is_a_400_not_an_invalid_signature() {
-        for version in [0, 2] {
+        for version in [0, 3] {
             let mut body = valid_body();
             body["payloadVersion"] = json!(version);
             assert_eq!(
                 errors_of(body),
                 [(
                     "payloadVersion".to_string(),
-                    "Unsupported payload version. Supported: 1.".to_string()
+                    "Unsupported payload version. Supported: 1, 2.".to_string()
                 )]
             );
         }
+    }
+
+    #[test]
+    fn a_version_the_runtime_does_not_take_is_a_400_on_that_field() {
+        let mut ahead = valid_body();
+        ahead["payloadVersion"] = json!(2);
+        assert_eq!(
+            errors_of(ahead),
+            [(
+                "payloadVersion".to_string(),
+                "The connected People runtime accepts payload version 1.".to_string()
+            )],
+            "format 2 against a runtime that still takes the username"
+        );
+
+        let mut declared = valid_body();
+        declared["payloadVersion"] = json!(1);
+        let format_one = [valid_body(), declared];
+        for body in format_one {
+            let Err(UsernamesError::InvalidBody(errors)) = validate_upgraded(&body) else {
+                panic!("format 1 must be refused once the runtime dropped the username");
+            };
+            let errors: Vec<(String, String)> = errors
+                .into_iter()
+                .map(|error| (error.field, error.message))
+                .collect();
+            assert_eq!(
+                errors,
+                [(
+                    "payloadVersion".to_string(),
+                    "The connected People runtime accepts payload version 2.".to_string()
+                )],
+                "format 1, declared or by omission, against a runtime without the username"
+            );
+        }
+    }
+
+    #[test]
+    fn version_two_is_accepted_once_the_runtime_takes_it() {
+        // The candidate message did not change, so the same signature holds.
+        let mut body = valid_body();
+        body["payloadVersion"] = json!(2);
+        let parsed = validate_upgraded(&body).expect("format 2 is valid on an upgraded runtime");
+        assert_eq!(
+            parsed.payload_version,
+            PayloadVersion::V2,
+            "the row must store the format the client declared"
+        );
     }
 
     #[test]

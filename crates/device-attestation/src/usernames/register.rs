@@ -17,6 +17,8 @@ use serde::Serialize;
 use serde_json::Value;
 use utoipa::ToSchema;
 
+use crate::chain::attest::AttestShape;
+use crate::chain::attest::PayloadVersion;
 use crate::{
     chain::outbox::{self, InsertError, NewReservation},
     device_check::{self, Decision},
@@ -102,7 +104,9 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
          body = serde_json::Value,
          example = json!({ "registrationOutcome": "PAYMENT_REQUIRED" })),
         (status = 400, description = "Validation failed (with per-field `fields`; an unsupported \
-            `payloadVersion` is reported on that field rather than as an invalid signature), malformed JSON, \
+            `payloadVersion`, or one the connected People runtime does not take — `1` once \
+            `PeopleLite.attest` dropped the username, `2` before — is reported on that field \
+            rather than as an invalid signature), malformed JSON, \
             a `lifetimePoUDVoucher` that is unknown, already used, or expired \
             (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), \
             a device-evidence field of the wrong JSON type (in every Widevine mode, like any \
@@ -167,7 +171,10 @@ pub async fn register(
         .await
         .map_err(|e| UsernamesError::from(anyhow::Error::from(e)))?;
     let signature_form = crate::signature::account_signature_form(at.metadata_ref(), PEOPLE_PALLET);
-    let mut parsed = validate_register(&value, &state.config, &signature_form)?;
+    let accepted_version: PayloadVersion = AttestShape::try_from(at.metadata_ref())
+        .map_err(UsernamesError::from)?
+        .payload_version();
+    let mut parsed = validate_register(&value, &state.config, &signature_form, accepted_version)?;
 
     let base = base_state_at(&state, &parsed.username, &at).await?;
     if let Some(reserved) = reserved_name(&parsed) {
