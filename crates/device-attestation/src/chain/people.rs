@@ -40,20 +40,27 @@ fn owner_key(
     people::runtime_types::bounded_collections::bounded_vec::BoundedVec(username.as_ref().to_vec())
 }
 
+/// Whether one chain would take a reservation of a bare personhood name: on
+/// People's `Resources`, or on the dotNS contracts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReservationState {
-    /// The bare name is owned as a personhood username.
+    /// The bare name is already registered as a personhood name.
     pub full_name_owned: bool,
     /// Accounts queued for the bare name.
     pub queue_len: u32,
+    /// The most accounts the queue takes.
     pub queue_capacity: u32,
 }
 
 impl ReservationState {
+    /// Whether the queue holds as many accounts as it takes.
+    #[must_use]
     pub fn queue_full(&self) -> bool {
         self.queue_len >= self.queue_capacity
     }
 
+    /// Whether a claim reserving the name would be rejected.
+    #[must_use]
     pub fn rejects(&self) -> bool {
         self.full_name_owned || self.queue_full()
     }
