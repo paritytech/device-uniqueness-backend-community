@@ -317,8 +317,8 @@ Operational invariants an agent must respect when touching the code.
 - **A claim declares the format its signatures cover.** A signature is not introspectable, so
   `payloadVersion` names the signed-payload format; omitted means `1`. The two formats differ in what
   `consumerRegistrationSignature` covers: `1` includes the username base and reserved name, `2`
-  covers `(account, verifier, identifierKey)` only (paritytech/individuality-community#129). The
-  `candidateSignature` message above is the same in both. Intake refuses a version it does not
+  covers `(account, verifier, identifierKey)` only, for a People runtime whose `attest` no longer
+  takes usernames. The `candidateSignature` message above is the same in both. Intake refuses a version it does not
   support with a `400` on that field — before verifying, so a client on a newer format is told so
   rather than told its signature is invalid — and before a row exists. The row stores it
   (`payload_version`), and the writer logs it on retries and terminal failures, so a chain signature

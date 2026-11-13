@@ -358,7 +358,7 @@ mod tests {
                 "username",
                 "reserved_username"
             ],
-            "format 1 builds the consumer struct from before individuality-community#129"
+            "format 1 builds the consumer struct that carries the username and reserved name"
         );
     }
 
@@ -375,7 +375,7 @@ mod tests {
         assert_eq!(
             consumer_fields(&reservation),
             ["signature", "account", "identifier_key"],
-            "format 2 builds the consumer struct from after individuality-community#129"
+            "format 2 builds the consumer struct without the username or reserved name"
         );
     }
 

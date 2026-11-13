@@ -5,10 +5,11 @@
 //! takes.
 //!
 //! `attest`'s last argument is an optional `LiteConsumerRegistrationParams`.
-//! Before paritytech/individuality-community#129 it carries the lite username
-//! and an optional reserved personhood name, and the consumer signature covers
-//! both. After it, the struct is `{ signature, account, identifier_key }` and
-//! the signature covers `(account, verifier, identifier_key)`.
+//! In the older shape it carries the lite username and an optional reserved
+//! personhood name, and the consumer signature covers both. Once the runtime
+//! drops usernames from People, the struct is
+//! `{ signature, account, identifier_key }` and the signature covers
+//! `(account, verifier, identifier_key)`.
 //!
 //! The backend reads the shape from the runtime's metadata at the block it is
 //! working against, as it reads the signing context (`crate::signature`). So
@@ -193,7 +194,7 @@ mod tests {
         assert_eq!(
             shape,
             AttestShape::WithUsername,
-            "the vendored runtime predates individuality-community#129"
+            "the vendored runtime still takes the username in `attest`"
         );
     }
 
