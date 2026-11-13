@@ -710,14 +710,21 @@ Everything is in the checkout's `.env` (mode 600); apply changes with
 ## Draining the outbox for a People runtime upgrade
 
 A People runtime upgrade that changes `PeopleLite.attest`'s consumer
-registration (paritytech/individuality-community#129 drops the username from it)
-also changes what the consumer signature covers. A row signed for the old
+registration (dropping the username and reserved name from it) also changes what the consumer signature covers. A row signed for the old
 runtime cannot land on the new one: the writer fails it as
 `payload version 1 is no longer accepted`, and only the client can claim again.
 Drain the outbox before the upgrade is enacted so no row is caught by it.
 
-1. **Run a release that handles both shapes** (payload version `2`) before the
-   upgrade is scheduled. It keeps working on either side of it.
+1. **Ship both sides of the new format before the upgrade is scheduled.**
+   - A backend release that handles both shapes (payload version `2`). It keeps
+     working on either side of the upgrade.
+   - App releases that sign the new consumer message, `(account, verifier,
+     identifierKey)`, and send `payloadVersion: 2` once the runtime has taken
+     the upgrade. Intake accepts only the version the connected runtime takes,
+     so after step 5 a client that still signs the old message and omits
+     `payloadVersion` gets a `400` on `payloadVersion` for every claim. Until
+     those releases are out and adopted, resuming intake only moves the outage
+     from the writer to the clients.
 2. **Pause intake.** Set `INTAKE_PAUSED=true` for `device-attestation-api` (or
    `all-in-one`) and recreate it:
    `sudo docker compose up -d device-attestation-api`. `POST /api/v1/usernames`
@@ -733,8 +740,9 @@ Drain the outbox before the upgrade is enacted so no row is caught by it.
 
    It exits `0` and prints `drained` once every People-lane row is `ASSIGNED`
    or `FAILED_TERMINAL`. Otherwise it prints each other status that still has
-   rows, with its count, and exits `1`. It reads `DATABASE_URL` and never
-   migrates. The `dub_outbox_undrained` gauge reports the same count from the
+   rows, with its count, and exits `1`. It reads
+   `DEVICE_ATTESTATION_DATABASE_URL`, which the writer container already has,
+   and never migrates. The `dub_outbox_undrained` gauge reports the same count from the
    writer. A row in `RETRY_AFTER` takes up to its 8 attempts with backoff, so
    allow minutes, not seconds. The dotNS half is not counted: Asset Hub is not
    part of this upgrade.

@@ -22,7 +22,7 @@ enum Command {
     /// port on loopback.
     Healthcheck(Option<String>),
     /// Exit 0 when the People-lane outbox holds no row the writer can still
-    /// submit, 1 otherwise. Reads `DATABASE_URL`.
+    /// submit, 1 otherwise. Reads `DEVICE_ATTESTATION_DATABASE_URL`.
     OutboxDrained,
 }
 

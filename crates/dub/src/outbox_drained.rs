@@ -9,9 +9,10 @@ use anyhow::{bail, Context as _};
 use device_attestation::chain::outbox;
 
 /// Prints each non-terminal status that still has rows, and fails unless
-/// there are none. Reads `DATABASE_URL`, and never migrates it.
+/// there are none. Reads `DEVICE_ATTESTATION_DATABASE_URL` — the variable the
+/// writer it runs beside already has — and never migrates it.
 pub async fn run() -> anyhow::Result<()> {
-    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL is required")?;
+    let database_url = http_common::config::required_var("DEVICE_ATTESTATION_DATABASE_URL")?;
     let pool = device_attestation::db::connect_without_migrating(&database_url).await?;
     let depths = outbox::depth_by_status(&pool)
         .await
