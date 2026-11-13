@@ -240,7 +240,7 @@ Operational invariants an agent must respect when touching the code.
   never allocated), **or** a reservation leg that would reject the claim. Both the bare-name owner
   and the queue length are read in the same batched `state_queryStorageAt` as the 100 discriminator
   keys, so they cost no extra round trip and cannot disagree about their block.
-- **Asset Hub holds every lite label; People holds them only until #129.** Taken discriminators
+- **Asset Hub holds every lite label; People holds them only until the username removal.** Taken discriminators
   are the union of Asset Hub's `DotnsGateway::LiteLabelOwner` (only the gateway issues lite
   labels, so it has all of them), the outbox, and, while the People runtime's `attest` still takes
   a username, `Resources::UsernameOwnerOf`, which also holds names registered before the dotNS
@@ -437,7 +437,8 @@ Operational invariants an agent must respect when touching the code.
   vendoring a second, faster-churning metadata blob.
 - **HTTP** (`device-attestation::http`): router in `http.rs` wrapped in a tower-http stack
   (request-id → trace → 30s timeout) with graceful shutdown. Health at `/livez`, `/readyz` (gates on
-  a live Postgres `SELECT 1`), `/healthcheck`; JWKS at `/.well-known/jwks.json`. `AppState` carries
+  a live Postgres `SELECT 1`, the People Chain RPC and the Asset Hub RPC),
+  `/healthcheck`; JWKS at `/.well-known/jwks.json`. `AppState` carries
   the Postgres pool, `ChainClient`, `Jwt` and `Config`, plus the rate limiter, the attestation CRL
   cache and the optional DeviceCheck / Play Integrity clients. `username-indexer` uses the same tower-http
   stack, but its `/readyz` also reports index freshness and it never publishes JWKS — it holds

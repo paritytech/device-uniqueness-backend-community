@@ -30,11 +30,15 @@ pub async fn run() -> anyhow::Result<()> {
 
     let bind_addr = config.bind_addr;
     let state = AppState::new(pool, chain, asset_hub, jwt, config);
-    let (probe_pool, probe_chain) = (state.pool.clone(), state.chain.clone());
+    let probe_state = (
+        state.pool.clone(),
+        state.chain.clone(),
+        state.asset_hub.clone(),
+    );
     http_common::metrics::spawn_readiness_probe(
         "device-attestation-api",
-        (probe_pool, probe_chain),
-        |(p, c)| device_attestation::http::health::probe(p, c),
+        probe_state,
+        |(p, c, a)| device_attestation::http::health::api_probe(p, c, a),
     );
     let app = routes(state);
 

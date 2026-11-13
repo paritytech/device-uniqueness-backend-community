@@ -60,7 +60,7 @@ pub(crate) struct ClaimState {
     /// while its runtime keeps usernames, or by a row still in the outbox.
     pub taken: BTreeSet<u8>,
     /// The bare base as a personhood name, on a People runtime that keeps
-    /// one. `None` after paritytech/individuality-community#129 removed that
+    /// one. `None` after the username removal took that
     /// state from `Resources`.
     pub reservation: Option<ReservationState>,
 }
