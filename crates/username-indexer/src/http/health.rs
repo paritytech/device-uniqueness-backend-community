@@ -39,17 +39,17 @@ async fn livez() -> Json<Status> {
 }
 
 /// The dependency probe behind `/readyz` and the readiness gauges: Postgres,
-/// then the People Chain RPC.
+/// then the Asset Hub RPC.
 pub async fn probe(
     pool: sqlx::PgPool,
-    chain: crate::PeopleChain,
+    chain: crate::AssetHubChain,
 ) -> http_common::health::Readiness {
     if let Err(error) = sqlx::query("SELECT 1").execute(&pool).await {
         tracing::warn!(error = ?error, dependency = "postgres", "readiness check failed");
         return Err("db");
     }
     if let Err(error) = chain.health().await {
-        tracing::warn!(error = ?error, dependency = "people_chain", "readiness check failed");
+        tracing::warn!(error = ?error, dependency = "asset_hub", "readiness check failed");
         return Err("chain");
     }
     Ok(&["db", "chain"])

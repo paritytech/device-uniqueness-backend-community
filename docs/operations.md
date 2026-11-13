@@ -117,7 +117,7 @@ The values you must decide, at minimum:
 | `COMPOSE_PROFILES` | `invite-tickets` on `testnet`; **empty** on `polkadot`, whose image has no such roles. |
 | `ENV_ID` | This environment's name; suffixes every network alias. |
 | `PEOPLE_RPC_URL` | People Chain RPC. Must be a **full** node serving the legacy `state_queryStorageAt` — see the availability failure mode below. |
-| `ASSET_HUB_RPC_URL` | Asset Hub RPC. **Required** by both `device-attestation-api` (reads `LiteLabelOwner` for availability and the digit choice) and the writer (submits `reserve_name`). Same `state_queryStorageAt` requirement. **Must name the same network as `PEOPLE_RPC_URL`** — a split pair claims labels on the wrong chain, unrecoverably. |
+| `ASSET_HUB_RPC_URL` | Asset Hub RPC. **Required** by `device-attestation-api` (reads `LiteLabelOwner` for availability and the digit choice), the writer (submits `reserve_name`) and `username-indexer` (projects `DotnsGateway::AccountNames`; it has no `PEOPLE_RPC_URL`). Same `state_queryStorageAt` requirement. **Must name the same network as `PEOPLE_RPC_URL`** — a split pair claims labels on the wrong chain, unrecoverably. |
 | `ATTESTER_ACCOUNT` | The on-chain attester authority (SS58). |
 | `CHAIN_WRITER_SIGNER_SURI` | The writer's signing key; must be an authorized attester or its proxy, and funded. |
 | `JWT_ED25519_SECRET` | 32 bytes. `device-attestation-api` only. |
@@ -799,6 +799,14 @@ run a full bootstrap. Expect one long first boot, a
 `finalized username bootstrap complete` with `trigger=ChainChanged`. Nothing to
 do.
 
+The same mechanism rebuilds the projection the first time an indexer whose
+source moved to Asset Hub (`ASSET_HUB_RPC_URL`, replacing its `PEOPLE_RPC_URL`)
+boots against a database built from People: the genesis differs, so it
+re-bootstraps from `DotnsGateway::AccountNames`. Search serves the old rows
+until the rebuild starts, then fills back in as the scan pages through. A lite
+username that never reached Asset Hub (its dotNS half failed terminally) is not
+in the rebuilt projection.
+
 **The device-attestation database needs a decision, so it is a script.** Its
 outbox is not derivable from anything: `username_reservations` rows name
 usernames no chain will confirm, and each one keeps occupying a discriminator
@@ -912,7 +920,7 @@ you expect.
 | Symptom | Action |
 |---|---|
 | `POST /api/v1/usernames` answers `503` `INTAKE_PAUSED` | `INTAKE_PAUSED=true` is set for an [outbox drain](#draining-the-outbox-for-a-people-runtime-upgrade). Unset it once the upgrade is through. |
-| `readyz`: `chain: down` | People Chain RPC unreachable or changed — check `PEOPLE_RPC_URL`. |
+| `readyz`: `chain: down` | The service's chain RPC is unreachable or changed — check `PEOPLE_RPC_URL`, or `ASSET_HUB_RPC_URL` for `username-indexer`. |
 | Writer: `registration parked without spending an attempt` / `dotns reservation parked …` | The signer cannot pay fees on that chain. Rows are held in `RETRY_AFTER` at an unchanged `attempt` and resume by themselves once funded — nothing is lost and no restart is needed. Fund the signer named in the accompanying `chain-writer signer balance below floor` warning (`ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK` is the threshold, and the two chains hold **separate** balances for the same account). A park that persists past a top-up is not a funding problem: read the `reason` field. |
 | Writer: `submission deferred without spending an attempt` | The signer's next nonce is held by an earlier transaction of ours still in the node's pool (`priority of the transaction is too low`, `Transaction Already Imported`) or a submit passed `CHAIN_WRITER_FINALIZE_SECS` without being seen finalized. Rows wait 30s at an unchanged `attempt` and resume by themselves; nothing is lost and no restart is needed. Expect a short burst behind one slow inclusion — that is the mechanism working. Persisting for many minutes means the incumbent transaction is not being included: check finality lag and the RPC endpoint, and confirm the signer can pay fees (an unfunded signer parks instead, see the row above). Do **not** restart the writer to clear it — a restart re-reads the nonce and hits the same pool. |
 | Writer: `submission deferred …; the signer's nonce was already consumed on chain` | The node refused the signed nonce as `Transaction is outdated`: it is below the signer's current nonce. The writer reads its nonce with `system_accountNextIndex` (best block plus our pool transactions), so an occasional one after a reconnect or finalize timeout is expected; rows wait 6s at an unchanged `attempt` and re-read. A steady stream means **something else is signing from the writer's account** on that chain (another deployment or a manual script) — find and stop it; the writer cannot out-race it. |
@@ -933,7 +941,7 @@ you expect.
 | `username-indexer` never healthy | Check its Postgres, its RPC, and its bootstrap logs. |
 | Search fails while device-attestation routes work | Check the indexer's logs and its edge route; for a direct `readyz`, layer the debug overlay and curl `127.0.0.1:8081`. |
 | A just-registered username is not in search results | With `SPECULATIVE_INDEXING_ENABLED` on (the default) the expected gap is about one block after the registration is *authored*, not after it is finalized. Check `dub_indexer_checkpoint_lag_blocks` first: a climbing lag means the projection is genuinely behind (a restart backlog is replayed block by block). A **flat, near-zero lag** means the indexer is caught up and the row is being withheld downstream — search hides accounts whose `identifier_key` predates chat-spec RFC-0004, so a client that sets that key in a later transaction than the one registering the username is invisible until it lands. |
-| `best block subscription dropped; resubscribing` repeating, or `dub_indexer_subscribed` flapping | The RPC endpoint accepts the subscription and closes it. Retries back off exponentially to 60s, and the `SYNC_INTERVAL_SECS` fallback still forces a pass, so the projection keeps advancing — but at poll speed, not block speed. Check the endpoint's subscription limits, or repoint `PEOPLE_RPC_URL`. |
+| `best block subscription dropped; resubscribing` repeating, or `dub_indexer_subscribed` flapping | The RPC endpoint accepts the subscription and closes it. Retries back off exponentially to 60s, and the `SYNC_INTERVAL_SECS` fallback still forces a pass, so the projection keeps advancing — but at poll speed, not block speed. Check the endpoint's subscription limits, or repoint the indexer's `ASSET_HUB_RPC_URL`. |
 | A username appeared in search and then vanished | Expected, and rare: a speculative row whose block was discarded at the tip. `dub_indexer_speculative_retracted_total` counts them. It re-appears once the registration lands on the canonical chain — usually, but not always: the registration is re-submitted against a chain where the name may since have been taken, and a name is owned by one account forever. If the rate is high, the endpoint's fork rate is high — check `dub_chain_finality_trail_blocks`, or set `SPECULATIVE_INDEXING_ENABLED=false` to serve finalized state only. `dub_indexer_speculative_failed_total` climbing instead means the window could not be read at all; the finalized projection is unaffected, but nothing is being admitted early. |
 | `unfinalized window too wide; admitting nothing new` | The best head has run more than `MAX_SPECULATIVE_WINDOW` (64) blocks ahead of finality, so the chain's finality is stalled rather than merely trailing. The indexer stops admitting new speculative rows and search goes back to finalized-only latency for anything new — but rows already held are still re-checked against the best head every pass, so nothing gets stranded for the length of the stall. Investigate finality on the chain, not the indexer. `dub_indexer_speculative_stood_down_total` counts it. |
 | `turn-api` exits: `TURN_PROOF_PRODUCTS: must list at least one product id` | The proof route is enabled with no accepted product. Every proof is made under a product-scoped context, so the list is required — set it, or turn the feature off. |

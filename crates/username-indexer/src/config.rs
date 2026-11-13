@@ -18,8 +18,9 @@ pub struct Config {
     pub bind_addr: SocketAddr,
     /// Service-owned Postgres connection string.
     pub database_url: String,
-    /// People Chain WebSocket RPC endpoint.
-    pub people_rpc_url: String,
+    /// Asset Hub WebSocket RPC endpoint, whose `DotnsGateway` holds every lite
+    /// username.
+    pub asset_hub_rpc_url: String,
     /// Maximum number of storage entries requested and written per page.
     pub storage_page_size: u32,
     /// Longest the sync loop waits without a best-block header, in seconds,
@@ -54,7 +55,7 @@ impl Config {
         F: Fn(&str) -> Option<String>,
     {
         let database_url = required(&get, "INDEXER_DATABASE_URL")?;
-        let people_rpc_url = required(&get, "PEOPLE_RPC_URL")?;
+        let asset_hub_rpc_url = required(&get, "ASSET_HUB_RPC_URL")?;
         let bind_addr = parse(
             "BIND_ADDR",
             get("BIND_ADDR").as_deref().unwrap_or(DEFAULT_BIND_ADDR),
@@ -147,7 +148,7 @@ impl Config {
         Ok(Self {
             bind_addr,
             database_url,
-            people_rpc_url,
+            asset_hub_rpc_url,
             storage_page_size,
             sync_interval_secs,
             search_rate_limit,
@@ -218,14 +219,14 @@ mod tests {
     }
 
     #[test]
-    fn requires_database_and_people_rpc_urls() {
+    fn requires_database_and_asset_hub_rpc_urls() {
         assert!(matches!(
             config(&[]),
             Err(ConfigError::Missing("INDEXER_DATABASE_URL"))
         ));
         assert!(matches!(
             config(&[("INDEXER_DATABASE_URL", "postgres://localhost/read")]),
-            Err(ConfigError::Missing("PEOPLE_RPC_URL"))
+            Err(ConfigError::Missing("ASSET_HUB_RPC_URL"))
         ));
     }
 
@@ -233,7 +234,7 @@ mod tests {
     fn applies_defaults_and_accepts_overrides() {
         let defaults = config(&[
             ("INDEXER_DATABASE_URL", "postgres://localhost/read"),
-            ("PEOPLE_RPC_URL", "ws://localhost:9944"),
+            ("ASSET_HUB_RPC_URL", "ws://localhost:9944"),
         ])
         .expect("valid defaults");
         assert_eq!(defaults.bind_addr.to_string(), "0.0.0.0:8080");
@@ -246,7 +247,7 @@ mod tests {
 
         let overridden = config(&[
             ("INDEXER_DATABASE_URL", "postgres://localhost/read"),
-            ("PEOPLE_RPC_URL", "ws://localhost:9944"),
+            ("ASSET_HUB_RPC_URL", "ws://localhost:9944"),
             ("BIND_ADDR", "127.0.0.1:9000"),
             ("STORAGE_PAGE_SIZE", "250"),
             ("SYNC_INTERVAL_SECS", "5"),
@@ -266,7 +267,7 @@ mod tests {
         for value in ["0", "1001"] {
             let error = config(&[
                 ("INDEXER_DATABASE_URL", "postgres://localhost/read"),
-                ("PEOPLE_RPC_URL", "ws://localhost:9944"),
+                ("ASSET_HUB_RPC_URL", "ws://localhost:9944"),
                 ("STORAGE_PAGE_SIZE", value),
             ])
             .expect_err("invalid page size");
@@ -285,7 +286,7 @@ mod tests {
         for value in ["0", "86401"] {
             let error = config(&[
                 ("INDEXER_DATABASE_URL", "postgres://localhost/read"),
-                ("PEOPLE_RPC_URL", "ws://localhost:9944"),
+                ("ASSET_HUB_RPC_URL", "ws://localhost:9944"),
                 ("SYNC_INTERVAL_SECS", value),
             ])
             .expect_err("invalid sync interval");
@@ -303,7 +304,7 @@ mod tests {
     fn rejects_zero_search_rate_limit() {
         let error = config(&[
             ("INDEXER_DATABASE_URL", "postgres://localhost/read"),
-            ("PEOPLE_RPC_URL", "ws://localhost:9944"),
+            ("ASSET_HUB_RPC_URL", "ws://localhost:9944"),
             ("SEARCH_RATE_LIMIT", "0"),
         ])
         .expect_err("invalid search rate limit");
@@ -320,7 +321,7 @@ mod tests {
     fn poc_secret_is_required_only_when_the_gate_is_enabled() {
         let base = [
             ("INDEXER_DATABASE_URL", "postgres://localhost/read"),
-            ("PEOPLE_RPC_URL", "ws://localhost:9944"),
+            ("ASSET_HUB_RPC_URL", "ws://localhost:9944"),
         ];
         let enabled_without_secret = config(&[base[0], base[1], ("POC_ENABLED", "true")])
             .expect_err("secret is required with the gate on");
@@ -345,7 +346,7 @@ mod tests {
     fn rejects_short_or_empty_poc_secret() {
         let base = [
             ("INDEXER_DATABASE_URL", "postgres://localhost/read"),
-            ("PEOPLE_RPC_URL", "ws://localhost:9944"),
+            ("ASSET_HUB_RPC_URL", "ws://localhost:9944"),
         ];
         assert!(matches!(
             config(&[
@@ -375,7 +376,7 @@ mod tests {
         assert!(matches!(
             config(&[
                 ("INDEXER_DATABASE_URL", "postgres://localhost/read"),
-                ("PEOPLE_RPC_URL", "ws://localhost:9944"),
+                ("ASSET_HUB_RPC_URL", "ws://localhost:9944"),
                 ("POC_ENABLED", ""),
             ]),
             Err(ConfigError::Invalid {
@@ -389,7 +390,7 @@ mod tests {
     fn rejects_malformed_poc_flag_and_difficulty() {
         let base = [
             ("INDEXER_DATABASE_URL", "postgres://localhost/read"),
-            ("PEOPLE_RPC_URL", "ws://localhost:9944"),
+            ("ASSET_HUB_RPC_URL", "ws://localhost:9944"),
         ];
         assert!(matches!(
             config(&[base[0], base[1], ("POC_ENABLED", "treu")]),

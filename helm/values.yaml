@@ -444,7 +444,9 @@ workloads:
     replicas: 2
     # Startup grace, from the compose healthcheck's start_period.
     startupSeconds: 350
-    globalEnv: [BIND_ADDR, PEOPLE_RPC_URL, JWT_ED25519_PUBLIC_KEY, JWT_JWKS_JSON, METRICS_ENABLED, METRICS_ADDR, RUST_LOG, LOG_FORMAT]
+    # Its source is Asset Hub's DotnsGateway::AccountNames; it reads nothing
+    # from People.
+    globalEnv: [BIND_ADDR, ASSET_HUB_RPC_URL, JWT_ED25519_PUBLIC_KEY, JWT_JWKS_JSON, METRICS_ENABLED, METRICS_ADDR, RUST_LOG, LOG_FORMAT]
     secretKeys: [INDEXER_DATABASE_URL]
     # Required only when POC_ENABLED is true; the service refuses to boot then.
     optionalSecretKeys: [POC_HMAC_SECRET]

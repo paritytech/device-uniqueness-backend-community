@@ -102,6 +102,25 @@ pub fn vendored_spec_version() -> u32 {
     *SPEC_VERSION
 }
 
+/// The SS58 prefix of the People runtime this build targets, read from its
+/// vendored metadata. Accounts are addressed by it across the product, also
+/// where they are read from Asset Hub, whose own prefix can differ (0 against
+/// People's 42 on `testnet`).
+pub fn people_ss58_prefix() -> u16 {
+    static PREFIX: std::sync::LazyLock<u16> = std::sync::LazyLock::new(|| {
+        use subxt::ext::scale_decode::DecodeAsType as _;
+
+        let metadata = metadata_arc();
+        let prefix = metadata
+            .pallet_by_name("System")
+            .and_then(|pallet| pallet.constant_by_name("SS58Prefix"))
+            .expect("vendored metadata carries System::SS58Prefix");
+        u16::decode_as_type(&mut prefix.value(), prefix.ty(), metadata.types())
+            .expect("System::SS58Prefix decodes as a u16")
+    });
+    *PREFIX
+}
+
 macro_rules! delegating_config {
     ($(#[$meta:meta])* $name:ident => $extensions:ident) => {
         $(#[$meta])*
@@ -384,6 +403,16 @@ noop_names! {
 mod tests {
     use super::*;
     use subxt::storage::Address as _;
+
+    #[test]
+    fn the_people_ss58_prefix_is_the_networks_own() {
+        let expected = if NETWORK == "testnet" { 42 } else { 0 };
+        assert_eq!(
+            people_ss58_prefix(),
+            expected,
+            "paseo-next-v2 People uses 42, polkadot-test People 0"
+        );
+    }
 
     const TUPLE_EXTENSIONS: &[&str] = &[
         "UnitTransactionExtension",

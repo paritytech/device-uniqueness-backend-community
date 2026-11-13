@@ -48,6 +48,17 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ### Changed
 
+- **`username-indexer` reads Asset Hub instead of People, and needs
+  `ASSET_HUB_RPC_URL` in place of `PEOPLE_RPC_URL`.** It projects
+  `DotnsGateway::AccountNames`, which holds every lite username with its chat
+  key, and follows the gateway's `NameReserved` / `NameRegistered` events,
+  since People's `Resources` stops keeping usernames
+  (paritytech/individuality-community#129). The first boot against an existing
+  database rebuilds the projection from Asset Hub (the genesis differs).
+  Accounts still render with the People SS58 prefix. An account with no lite
+  label or no chat key is skipped, and a username that reached People but never
+  Asset Hub is no longer searchable. Set `ASSET_HUB_RPC_URL` for
+  `username-indexer` (and `all-in-one`) before upgrading.
 - **The reserved personhood name is checked on the dotNS contracts.** Intake
   answers `409` and availability reports `EXHAUSTED` when the bare name exists
   on `DotnsRegistrar` or its `DotnsPopController` reservation queue is full,
