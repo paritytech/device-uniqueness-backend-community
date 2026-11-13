@@ -33,6 +33,7 @@ use super::{
     lane::{signer_defer, BatchLane, Defer, Gate, Lane, Outcome},
     link::Link as _,
 };
+use crate::chain::registry::Claim;
 use crate::chain::{
     lease,
     outbox::{Guard, Reservation},
@@ -339,11 +340,11 @@ impl<L: Lane> Drain<L> {
             return Ok(Vec::new());
         }
 
-        let names: Vec<&str> = gated
+        let claims: Vec<Claim<'_>> = gated
             .iter()
-            .map(|(r, _)| r.full_username.as_str())
+            .map(|(r, candidate)| (r.full_username.as_str(), *candidate))
             .collect();
-        let owners = match chain.owners(&names).await {
+        let owners = match chain.owners(&claims).await {
             Ok(owners) => owners,
             Err(e) => {
                 self.retry_batch(cx, &gated, &format!("owner read failed: {e}"))
@@ -394,7 +395,11 @@ impl<L: Lane> Drain<L> {
             Err(e) => {
                 self.nonce = None;
                 let reason = e.to_string();
-                let observed = chain.owner(&r.full_username).await.ok().flatten();
+                let observed = chain
+                    .owner((r.full_username.as_str(), candidate))
+                    .await
+                    .ok()
+                    .flatten();
                 self.settle(cx, r, candidate, observed, &reason).await
             }
         }
@@ -469,11 +474,11 @@ impl<L: Lane> Drain<L> {
 
         // One read for every item the chain rejected: an already-registered
         // name is success, and only chain state can tell that from a failure.
-        let failed: Vec<&str> = rows
+        let failed: Vec<Claim<'_>> = rows
             .iter()
             .zip(&items)
             .filter(|(_, item)| item.is_err())
-            .map(|((r, _), _)| r.full_username.as_str())
+            .map(|((r, candidate), _)| (r.full_username.as_str(), *candidate))
             .collect();
         metrics::counter!("dub_chain_batch_item_failed_total", "lane" => L::NAME)
             .increment(failed.len() as u64);
@@ -541,8 +546,11 @@ impl<L: Lane> Drain<L> {
         rows: &[(&Reservation, [u8; 32])],
         reason: &str,
     ) -> Result<(), WriterError> {
-        let names: Vec<&str> = rows.iter().map(|(r, _)| r.full_username.as_str()).collect();
-        let owners = match chain.owners(&names).await {
+        let claims: Vec<Claim<'_>> = rows
+            .iter()
+            .map(|(r, candidate)| (r.full_username.as_str(), *candidate))
+            .collect();
+        let owners = match chain.owners(&claims).await {
             Ok(owners) => owners,
             Err(e) => {
                 return self
@@ -678,11 +686,11 @@ impl<L: Lane> Drain<L> {
 
         let mut unread = 0usize;
         for chunk in parsed.chunks(RECONCILE_READ_CHUNK) {
-            let names: Vec<&str> = chunk
+            let claims: Vec<Claim<'_>> = chunk
                 .iter()
-                .map(|(r, _)| r.full_username.as_str())
+                .map(|(r, candidate)| (r.full_username.as_str(), *candidate))
                 .collect();
-            let owners = match chain.owners(&names).await {
+            let owners = match chain.owners(&claims).await {
                 Ok(owners) => owners,
                 Err(e) => {
                     tracing::warn!(
@@ -815,6 +823,11 @@ fn is_signer_contention(reason: &str) -> bool {
 /// `QueueFull` is not immutable in principle: entries expire and
 /// `remove_expired_username_reservation` is permissionless. But nothing drains
 /// within the seconds our backoff spans, so retrying only buys more fees.
+///
+/// A runtime after the username removal has no reservation
+/// leg and cannot raise any of these, so the list is inert there rather than
+/// wrong. It stays for as long as a network this backend serves (`polkadot`)
+/// runs a runtime that can.
 const DETERMINISTIC_REJECTIONS: &[&str] = &[
     "Resources::UsernameReservationTaken",
     "Resources::QueueFull",

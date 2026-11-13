@@ -249,7 +249,10 @@ Operational invariants an agent must respect when touching the code.
   registrations cost one finalization rather than N. `force_batch`, never `batch_all`: one poison row
   must not block its batch. Each row's fate comes from its own `Utility.ItemCompleted` / `ItemFailed`
   **positionally**, and only when the item count matches the calls submitted — otherwise the
-  positional mapping is discarded entirely and a batched `UsernameOwnerOf` read decides. A single-row
+  positional mapping is discarded entirely and a batched "already landed" read decides:
+  `UsernameOwnerOf` by name, or, on a People runtime whose `attest` takes no username, presence of
+  the candidate's `Resources::Consumers` record (read dynamically, since that upgrade changes the
+  record's type). A single-row
   set skips the wrapper and submits a bare `attest`. `ASSIGNED` is never inferred from an extrinsic
   succeeding, and never from `ProxyExecuted` being `Ok` around a `force_batch` (it is `Ok` even when
   every item failed).
