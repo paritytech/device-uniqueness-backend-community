@@ -15,7 +15,7 @@
 //! The context is `blake2_256("product/peopl." ++ network_suffix ++ "/" ++
 //! "sig/" ++ 28 zero bytes)`, as the runtime's
 //! `indiv_support::context::signing_payload` builds it for the personhood
-//! product (paritytech/individuality-community#196).
+//! product.
 
 use subxt_signer::sr25519::{verify, PublicKey, Signature};
 

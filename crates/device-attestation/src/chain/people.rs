@@ -24,8 +24,8 @@ const DISCRIMINATORS: u8 = 100;
 const PALLET: &str = "PeopleLite";
 
 /// The pallet that keeps consumer records. Read dynamically, because the
-/// paritytech/individuality-community#129 upgrade changes `Consumers`' value
-/// type, which a vendored storage address would refuse to read.
+/// username removal changes `Consumers`' value type, which a vendored storage
+/// address would refuse to read.
 const RESOURCES_PALLET: &str = "Resources";
 
 /// The account whose `PeopleLite::AttestationAllowance` key `/readyz` asks
@@ -152,9 +152,7 @@ impl PeopleChain {
 
     /// Proves the node serves `state_queryStorageAt`, which every batched read
     /// here relies on. The key is `PeopleLite::AttestationAllowance`, which
-    /// exists before and after paritytech/individuality-community#129; that
-    /// upgrade removes the `Resources::UsernameOwnerOf` this probe used to
-    /// read.
+    /// exists before and after the username removal.
     pub async fn health(&self) -> anyhow::Result<()> {
         let at = self
             .client

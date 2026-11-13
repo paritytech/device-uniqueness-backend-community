@@ -14,7 +14,7 @@ pub(crate) type Claim<'a> = (&'a str, [u8; 32]);
 ///
 /// Answers are keyed by name and give the owning account, so a caller compares
 /// the owner with the claim's candidate. A registry that does not key by name
-/// (the People Chain after paritytech/individuality-community#129) reads by the
+/// (the People Chain after the username removal) reads by the
 /// claim's candidate instead, and never reports a name as owned elsewhere.
 pub(crate) trait NameRegistry {
     /// The account the chain shows as registered for `claim`'s name, if any.

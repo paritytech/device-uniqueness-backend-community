@@ -824,7 +824,7 @@ fn is_signer_contention(reason: &str) -> bool {
 /// `remove_expired_username_reservation` is permissionless. But nothing drains
 /// within the seconds our backoff spans, so retrying only buys more fees.
 ///
-/// A runtime after paritytech/individuality-community#129 has no reservation
+/// A runtime after the username removal has no reservation
 /// leg and cannot raise any of these, so the list is inert there rather than
 /// wrong. It stays for as long as a network this backend serves (`polkadot`)
 /// runs a runtime that can.
