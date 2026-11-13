@@ -521,6 +521,15 @@ sudo docker compose exec -T postgres psql -U device_attestation -d device_attest
   on the writer's retry and terminal logs) is the format that claim declared, so
   `group by payload_version` separates a client that signs a new format under an
   old declaration from individually bad signatures.
+- `last_error` `payload version 1 is no longer accepted: the runtime takes 2`
+  means the row was claimed before the People runtime dropped the username from
+  `PeopleLite.attest` and was still in the outbox when the upgrade was enacted.
+  It is terminal: the client must claim again, signing format `2`. Drain the
+  outbox before that upgrade to avoid it. A row deferred with `payload version 2
+  awaits the runtime upgrade` was accepted by a writer or intake on the newer
+  runtime and is waiting for this one; it spends no attempt. The writer logs the
+  connected runtime's shape and accepted payload version at boot (`connected
+  People runtime's attest shape`).
 - **Not every failure spends one of those 8.** A refusal that belongs to the
   *signer* rather than the row — its next nonce still held by an earlier
   transaction of ours waiting in the node's pool, or a submission the writer

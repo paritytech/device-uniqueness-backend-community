@@ -8,6 +8,22 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+
+- **Payload version `2`, for a People runtime without usernames.** When
+  `PeopleLite.attest`'s consumer registration no longer carries `username` and
+  `reserved_username` (paritytech/individuality-community#129),
+  `consumerRegistrationSignature` covers `(account, verifier, identifierKey)`
+  only, and clients declare `payloadVersion: 2`. The backend reads the shape
+  from the live People runtime rather than the vendored metadata, so this
+  release works before and after that upgrade. Intake accepts only the version
+  the connected runtime takes and answers any other with a `400` on
+  `payloadVersion`. The writer builds `attest` in the matching shape, fails a
+  format-`1` row once the runtime has dropped the username (the client must
+  re-sign), and defers a format-`2` row while the runtime still takes it. The
+  boot check on `attest` now compares argument names and accepts either
+  consumer shape, instead of requiring the vendored types.
+
 ### Fixed
 
 - **A registration no longer waits behind the previous row's dotNS

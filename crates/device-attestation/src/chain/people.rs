@@ -9,7 +9,8 @@ use chain_types::{people, PeopleConfig};
 use subxt::{config::RpcConfigFor, utils::AccountId32, OnlineClient};
 use subxt_rpcs::{LegacyRpcMethods, RpcClient};
 
-use crate::{check_pallet_call_args, extract_call_fields, Pallet};
+use crate::chain::attest::AttestShape;
+use crate::{check_pallet_call_arg_names, extract_call_fields, Pallet};
 
 /// The People Chain client pinned to one block.
 pub type PeopleAt = subxt::client::ClientAtBlock<
@@ -101,20 +102,35 @@ impl PeopleChain {
         Ok(self_)
     }
 
+    /// Refuses to start against a runtime whose `attest` this backend cannot
+    /// build: the arguments must be the vendored ones by name, and the consumer
+    /// registration one of the two shapes [`AttestShape`] knows. Which of the
+    /// two is read again per pass, since the runtime can upgrade while we run.
     async fn check_attest_shape(&self) -> anyhow::Result<()> {
-        let vendored_call =
-            extract_call_fields(chain_types::metadata_arc(), PALLET, "attest", true)?;
-        let call = extract_call_fields(
-            self.client.at_current_block().await?.metadata(),
+        let vendored_call = extract_call_fields(
+            chain_types::metadata_arc(),
             PALLET,
             "attest",
-            false,
+            /* vendored= */ true,
         )?;
-        check_pallet_call_args(
+        let metadata = self.client.at_current_block().await?.metadata();
+        let call = extract_call_fields(
+            metadata.clone(),
+            PALLET,
+            "attest",
+            /* vendored= */ false,
+        )?;
+        check_pallet_call_arg_names(
             vendored_call.fields.as_slice(),
             Pallet::PeopleLite,
             call.fields.as_slice(),
         )?;
+        let shape = AttestShape::try_from(&*metadata)?;
+        tracing::info!(
+            ?shape,
+            payload_version = %shape.payload_version(),
+            "connected People runtime's attest shape"
+        );
         Ok(())
     }
 

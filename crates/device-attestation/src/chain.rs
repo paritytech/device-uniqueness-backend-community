@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 pub mod asset_hub;
+pub mod attest;
 pub mod lease;
 pub mod outbox;
 pub mod people;
