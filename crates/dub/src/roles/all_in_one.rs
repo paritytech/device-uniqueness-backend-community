@@ -7,6 +7,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use device_attestation::chain::asset_hub::AssetHub;
 use secrecy::ExposeSecret as _;
 use serde_json::json;
 use tower_http::services::ServeDir;
@@ -73,6 +74,9 @@ pub async fn run() -> anyhow::Result<()> {
     )
     .await?;
     tracing::info!("connected to People Chain");
+    let attestation_asset_hub =
+        AssetHub::connect_for_reads(&attestation_config.asset_hub_rpc_url).await?;
+    tracing::info!("connected to Asset Hub");
 
     let jwt = device_attestation::Jwt::new(
         attestation_config.jwt_secret.expose_secret(),
@@ -81,6 +85,7 @@ pub async fn run() -> anyhow::Result<()> {
     let attestation_state = device_attestation::AppState::new(
         attestation_pool.clone(),
         attestation_chain.clone(),
+        attestation_asset_hub,
         jwt,
         attestation_config,
     );
