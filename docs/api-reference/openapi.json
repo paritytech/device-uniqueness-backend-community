@@ -706,11 +706,11 @@
         "tags": [
           "Liveness & Readiness"
         ],
-        "summary": "Kubernetes readiness probe — checks `db` and `chain` subsystems.",
+        "summary": "Kubernetes readiness probe — checks the `db`, `chain` and `asset_hub` subsystems.",
         "operationId": "readyz",
         "responses": {
           "200": {
-            "description": "Instance can take traffic; db and chain reachable.",
+            "description": "Instance can take traffic; db, People Chain and Asset Hub reachable.",
             "content": {
               "application/json": {
                 "schema": {},
@@ -718,7 +718,8 @@
                   "status": "ready",
                   "service": "device-attestation",
                   "db": "up",
-                  "chain": "up"
+                  "chain": "up",
+                  "asset_hub": "up"
                 }
               }
             }
