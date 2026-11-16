@@ -44,8 +44,9 @@ fn owner_key(
 /// People's `Resources`, or on the dotNS contracts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReservationState {
-    /// The bare name is already registered as a personhood name.
-    pub full_name_owned: bool,
+    /// The bare name cannot be reserved: it is already registered as a
+    /// personhood name, or, on dotNS, it holds a live name-whitelist grant.
+    pub personhood_name_unavailable: bool,
     /// Accounts queued for the bare name.
     pub queue_len: u32,
     /// The most accounts the queue takes.
@@ -62,7 +63,7 @@ impl ReservationState {
     /// Whether a claim reserving the name would be rejected.
     #[must_use]
     pub fn rejects(&self) -> bool {
-        self.full_name_owned || self.queue_full()
+        self.personhood_name_unavailable || self.queue_full()
     }
 }
 
@@ -82,7 +83,7 @@ pub struct BaseState {
 impl BaseState {
     pub fn reservation(&self) -> ReservationState {
         ReservationState {
-            full_name_owned: self.full_name_owned,
+            personhood_name_unavailable: self.full_name_owned,
             queue_len: self.queue_len,
             queue_capacity: self.queue_capacity,
         }
@@ -318,7 +319,7 @@ impl PeopleChain {
         };
 
         Ok(ReservationState {
-            full_name_owned: full_name.is_some(),
+            personhood_name_unavailable: full_name.is_some(),
             queue_len: match reservation_queue {
                 Some(bytes) => decode_queue_len(bytes)?,
                 None => 0,
@@ -522,7 +523,7 @@ mod tests {
                 queue_capacity: 10,
             };
             let standalone = ReservationState {
-                full_name_owned,
+                personhood_name_unavailable: full_name_owned,
                 queue_len,
                 queue_capacity: 10,
             };

@@ -135,9 +135,10 @@ impl AssetHub {
     }
 
     /// The reservation state of the bare personhood name `name` on the dotNS
-    /// contracts: whether it exists on `DotnsRegistrar`, and how full its
-    /// `DotnsPopController` reservation queue is. A claim reserving a name
-    /// either one rejects reverts on chain, lite label included.
+    /// contracts: whether it exists on `DotnsRegistrar` or holds a live grant
+    /// on the name whitelist, and how full its `DotnsPopController`
+    /// reservation queue is. A claim reserving a name any of them rejects
+    /// reverts on chain, device name included.
     pub async fn personhood_reservation(&self, name: &str) -> anyhow::Result<ReservationState> {
         let at = self.client.at_current_block().await?;
         let contracts = self

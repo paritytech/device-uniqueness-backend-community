@@ -19,8 +19,8 @@ async fn an_unregistered_personhood_name_reads_as_free_on_the_dotns_contracts() 
         .expect("the dotNS contracts resolve and answer");
 
     assert!(
-        !state.full_name_owned,
-        "nobody registered this name: {state:?}"
+        !state.personhood_name_unavailable,
+        "nobody registered or was granted this name: {state:?}"
     );
     assert_eq!(state.queue_len, 0, "nobody queued for this name: {state:?}");
     assert!(

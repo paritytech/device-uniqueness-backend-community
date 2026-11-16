@@ -72,9 +72,10 @@ pub(crate) struct NameAvailability {
             People runtime still keeps usernames, and pending outbox reservations, tagged \
             `{_tag: \"v1\", value}` with availableDigits. `EXHAUSTED` means nothing claimable \
             under this base: no free discriminator, or the bare personhood name is registered on \
-            `DotnsRegistrar` or its `DotnsPopController` reservation queue is full (on People \
-            too, while its runtime keeps usernames). The last two would make a claim carrying \
-            `dotns.reservedUsername` fail on chain and take the lite username with it.",
+            `DotnsRegistrar`, holds a live grant on the dotNS name whitelist, or its \
+            `DotnsPopController` reservation queue is full (on People too, while its runtime \
+            keeps usernames). Any of those would make a claim carrying \
+            `dotns.reservedUsername` fail on chain and take the device name with it.",
          body = AvailableV1Response,
          example = json!({ "_tag": "v1", "value": {
              "tallesx": { "status": "AVAILABLE", "availableDigits": [1, 2, 3] },
@@ -238,19 +239,19 @@ mod tests {
     }
 
     /// A reservation state with `queue_len` of 10 queued.
-    fn queue(queue_len: u32, full_name_owned: bool) -> ReservationState {
+    fn queue(queue_len: u32, unavailable: bool) -> ReservationState {
         ReservationState {
-            full_name_owned,
+            personhood_name_unavailable: unavailable,
             queue_len,
             queue_capacity: 10,
         }
     }
 
     /// The bare base as dotNS sees it, on a People runtime without usernames.
-    fn on_dotns(queue_len: u32, full_name_owned: bool) -> Reservation {
+    fn on_dotns(queue_len: u32, unavailable: bool) -> Reservation {
         Reservation {
             people: None,
-            dotns: queue(queue_len, full_name_owned),
+            dotns: queue(queue_len, unavailable),
         }
     }
 
@@ -322,7 +323,7 @@ mod tests {
         assert_eq!(
             availability_of(&owned_on_people).status,
             "EXHAUSTED",
-            "People still checks its own reservation leg before #129"
+            "People still checks its own reservation leg before the username removal"
         );
     }
 

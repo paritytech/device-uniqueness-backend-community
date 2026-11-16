@@ -4,11 +4,11 @@
 //! Reads from the dotNS contracts on Asset Hub, made as `ReviveApi_call` dry
 //! runs.
 //!
-//! The gateway forwards a claim's reservation leg to
-//! `DotnsPopController.reserveBaseName`, which reverts, and takes the lite
-//! label with it, when the bare personhood name already exists on
-//! `DotnsRegistrar` or its reservation queue is full. These reads make the
-//! same two checks before a claim is accepted.
+//! The gateway forwards a claim's reservation leg to `DotnsPopController`,
+//! which reverts, and takes the device name with it, when the bare
+//! personhood name already exists on `DotnsRegistrar`, holds a live grant on
+//! the name whitelist, or its reservation queue is full. These reads make
+//! the same checks before a claim is accepted.
 
 use anyhow::{bail, ensure, Context as _};
 use chain_types::AssetHubConfig;
@@ -32,6 +32,11 @@ const REVERT_FLAG: u128 = 1;
 /// `bytes32("registrar")`.
 const REGISTRAR_KEY: &[u8] = b"registrar";
 
+/// The key `DotnsProtocolRegistry` files the name whitelist under,
+/// `bytes32("nameWhitelist")`. Unset (the zero address) on a network with no
+/// whitelist configured.
+const NAME_WHITELIST_KEY: &[u8] = b"nameWhitelist";
+
 /// One ABI word.
 type Word = [u8; 32];
 
@@ -42,6 +47,10 @@ pub(crate) struct Contracts {
     controller: H160,
     /// `DotnsRegistrar`, which holds every registered second-level name.
     registrar: H160,
+    /// `DotnsProtocolRegistry`, read on every check for the name whitelist,
+    /// as the controller reads it, so a whitelist configured later counts
+    /// without a restart.
+    registry: H160,
     /// The namehash of the TLD personhood names sit under.
     tld_node: Word,
     /// `DotnsPopController.MAX_RESERVATION_QUEUE`.
@@ -89,6 +98,7 @@ impl Contracts {
 
         Ok(Self {
             controller,
+            registry,
             registrar: address_of(word(&registrar, 0)?)?,
             tld_node: word(&tld_node, 0)?,
             queue_capacity: u32::try_from(uint_of(word(&queue_capacity, 0)?)?)
@@ -99,9 +109,11 @@ impl Contracts {
     /// The reservation state of the bare personhood name `name`, as
     /// `DotnsPopController` checks it before queueing a reservation.
     ///
-    /// The queue length counts every slot in the live window, expired ones
-    /// included. The controller clears a few expired slots before it checks,
-    /// so a queue read as full can still take one more claim on chain.
+    /// The name is unavailable when it exists on the registrar or holds a
+    /// live grant on the name whitelist. The queue length counts every slot
+    /// in the live window, expired ones included. The controller clears a few
+    /// expired slots before it checks, so a queue read as full can still take
+    /// one more claim on chain.
     pub(crate) async fn reservation(
         &self,
         at: &AssetHubAt,
@@ -109,13 +121,14 @@ impl Contracts {
     ) -> anyhow::Result<ReservationState> {
         let labelhash = keccak_256(name.as_bytes());
         let node = node_of(self.tld_node, labelhash);
-        let (exists, meta) = tokio::try_join!(
+        let (exists, meta, granted) = tokio::try_join!(
             call(at, self.registrar, calldata("exists(uint256)", &[node])),
             call(
                 at,
                 self.controller,
                 calldata("reservationMeta(bytes32)", &[labelhash])
             ),
+            self.granted(at, node),
         )?;
         let exists = exists.returned("DotnsRegistrar.exists")?;
         let meta = meta.returned("DotnsPopController.reservationMeta")?;
@@ -123,11 +136,39 @@ impl Contracts {
         let head = uint_of(word(&meta, 0)?)?;
         let tail = uint_of(word(&meta, 1)?)?;
         Ok(ReservationState {
-            full_name_owned: bool_of(word(&exists, 0)?)?,
+            personhood_name_unavailable: bool_of(word(&exists, 0)?)? || granted,
             queue_len: u32::try_from(tail.saturating_sub(head)).unwrap_or(u32::MAX),
             queue_capacity: self.queue_capacity,
         })
     }
+
+    /// Whether the name at `node` holds a live grant on the name whitelist,
+    /// read as `WhitelistUtils.granteeOf` reads it for the controller.
+    ///
+    /// No whitelist configured means no grants. A whitelist that reverts on
+    /// `granteeOfNode` predates it (dotNS v1.1.0), and so does the controller
+    /// that would consult it, so that also reads as no grant.
+    async fn granted(&self, at: &AssetHubAt, node: Word) -> anyhow::Result<bool> {
+        let whitelist = call(
+            at,
+            self.registry,
+            calldata("get(bytes32)", &[bytes32_of(NAME_WHITELIST_KEY)]),
+        )
+        .await?
+        .returned("DotnsProtocolRegistry.get(\"nameWhitelist\")")?;
+        let Some(whitelist) = configured(address_of(word(&whitelist, 0)?)?) else {
+            return Ok(false);
+        };
+        match call(at, whitelist, calldata("granteeOfNode(bytes32)", &[node])).await? {
+            Outcome::Returned(grantee) => Ok(configured(address_of(word(&grantee, 0)?)?).is_some()),
+            Outcome::Reverted(_) => Ok(false),
+        }
+    }
+}
+
+/// `address`, unless it is the zero address Solidity uses for "none".
+fn configured(address: H160) -> Option<H160> {
+    (address != H160::zero()).then_some(address)
 }
 
 /// How a contract call ended.
@@ -315,6 +356,7 @@ mod tests {
             ("MAX_RESERVATION_QUEUE()", "afb43603"),
             ("exists(uint256)", "4f558e79"),
             ("reservationMeta(bytes32)", "84991ae7"),
+            ("granteeOfNode(bytes32)", "e218419d"),
         ];
         for (signature, selector) in cases {
             assert_eq!(
@@ -357,6 +399,19 @@ mod tests {
         let key = bytes32_of(REGISTRAR_KEY);
         assert_eq!(&key[..9], b"registrar", "the key text leads");
         assert_eq!(key[9..], [0; 23], "zero padding follows");
+    }
+
+    #[test]
+    fn the_zero_address_is_not_configured() {
+        assert_eq!(configured(H160::zero()), None, "zero is none");
+        assert_eq!(
+            configured(H160::repeat_byte(0xab)),
+            Some(H160::repeat_byte(0xab)),
+            "any other address is itself"
+        );
+        let key = bytes32_of(NAME_WHITELIST_KEY);
+        assert_eq!(&key[..13], b"nameWhitelist", "the key text leads");
+        assert_eq!(key[13..], [0; 19], "zero padding follows");
     }
 
     #[test]

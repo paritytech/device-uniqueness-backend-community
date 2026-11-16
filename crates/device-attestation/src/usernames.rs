@@ -58,7 +58,7 @@ pub(crate) fn available_digits(taken: &BTreeSet<u8>) -> Vec<u8> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Reservation {
     /// On People, for a runtime that keeps personhood names. `None` after
-    /// the username removal took that state from `Resources`.
+    /// the username removal took that state out of `Resources`.
     pub people: Option<ReservationState>,
     /// On the dotNS contracts on Asset Hub, which the gateway forwards every
     /// reservation to.
@@ -348,9 +348,9 @@ mod tests {
     }
 
     /// The bare name as the dotNS contracts see it, `queue_len` of 64 queued.
-    fn dotns(queue_len: u32, full_name_owned: bool) -> ReservationState {
+    fn dotns(queue_len: u32, unavailable: bool) -> ReservationState {
         ReservationState {
-            full_name_owned,
+            personhood_name_unavailable: unavailable,
             queue_len,
             queue_capacity: 64,
         }
