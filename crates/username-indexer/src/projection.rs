@@ -47,8 +47,8 @@ pub(crate) enum DecodeError {
     NulByte,
 }
 
-/// Decode raw `Resources::Consumers` fields into an [`AssignedUsername`].
-pub(crate) fn decode_consumer(
+/// Decode an account's raw username fields into an [`AssignedUsername`].
+pub(crate) fn decode_username(
     account_id: [u8; 32],
     identifier_key: [u8; 65],
     lite_username: Vec<u8>,
@@ -143,7 +143,7 @@ pub(crate) async fn upsert(
 
 /// Delete one projection row by account within an open transaction.
 ///
-/// Used when an affected account's `Resources::Consumers` entry is absent at
+/// Used when an affected account's `DotnsGateway::AccountNames` entry is absent at
 /// the finalized block, reconciling the local row to authoritative chain state.
 pub(crate) async fn delete_account(
     tx: &mut Transaction<'_, Postgres>,
@@ -275,10 +275,10 @@ pub async fn clear_speculative(pool: &PgPool) -> Result<u64, sqlx::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_consumer, DecodeError};
+    use super::{decode_username, DecodeError};
 
     fn decode(lite: &[u8], full: Option<&[u8]>) -> Result<super::AssignedUsername, DecodeError> {
-        decode_consumer(
+        decode_username(
             [1; 32],
             [2; 65],
             lite.to_vec(),

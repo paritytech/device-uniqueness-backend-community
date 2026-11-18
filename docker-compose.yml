@@ -285,7 +285,9 @@ services:
     environment:
       BIND_ADDR: 0.0.0.0:8080
       INDEXER_DATABASE_URL: postgres://username_indexer:username_indexer@username-indexer-postgres:5432/username_indexer
-      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://paseo-people-next-system-rpc.polkadot.io}
+      # The indexer's source: DotnsGateway::AccountNames holds every lite
+      # username. Same network as the other services' PEOPLE_RPC_URL.
+      ASSET_HUB_RPC_URL: ${ASSET_HUB_RPC_URL:-wss://paseo-asset-hub-next-rpc.polkadot.io}
       STORAGE_PAGE_SIZE: ${STORAGE_PAGE_SIZE:-1000}
       SYNC_INTERVAL_SECS: ${SYNC_INTERVAL_SECS:-30}
       SPECULATIVE_INDEXING_ENABLED: ${SPECULATIVE_INDEXING_ENABLED:-true}

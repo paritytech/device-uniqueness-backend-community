@@ -3,41 +3,47 @@
 
 use std::sync::Arc;
 
-use chain_types::PeopleConfig;
+use chain_types::AssetHubConfig;
 use subxt::{backend::LegacyBackend, client::Blocks, config::RpcConfigFor, OnlineClient};
 use subxt_rpcs::client::{ReconnectingRpcClient, RpcClient};
 use subxt_rpcs::LegacyRpcMethods;
 
+/// A handle on Asset Hub at one block.
+pub(crate) type AssetHubAt = subxt::client::ClientAtBlock<
+    AssetHubConfig,
+    subxt::client::OnlineClientAtBlockImpl<AssetHubConfig>,
+>;
+
 /// Boxed chain transport or metadata error.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// People Chain connection or query failure.
+/// Asset Hub connection or query failure.
 #[derive(Debug, thiserror::Error)]
 pub enum ChainError {
-    #[error("connecting to People Chain at {url}: {source}")]
+    #[error("connecting to Asset Hub at {url}: {source}")]
     Connect {
         url: String,
         #[source]
         source: BoxError,
     },
     /// Online client metadata initialization failed.
-    #[error("initializing People Chain client: {0}")]
+    #[error("initializing Asset Hub client: {0}")]
     Initialize(#[source] BoxError),
-    #[error("querying People Chain finalized snapshot: {0}")]
+    #[error("querying Asset Hub finalized snapshot: {0}")]
     Query(#[source] BoxError),
     /// `chain_getHeader` answered, but with no header at all.
-    #[error("People Chain reported no best header")]
+    #[error("Asset Hub reported no best header")]
     NoBestHeader,
 }
 
-/// Connected People Chain client using a reconnecting legacy backend.
+/// Connected Asset Hub client using a reconnecting legacy backend.
 #[derive(Clone)]
-pub struct PeopleChain {
-    client: OnlineClient<PeopleConfig>,
-    rpc: LegacyRpcMethods<RpcConfigFor<PeopleConfig>>,
+pub struct AssetHubChain {
+    client: OnlineClient<AssetHubConfig>,
+    rpc: LegacyRpcMethods<RpcConfigFor<AssetHubConfig>>,
 }
 
-impl PeopleChain {
+impl AssetHubChain {
     /// Connect and configure bounded legacy storage paging.
     pub async fn connect(url: &str, storage_page_size: u32) -> Result<Self, ChainError> {
         let reconnecting = ReconnectingRpcClient::builder()
@@ -48,7 +54,7 @@ impl PeopleChain {
                 source: Box::new(source),
             })?;
         let rpc_client = RpcClient::new(reconnecting);
-        let backend = LegacyBackend::<PeopleConfig>::builder()
+        let backend = LegacyBackend::<AssetHubConfig>::builder()
             .storage_page_size(storage_page_size)
             .build(rpc_client.clone());
         let client = OnlineClient::from_backend(Arc::new(backend))
@@ -58,18 +64,18 @@ impl PeopleChain {
     }
 
     /// Wrap an already-constructed online client (offline replay tests).
-    pub fn from_parts(client: OnlineClient<PeopleConfig>, rpc: RpcClient) -> Self {
+    pub fn from_parts(client: OnlineClient<AssetHubConfig>, rpc: RpcClient) -> Self {
         Self {
             client,
             rpc: LegacyRpcMethods::new(rpc),
         }
     }
 
-    pub fn online(&self) -> &OnlineClient<PeopleConfig> {
+    pub fn online(&self) -> &OnlineClient<AssetHubConfig> {
         &self.client
     }
 
-    pub async fn best_blocks(&self) -> Result<Blocks<PeopleConfig>, ChainError> {
+    pub async fn best_blocks(&self) -> Result<Blocks<AssetHubConfig>, ChainError> {
         self.client
             .stream_best_blocks()
             .await

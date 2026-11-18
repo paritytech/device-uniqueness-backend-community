@@ -15,7 +15,7 @@ use tower::ServiceExt as _;
 use username_indexer::poc::puzzle::{checksum_hex, derive_secret};
 use username_indexer::poc::solution::{leading_zero_bits, mine};
 use username_indexer::poc::{now_millis, Poc, Solution};
-use username_indexer::{AppState, Freshness, PeopleChain};
+use username_indexer::{AppState, AssetHubChain, Freshness};
 use uuid::Uuid;
 
 const IKM: &str = "test-poc-ikm";
@@ -24,7 +24,7 @@ const VALIDITY_WINDOW_SECS: i64 = 90;
 const JWT_SEED: [u8; 32] = [7u8; 32];
 const SUBJECT: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 
-async fn dead_chain_client() -> PeopleChain {
+async fn dead_chain_client() -> AssetHubChain {
     use subxt_rpcs::client::mock_rpc_client::Json;
     use subxt_rpcs::client::{MockRpcClient, RpcClient};
 
@@ -35,10 +35,11 @@ async fn dead_chain_client() -> PeopleChain {
         .build();
     let rpc = RpcClient::new(mock);
     let backend = subxt::backend::LegacyBackend::builder().build(rpc.clone());
-    let client = subxt::OnlineClient::<chain_types::PeopleConfig>::from_backend(Arc::new(backend))
-        .await
-        .expect("offline client from mock backend");
-    PeopleChain::from_parts(client, rpc)
+    let client =
+        subxt::OnlineClient::<chain_types::AssetHubConfig>::from_backend(Arc::new(backend))
+            .await
+            .expect("offline client from mock backend");
+    AssetHubChain::from_parts(client, rpc)
 }
 
 async fn app(gate: bool) -> axum::Router {

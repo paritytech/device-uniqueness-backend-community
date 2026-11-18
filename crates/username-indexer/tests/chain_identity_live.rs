@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use sqlx::{PgPool, Row as _};
 use username_indexer::bootstrap;
-use username_indexer::chain::PeopleChain;
+use username_indexer::chain::AssetHubChain;
 
 const MOCK_GENESIS: [u8; 32] = [0u8; 32];
 
@@ -13,7 +13,7 @@ const FOREIGN_GENESIS: [u8; 32] = [0xffu8; 32];
 
 const TEST_ACCOUNT: [u8; 32] = [0xa7u8; 32];
 
-async fn dead_chain_client() -> PeopleChain {
+async fn dead_chain_client() -> AssetHubChain {
     use subxt_rpcs::client::mock_rpc_client::Json;
     use subxt_rpcs::client::{MockRpcClient, RpcClient};
 
@@ -24,10 +24,11 @@ async fn dead_chain_client() -> PeopleChain {
         .build();
     let rpc = RpcClient::new(mock);
     let backend = subxt::backend::LegacyBackend::builder().build(rpc.clone());
-    let client = subxt::OnlineClient::<chain_types::PeopleConfig>::from_backend(Arc::new(backend))
-        .await
-        .expect("offline client from mock backend");
-    PeopleChain::from_parts(client, rpc)
+    let client =
+        subxt::OnlineClient::<chain_types::AssetHubConfig>::from_backend(Arc::new(backend))
+            .await
+            .expect("offline client from mock backend");
+    AssetHubChain::from_parts(client, rpc)
 }
 
 async fn set_checkpoint(pool: &PgPool, number: i64, genesis: Option<[u8; 32]>) {
