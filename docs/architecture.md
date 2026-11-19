@@ -415,8 +415,14 @@ Operational invariants an agent must respect when touching the code.
   budget exists to stop a bad row retrying forever; a funding gap is not a bad row, and burning
   eight attempts in three minutes against a three-day signature would discard a claim only the
   client can re-sign. The mirror of that rule is the other direction: a rejection that cannot come
-  out differently for the same call (`DETERMINISTIC_REJECTIONS`) is terminal on the *first* pass
-  rather than paying its fee eight times over.
+  out differently for the same call is terminal on the *first* pass rather than paying its fee
+  eight times over. That covers **every dispatch error from the registration pallets**
+  (`PeopleLite::*`, `Resources::*`), including ones a later runtime adds, because those pallets
+  have judged this row's own payload. The exceptions are in `NOT_THE_ROWS_FAULT`: errors about the
+  attester or the network (`NoAttestationAllowance`, `PaidRegistrationLimitReached`,
+  `TooManyLitePeople`, `LitePeopleCollectionNotCreated`). Every row would get those, so they keep
+  the retry budget, as do dispatch errors from any other pallet (`Proxy::*`, `BadOrigin`) and
+  transport or pool errors, none of which say anything about the row.
 - **A dotNS problem parks the dotNS lane; it never stops the writer.** Only one dotNS condition is
   a startup abort: a missing `ASSET_HUB_RPC_URL`, a config error knowable
   before any row is claimed. Everything else is runtime. Asset Hub is connected lazily on the

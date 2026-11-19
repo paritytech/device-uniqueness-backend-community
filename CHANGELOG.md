@@ -94,6 +94,17 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
   now **mortal for 64 blocks** where they used to be immortal: a transaction
   not included in that window is dropped and the row is resubmitted under a
   fresh nonce.
+- **A rejected claim fails on the first pass instead of paying for eight.**
+  The writer used to fail at once only on three `Resources` reservation
+  errors. Any other rejection of the claim, such as a bad
+  `consumerRegistrationSignature` or `proofOfOwnership` that only had its
+  shape checked at intake, was resubmitted up to `CHAIN_WRITER_MAX_ATTEMPTS`
+  times, with a fee each time. Now every `PeopleLite::*` / `Resources::*`
+  dispatch error fails the row immediately, except four that are about the
+  attester or the network: `NoAttestationAllowance`,
+  `PaidRegistrationLimitReached`, `TooManyLitePeople` and
+  `LitePeopleCollectionNotCreated`. Those, and errors from other pallets or
+  the transport, keep the retry budget.
 - **`all-in-one` serves `/api/v1/turn/issue-with-proof`.** It verifies proofs
   against the People Chain's rings, as `turn-api` does, where it used to
   answer every one with `503 ring roots not yet available`.

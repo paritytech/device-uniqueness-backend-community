@@ -840,35 +840,47 @@ fn is_signer_contention(reason: &str) -> bool {
             .any(|refusal| reason.contains(refusal))
 }
 
-/// Rejections that another submission cannot talk the runtime out of, so the
-/// row fails on the first pass rather than paying `max_attempts` fees for the
-/// same answer.
+/// The pallets whose dispatch errors are a verdict on the row itself.
 ///
-/// All three come from `attest`'s optional `reserved_username` leg, which the
-/// runtime checks *before* it writes the lite username — so they cost the whole
-/// registration. The intake preflight refuses these claims before a row exists;
-/// what reaches here raced that check (a queue that filled in between). The
-/// writer cannot resubmit without the reservation, because the consumer
-/// signature covers it — only the client can re-sign.
+/// The registration call is `PeopleLite.attest`, and its reservation leg runs
+/// in `Resources`. When either pallet rejects the call in an included block,
+/// it has checked this row's own payload or candidate: a signature, the ring
+/// key, the account, the username, the reservation. Submitting the same bytes
+/// again gets the same answer and costs another fee. So by default a row
+/// rejected by one of these pallets fails on the first pass, including for
+/// errors a future runtime adds, unless the error is listed in
+/// [`NOT_THE_ROWS_FAULT`].
 ///
-/// `QueueFull` is not immutable in principle: entries expire and
-/// `remove_expired_username_reservation` is permissionless. But nothing drains
-/// within the seconds our backoff spans, so retrying only buys more fees.
+/// This only covers dispatch errors, which subxt renders as `Pallet::Variant`.
+/// Transport and pool errors carry no verdict about the row. They keep the
+/// retry budget, or the deferrals above.
+const REGISTRATION_PALLETS: &[&str] = &["PeopleLite::", "Resources::"];
+
+/// Errors from [`REGISTRATION_PALLETS`] that are about the attester or the
+/// network, not the row. Every row in the outbox would get the same answer, so
+/// failing on them at once would empty the queue in one pass. They keep the
+/// ordinary retry budget.
 ///
-/// A runtime after the username removal has no reservation
-/// leg and cannot raise any of these, so the list is inert there rather than
-/// wrong. It stays for as long as a network this backend serves (`polkadot`)
-/// runs a runtime that can.
-const DETERMINISTIC_REJECTIONS: &[&str] = &[
-    "Resources::UsernameReservationTaken",
-    "Resources::QueueFull",
-    "Resources::AlreadyHasReservation",
+/// `PeopleLite::AlreadyRegistered` is not listed. It means success and is
+/// handled before this check.
+const NOT_THE_ROWS_FAULT: &[&str] = &[
+    // The attester has used up its attestation allowance.
+    "PeopleLite::NoAttestationAllowance",
+    // The paid registrations for the current period are used up.
+    "PeopleLite::PaidRegistrationLimitReached",
+    // The network-wide `MaxLitePeople` cap is reached.
+    "PeopleLite::TooManyLitePeople",
+    // The runtime has not set up the lite-people collection yet.
+    "PeopleLite::LitePeopleCollectionNotCreated",
 ];
 
 fn is_deterministic_rejection(reason: &str) -> bool {
-    DETERMINISTIC_REJECTIONS
+    REGISTRATION_PALLETS
         .iter()
-        .any(|rejection| reason.contains(rejection))
+        .any(|pallet| reason.contains(pallet))
+        && !NOT_THE_ROWS_FAULT
+            .iter()
+            .any(|error| reason.contains(error))
 }
 
 pub(super) fn terminal_reason(reason: &str) -> String {
@@ -911,9 +923,9 @@ mod tests {
          (e.g. account balance too low)";
 
     #[test]
-    fn failed_attest_retries_then_fails_without_becoming_assigned() {
+    fn an_unrecognised_failure_retries_then_fails_without_becoming_assigned() {
         let candidate = [7; 32];
-        let reason = "PeopleLite.InvalidAttestationSignature";
+        let reason = "Rpc error: the node answered something unexpected";
 
         assert_eq!(
             classify_submit_failure(reason, None, candidate, 1, 3),
@@ -923,6 +935,74 @@ mod tests {
             classify_submit_failure(reason, None, candidate, 3, 3),
             SubmitFailureAction::Fail
         );
+    }
+
+    #[test]
+    fn a_rejected_payload_fails_on_the_first_pass() {
+        // Garbage that passes intake's shape checks. Every resubmission would
+        // get the same verdict and pay another fee.
+        let candidate = [7; 32];
+        for error in [
+            "PeopleLite::InvalidAttestationSignature",
+            "PeopleLite::InvalidProofOfOwnership",
+            "PeopleLite::InvalidConsumerRegistrationAccount",
+            "PeopleLite::KeyAlreadyInUse",
+            "PeopleLite::AccountInUse",
+            "Resources::InvalidProofOfOwnership",
+            "Resources::UsernameTaken",
+            // An error a later runtime adds is the row's too, by default.
+            "PeopleLite::SomethingNew",
+        ] {
+            for reason in [error.to_string(), format!("proxied call failed: {error}")] {
+                assert_eq!(
+                    classify_submit_failure(&reason, None, candidate, 1, 8),
+                    SubmitFailureAction::Fail,
+                    "{reason} should fail on the first pass"
+                );
+                assert!(
+                    terminal_reason(&reason).starts_with("rejected deterministically"),
+                    "{reason} should be reported as a deterministic rejection"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_registration_error_about_the_attester_keeps_the_retry_budget() {
+        // Every row would get these, so failing on the first pass would empty
+        // the outbox at once.
+        let candidate = [7; 32];
+        for error in NOT_THE_ROWS_FAULT {
+            let reason = format!("proxied call failed: {error}");
+            assert_eq!(
+                classify_submit_failure(&reason, None, candidate, 1, 8),
+                SubmitFailureAction::Retry,
+                "{error} is not the row's fault"
+            );
+            assert_eq!(
+                classify_submit_failure(&reason, None, candidate, 8, 8),
+                SubmitFailureAction::Fail,
+                "{error} still ends when the budget does"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dispatch_error_outside_the_registration_pallets_keeps_the_retry_budget() {
+        // A broken proxy or an unauthorised attester is the signer's fault,
+        // and every row would get the same answer.
+        let candidate = [7; 32];
+        for reason in [
+            "Proxy::NotProxy",
+            "proxied call failed: BadOrigin",
+            "Utility::TooManyCalls",
+        ] {
+            assert_eq!(
+                classify_submit_failure(reason, None, candidate, 1, 8),
+                SubmitFailureAction::Retry,
+                "{reason} is not a verdict on the row"
+            );
+        }
     }
 
     #[test]
@@ -958,7 +1038,7 @@ mod tests {
         );
         assert_eq!(
             classify_submit_failure(
-                "proxied call failed: Resources::Whatever",
+                "proxied call failed: Proxy::Whatever",
                 None,
                 candidate,
                 1,
@@ -1099,7 +1179,7 @@ mod tests {
         let candidate = [7; 32];
         assert_eq!(
             classify_submit_failure(
-                "PeopleLite.InvalidAttestationSignature",
+                "Rpc error: the node answered something unexpected",
                 None,
                 candidate,
                 8,
