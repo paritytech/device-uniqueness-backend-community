@@ -449,9 +449,10 @@ Operational invariants an agent must respect when touching the code.
   (`PeopleLite::*`, `Resources::*`), including ones a later runtime adds, because those pallets
   have judged this row's own payload. The exceptions are in `NOT_THE_ROWS_FAULT`: errors about the
   attester or the network (`NoAttestationAllowance`, `PaidRegistrationLimitReached`,
-  `TooManyLitePeople`, `LitePeopleCollectionNotCreated`). Every row would get those, so they keep
-  the retry budget, as do dispatch errors from any other pallet (`Proxy::*`, `BadOrigin`) and
-  transport or pool errors, none of which say anything about the row.
+  `TooManyLitePeople`, `LitePeopleCollectionNotCreated`). Every row would get those, so they *park*
+  like an unfunded signer: spending attempts on them would fail the whole outbox within minutes.
+  Dispatch errors from any other pallet (`Proxy::*`, `BadOrigin`) and transport or pool errors
+  keep the retry budget, none of which say anything about the row.
 - **A dotNS problem parks the dotNS lane; it never stops the writer.** Only one dotNS condition is
   a startup abort: a missing `ASSET_HUB_RPC_URL`, a config error knowable
   before any row is claimed. Everything else is runtime. Asset Hub is connected lazily on the

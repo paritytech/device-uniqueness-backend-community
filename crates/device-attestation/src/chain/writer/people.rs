@@ -12,7 +12,7 @@ use time::OffsetDateTime;
 
 use super::link::PeopleRuntime;
 use super::{
-    engine::{finalize, parse_candidate, Cx, UNFUNDED_PARK_BACKOFF_SECS},
+    engine::{finalize, parse_candidate, Cx, PARK_BACKOFF_SECS},
     error::{Op, WriterError},
     events::{check_proxied_call, item_results},
     lane::{observe_defer, park_until, row_backoff, Gate, Lane, Outcome},
@@ -256,9 +256,10 @@ impl Lane for People {
                     id = r.id,
                     username = %r.full_username,
                     attempt = r.attempt,
-                    backoff_secs = UNFUNDED_PARK_BACKOFF_SECS,
+                    backoff_secs = PARK_BACKOFF_SECS,
                     reason,
-                    "registration parked without spending an attempt; the signer cannot pay fees"
+                    "registration parked without spending an attempt; the signer cannot pay fees, \
+                     or the runtime refuses every registration right now (see reason)"
                 );
             }
             Outcome::Defer {

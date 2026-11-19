@@ -770,7 +770,7 @@ const ALREADY_REGISTERED: &str = "PeopleLite::AlreadyRegistered";
 
 const UNFUNDED_SIGNER: &str = "Inability to pay some fees";
 
-pub(super) const UNFUNDED_PARK_BACKOFF_SECS: i64 = 300;
+pub(super) const PARK_BACKOFF_SECS: i64 = 300;
 
 /// Node refusals that say *the signer's next nonce is contested* — or that we
 /// never got a verdict at all — not *this row is wrong*.
@@ -798,9 +798,20 @@ const SIGNER_CONTENTION: &[&str] = &[
     // Pool: the identical transaction is already queued. Resubmitting cannot
     // improve on that; waiting can.
     "Transaction Already Imported",
+    // Pool: the writer's own signature on the transaction does not check
+    // (`BadProof`). The row cannot cause this: the signatures it carries are
+    // checked by `PeopleLite` at dispatch and fail as `PeopleLite::` errors.
+    // What does cause it is the mortality the writer signed. Once a mortal
+    // transaction's 64 blocks have passed, the runtime reads its era as
+    // starting at a later block, whose hash is not the one signed, so an
+    // expired transaction is refused here and not as an ancient birth block.
+    // A birth block reorged off the best chain is refused the same way. The
+    // next pass signs afresh against the current head.
+    "Transaction has a bad signature",
     // Pool: the block the transaction's mortality counts from is out of the
-    // node's reach (`AncientBirthBlock`). A fact about the chain's head when
-    // the writer signed, not about the row; the next pass signs afresh.
+    // node's reach (`AncientBirthBlock`). With a 64-block era this needs a
+    // birth block older than the chain keeps hashes for, so it is rare; an
+    // expired transaction shows up as a bad signature instead.
     "Transaction has an ancient birth block",
     // Transport, not verdict: the subscription or the socket died while the
     // transaction was in flight. It may already be in a pool holding our nonce,
@@ -862,8 +873,11 @@ const REGISTRATION_PALLETS: &[&str] = &["PeopleLite::", "Resources::"];
 
 /// Errors from [`REGISTRATION_PALLETS`] that are about the attester or the
 /// network, not the row. Every row in the outbox would get the same answer, so
-/// failing on them at once would empty the queue in one pass. They keep the
-/// ordinary retry budget.
+/// failing on them would empty the queue: at once on the first pass, or within
+/// minutes if they spent the retry budget. They park instead, like an unfunded
+/// signer: the row waits [`PARK_BACKOFF_SECS`] at an unchanged attempt and is
+/// never failed for it. Unlike an unfunded signer these are dispatch errors,
+/// so each parked pass pays one transaction fee for the batch it submitted.
 ///
 /// `PeopleLite::AlreadyRegistered` is not listed. It means success and is
 /// handled before this check.
@@ -878,13 +892,17 @@ const NOT_THE_ROWS_FAULT: &[&str] = &[
     "PeopleLite::LitePeopleCollectionNotCreated",
 ];
 
+fn is_attester_condition(reason: &str) -> bool {
+    NOT_THE_ROWS_FAULT
+        .iter()
+        .any(|error| reason.contains(error))
+}
+
 fn is_deterministic_rejection(reason: &str) -> bool {
     REGISTRATION_PALLETS
         .iter()
         .any(|pallet| reason.contains(pallet))
-        && !NOT_THE_ROWS_FAULT
-            .iter()
-            .any(|error| reason.contains(error))
+        && !is_attester_condition(reason)
 }
 
 pub(super) fn terminal_reason(reason: &str) -> String {
@@ -904,7 +922,7 @@ pub(super) fn classify_submit_failure(
 ) -> SubmitFailureAction {
     if observed_owner == Some(candidate) || reason.contains(ALREADY_REGISTERED) {
         SubmitFailureAction::Assign
-    } else if reason.contains(UNFUNDED_SIGNER) {
+    } else if reason.contains(UNFUNDED_SIGNER) || is_attester_condition(reason) {
         SubmitFailureAction::Park
     } else if is_signer_contention(reason) {
         // Deliberately ahead of the max-attempts check: a row that has already
@@ -972,21 +990,23 @@ mod tests {
     }
 
     #[test]
-    fn a_registration_error_about_the_attester_keeps_the_retry_budget() {
-        // Every row would get these, so failing on the first pass would empty
-        // the outbox at once.
+    fn a_registration_error_about_the_attester_parks_and_never_fails_the_row() {
+        // Every row would get these, so failing on them, at once or once the
+        // budget ran out, would empty the outbox.
         let candidate = [7; 32];
         for error in NOT_THE_ROWS_FAULT {
             let reason = format!("proxied call failed: {error}");
+            for completed in [1, 8, 99] {
+                assert_eq!(
+                    classify_submit_failure(&reason, None, candidate, completed, 8),
+                    SubmitFailureAction::Park,
+                    "{error} is not the row's fault (attempt {completed})"
+                );
+            }
             assert_eq!(
-                classify_submit_failure(&reason, None, candidate, 1, 8),
-                SubmitFailureAction::Retry,
-                "{error} is not the row's fault"
-            );
-            assert_eq!(
-                classify_submit_failure(&reason, None, candidate, 8, 8),
-                SubmitFailureAction::Fail,
-                "{error} still ends when the budget does"
+                classify_submit_failure(&reason, Some(candidate), candidate, 99, 8),
+                SubmitFailureAction::Assign,
+                "a row the chain shows as landed is landed"
             );
         }
     }

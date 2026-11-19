@@ -119,9 +119,11 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
   not included in that window is dropped and the row is resubmitted under a
   fresh nonce. The window counts from the finalized block, or from the best
   block while finality lags more than 32 blocks behind it, so a finality stall
-  cannot make every transaction dead on arrival and fail the outbox. A pool
-  rejection for an ancient birth block defers the row without spending an
-  attempt.
+  cannot make every transaction dead on arrival and fail the outbox. The node
+  refuses an expired transaction as `Transaction has a bad signature` (the
+  runtime checks it against a later block's hash), and a birth block reorged
+  off the best chain the same way. The writer defers either, like an ancient
+  birth block, without spending an attempt, and signs afresh on the next pass.
 - **A rejected claim fails on the first pass instead of paying for eight.**
   The writer used to fail at once only on three `Resources` reservation
   errors. Any other rejection of the claim, such as a bad
@@ -131,8 +133,9 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
   dispatch error fails the row immediately, except four that are about the
   attester or the network: `NoAttestationAllowance`,
   `PaidRegistrationLimitReached`, `TooManyLitePeople` and
-  `LitePeopleCollectionNotCreated`. Those, and errors from other pallets or
-  the transport, keep the retry budget.
+  `LitePeopleCollectionNotCreated`. Those park the row like an unfunded
+  signer, so running out of attestation allowance can no longer fail the whole
+  outbox. Errors from other pallets or the transport keep the retry budget.
 - **`all-in-one` serves `/api/v1/turn/issue-with-proof`.** It verifies proofs
   against the People Chain's rings, as `turn-api` does, where it used to
   answer every one with `503 ring roots not yet available`.
