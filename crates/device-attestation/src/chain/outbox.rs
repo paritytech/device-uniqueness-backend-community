@@ -254,15 +254,38 @@ where
     Ok(row.try_get::<i64, _>("id")?)
 }
 
+/// How long a `FAILED_TERMINAL` row keeps its discriminator after it failed.
+///
+/// A failed row can still have a transaction in flight: the last submission
+/// may have timed out rather than been rejected. Every People transaction the
+/// writer signs is mortal for
+/// [`PEOPLE_TX_MORTALITY_BLOCKS`](super::writer::PEOPLE_TX_MORTALITY_BLOCKS),
+/// so once that many blocks have passed it can no longer land. This hold
+/// covers that window at a conservative block time, with room for a stalled
+/// chain. Releasing too early is not a uniqueness violation, since the chain
+/// enforces that; it only means a new claim on the same name may fail on chain.
+///
+/// Measured from `updated_at`, which is stamped when the row turns
+/// `FAILED_TERMINAL` and not written again afterwards. Anything that touched it
+/// later would only lengthen the hold.
+pub const FAILED_DISCRIMINATOR_HOLD: time::Duration = time::Duration::minutes(30);
+
+/// The discriminators the outbox holds under `base`: every row that can still
+/// land, plus `FAILED_TERMINAL` rows failed within
+/// [`FAILED_DISCRIMINATOR_HOLD`]. Older failed rows release theirs, so failed
+/// claims cannot exhaust a base permanently.
 pub async fn allocated_discriminators(
     pool: &PgPool,
     base: &str,
 ) -> Result<BTreeSet<u8>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT digits FROM username_reservations \
-         WHERE base = $1",
+         WHERE base = $1 \
+           AND (status <> 'FAILED_TERMINAL' \
+                OR updated_at > now() - make_interval(secs => $2::float8))",
     )
     .bind(base)
+    .bind(FAILED_DISCRIMINATOR_HOLD.whole_seconds())
     .fetch_all(pool)
     .await?;
 

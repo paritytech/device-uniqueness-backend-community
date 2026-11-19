@@ -4,7 +4,10 @@
 use anyhow::Result;
 use chain_types::{PeopleConfig, PeopleExtrinsicParamsBuilder};
 use sqlx::PgPool;
-use subxt::{dynamic::Value, tx::DynamicPayload, utils::AccountId32};
+use subxt::{
+    config::transaction_extensions::CheckMortalityParams, dynamic::Value, tx::DynamicPayload,
+    utils::AccountId32,
+};
 use time::OffsetDateTime;
 
 use super::link::PeopleRuntime;
@@ -280,7 +283,12 @@ async fn sign(
     >,
 > {
     let payload = People::tx(rows, cx.proxy_for.as_ref());
-    let params = PeopleExtrinsicParamsBuilder::new().nonce(nonce).build();
+    let params = PeopleExtrinsicParamsBuilder::new()
+        .nonce(nonce)
+        .mortality(CheckMortalityParams::mortal(
+            super::PEOPLE_TX_MORTALITY_BLOCKS,
+        ))
+        .build();
     let at = chain.online().at_current_block().await?;
     Ok(chain_client::create_signed_v4(&at, &payload, cx.signer, params).await?)
 }

@@ -84,6 +84,16 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ### Fixed
 
+- **A failed claim no longer holds its username for ever.** A
+  `FAILED_TERMINAL` outbox row used to keep its discriminator permanently, so
+  99 failed claims, garbage ones included, exhausted a base for good. It now
+  releases the discriminator 30 minutes after failing
+  (`FAILED_DISCRIMINATOR_HOLD`). Migration `0012` replaces the table-wide
+  unique constraint on `full_username` with a partial unique index that skips
+  failed rows. To make the release safe, People registration transactions are
+  now **mortal for 64 blocks** where they used to be immortal: a transaction
+  not included in that window is dropped and the row is resubmitted under a
+  fresh nonce.
 - **`all-in-one` serves `/api/v1/turn/issue-with-proof`.** It verifies proofs
   against the People Chain's rings, as `turn-api` does, where it used to
   answer every one with `503 ring roots not yet available`.

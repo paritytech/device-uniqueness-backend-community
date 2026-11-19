@@ -250,6 +250,15 @@ Operational invariants an agent must respect when touching the code.
   lane existed. Which People reads run is decided from the `attest` shape at the block the
   request reads, as for the payload version. `device-attestation-api` reads Asset Hub through a
   read-only client and never submits there.
+- **A failed claim gives its discriminator back.** The outbox's share of the taken set is every
+  row that can still land, plus `FAILED_TERMINAL` rows for `FAILED_DISCRIMINATOR_HOLD` (30 min)
+  after they failed. Usernames are unique only among rows that are not `FAILED_TERMINAL` (a partial
+  unique index), so a failed claim can neither exhaust a base nor block its own name for good.
+  The hold is what makes the release safe. Every People transaction the writer signs is mortal
+  for `PEOPLE_TX_MORTALITY_BLOCKS` (64), and the hold covers that window twice over at a 12 s
+  block time, so a transaction still in flight for a failed row is dead before its name is offered
+  again. If it lands anyway, the chain read above reports the name as taken, and the chain enforces
+  uniqueness regardless. Failed rows are kept for their `last_error`, not deleted.
 - **The reservation leg is checked on the dotNS contracts too.** The gateway forwards a claim's
   `reserved_base_label` to `DotnsPopController`, which reverts, device name and all, when the
   name exists on `DotnsRegistrar`, holds a live grant on the name whitelist, or its reservation
