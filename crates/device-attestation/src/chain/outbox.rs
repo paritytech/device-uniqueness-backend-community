@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use std::collections::BTreeSet;
+use std::num::NonZeroU16;
 
 use sqlx::{PgPool, Row as _};
 use time::OffsetDateTime;
@@ -181,8 +182,76 @@ pub struct NewReservation {
 pub enum InsertError {
     #[error("username already taken")]
     Conflict,
+    /// The base already holds its cap of claims that can still land. Only
+    /// [`insert_capped`] returns this.
+    #[error("too many open claims for this base")]
+    BaseBusy,
     #[error(transparent)]
     Db(#[from] sqlx::Error),
+}
+
+/// Advisory-lock class for [`insert_capped`]. The second key is
+/// `hashtext(base)`, so claims on different bases never wait on each other.
+/// Two-key advisory locks never collide with single-key ones such as the
+/// DeviceCheck claim lock.
+const OPEN_CLAIMS_LOCK_CLASS: i32 = 0x0DB0_0C1A;
+
+/// Insert a claim, refusing it with [`InsertError::BaseBusy`] when its base
+/// already holds `max_open` rows that can still land: `QUEUED`, `RESERVED`,
+/// `SUBMITTING` or `RETRY_AFTER`. `None` inserts without a cap.
+///
+/// This is what stops one party from cycling claims to keep a base full. Once
+/// failed rows give their discriminators back, the open rows are what an
+/// attacker has to keep alive, and this bounds how many there can be.
+///
+/// The count and the insert run under a per-base advisory lock in one
+/// transaction, so concurrent claims cannot both pass at `max_open - 1`. On a
+/// caller's transaction it runs as a savepoint, and the lock is held until the
+/// caller commits. `queue_group` is `Some` for the `QUEUED` intake lane.
+pub async fn insert_capped<'a, A>(
+    conn: A,
+    r: &NewReservation,
+    queue_group: Option<i32>,
+    max_open: Option<NonZeroU16>,
+) -> Result<i64, InsertError>
+where
+    A: sqlx::Acquire<'a, Database = sqlx::Postgres>,
+{
+    let mut tx = conn.begin().await?;
+    if let Some(max_open) = max_open {
+        sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2))")
+            .bind(OPEN_CLAIMS_LOCK_CLASS)
+            .bind(&r.base)
+            .execute(&mut *tx)
+            .await?;
+        if open_claims(&mut *tx, &r.base).await? >= i64::from(max_open.get()) {
+            return Err(InsertError::BaseBusy);
+        }
+    }
+    let id = match queue_group {
+        Some(group) => insert_with(&mut *tx, r, Status::Queued, group).await?,
+        None => insert_with(&mut *tx, r, Status::Reserved, 1).await?,
+    };
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// How many rows under `base` can still land: every status but `ASSIGNED`
+/// and `FAILED_TERMINAL`.
+pub async fn open_claims<'e, E>(executor: E, base: &str) -> Result<i64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let sql = format!(
+        "SELECT count(*) FROM username_reservations \
+         WHERE base = $1 AND status NOT IN ('{assigned}', '{failed}')",
+        assigned = Status::Assigned.as_str(),
+        failed = Status::FailedTerminal.as_str(),
+    );
+    sqlx::query_scalar(&sql)
+        .bind(base)
+        .fetch_one(executor)
+        .await
 }
 
 pub async fn insert<'e, E>(executor: E, r: &NewReservation) -> Result<i64, InsertError>

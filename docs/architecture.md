@@ -259,6 +259,16 @@ Operational invariants an agent must respect when touching the code.
   block time, so a transaction still in flight for a failed row is dead before its name is offered
   again. If it lands anyway, the chain read above reports the name as taken, and the chain enforces
   uniqueness regardless. Failed rows are kept for their `last_error`, not deleted.
+- **A base holds a bounded number of open claims.** Releasing failed rows makes squatting by
+  failure temporary, but someone can still keep a base full by cycling claims that are meant to
+  fail. Intake therefore refuses a claim with `409` when its base already holds
+  `USERNAME_MAX_OPEN_CLAIMS_PER_BASE` (default 10) rows that can still land: `QUEUED`, `RESERVED`,
+  `SUBMITTING` or `RETRY_AFTER`. The count and the insert run in one transaction under a per-base
+  advisory lock (`outbox::insert_capped`), so concurrent claims cannot both pass at the last slot.
+  Voucher claims skip the cap: vouchers are minted by the operator and single-use, so they cannot
+  drive a cycling attack, and capping them would let an attacker block a voucher holder. The cap
+  is also something an attacker can occupy. Keeping it small and failing rejected claims on the
+  first pass (see the writer's deterministic rejections) keeps each slot held only briefly.
 - **The reservation leg is checked on the dotNS contracts too.** The gateway forwards a claim's
   `reserved_base_label` to `DotnsPopController`, which reverts, device name and all, when the
   name exists on `DotnsRegistrar`, holds a live grant on the name whitelist, or its reservation

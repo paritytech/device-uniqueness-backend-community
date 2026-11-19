@@ -934,6 +934,7 @@ you expect.
 
 | Symptom | Action |
 |---|---|
+| `POST /api/v1/usernames` answers `409` `Too many pending claims for username <base>` | The base already holds `USERNAME_MAX_OPEN_CLAIMS_PER_BASE` (default 10) claims that are still `QUEUED`, `RESERVED`, `SUBMITTING` or `RETRY_AFTER`. It clears as they land or fail. To see who holds them: `select account_id, status, count(*) from username_reservations where base = '<base>' and status not in ('ASSIGNED','FAILED_TERMINAL') group by 1, 2;`. Many fresh subjects holding one base is someone trying to exhaust it. A popular base hitting the cap with a long queue (`QUEUE_ENABLED`) is honest load: raise the cap, or set it to `0` to disable it. |
 | `POST /api/v1/usernames` answers `503` `INTAKE_PAUSED` | `INTAKE_PAUSED=true` is set for an [outbox drain](#draining-the-outbox-for-a-people-runtime-upgrade). Unset it once the upgrade is through. |
 | `readyz`: `chain: down` | People Chain RPC unreachable or changed — check `PEOPLE_RPC_URL`. |
 | `readyz`: `asset_hub: down` | Asset Hub RPC unreachable — check `ASSET_HUB_RPC_URL`. Only `device-attestation-api` (and `all-in-one`) gate on it: availability and registration read `LiteLabelOwner` there. |

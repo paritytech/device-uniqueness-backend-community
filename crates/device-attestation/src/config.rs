@@ -51,6 +51,12 @@ pub struct Config {
     /// new row enters the outbox while the writer finishes the ones there.
     /// Set ahead of a People runtime upgrade that changes `attest`.
     pub intake_paused: bool,
+    /// The most claims that can still land (`QUEUED`, `RESERVED`, `SUBMITTING`,
+    /// `RETRY_AFTER`) one username base may hold at once
+    /// (`USERNAME_MAX_OPEN_CLAIMS_PER_BASE`, default 10). Another claim on that
+    /// base gets a `409` until one of them settles. `None` (set to `0`) means
+    /// no cap. Voucher claims are never capped.
+    pub max_open_claims_per_base: Option<std::num::NonZeroU16>,
     /// Max age, in seconds, of `dotns.signedAt` (the intake freshness bound).
     pub dotns_intake_freshness_max_age_secs: u32,
     /// Max future skew, in seconds, tolerated on `dotns.signedAt`.
@@ -227,6 +233,10 @@ impl Config {
             queue_enabled: env_bool("QUEUE_ENABLED", false)?,
             registration_vouchers_enabled: env_bool("REGISTRATION_VOUCHERS_ENABLED", false)?,
             intake_paused: env_bool("INTAKE_PAUSED", false)?,
+            max_open_claims_per_base: std::num::NonZeroU16::new(parse_var(
+                "USERNAME_MAX_OPEN_CLAIMS_PER_BASE",
+                "10",
+            )?),
             dotns_intake_freshness_max_age_secs: parse_var(
                 "DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS",
                 "600",
@@ -280,6 +290,7 @@ impl Config {
             queue_enabled: false,
             registration_vouchers_enabled: false,
             intake_paused: false,
+            max_open_claims_per_base: std::num::NonZeroU16::new(10),
             dotns_intake_freshness_max_age_secs: 600,
             dotns_max_future_skew_secs: 600,
             apple_app_attest_app_ids: Vec::new(),

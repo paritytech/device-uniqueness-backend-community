@@ -10,6 +10,14 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ### Added
 
+- **A username base takes at most 10 open claims at a time
+  (`USERNAME_MAX_OPEN_CLAIMS_PER_BASE`, `0` disables).** A claim on a base
+  that already holds that many `QUEUED`, `RESERVED`, `SUBMITTING` or
+  `RETRY_AFTER` rows gets a `409` (`Too many pending claims for username
+  <base>. Try again later or choose another name.`) until one of them lands or
+  fails. This bounds how many discriminators someone can hold at once by
+  cycling claims that are meant to fail. Concurrent claims are serialised per
+  base, so the cap holds under load. Voucher claims are exempt.
 - **The writer can settle dotNS pending claims (`DOTNS_SETTLE_ENABLED`, off
   by default).** A gateway-minted name whose owner has no `LabelStore` stays a
   pending claim on `DotnsPopController`, with no label in a store and no

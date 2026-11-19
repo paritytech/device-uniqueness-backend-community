@@ -129,7 +129,11 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
             outcome.",
          body = serde_json::Value,
          example = json!({ "error": "DEVICE_EVIDENCE_INVALID", "message": "device evidence invalid" })),
-        (status = 409, description = "Preferred digits taken, no digits available, username taken, or \
+        (status = 409, description = "Preferred digits taken, no digits available, username taken, \
+            too many pending claims for the base (it already holds \
+            `USERNAME_MAX_OPEN_CLAIMS_PER_BASE` claims, default 10, that have not yet landed or failed; \
+            `{\"error\": \"Too many pending claims for username <base>. Try again later or choose another \
+            name.\"}`; temporary, and voucher claims are exempt), or \
             the claim carries `dotns.reservedUsername` for a personhood name that is already owned \
             or whose reservation queue is full — checked against the reserved name itself, which \
             `attest` takes as its own argument and which need not be `username`. The runtime checks \
@@ -556,15 +560,20 @@ async fn reserve(
         base: new.base.clone(),
         digits: new.digits.clone(),
     };
+    let busy = || UsernamesError::BaseBusy {
+        base: new.base.clone(),
+    };
+    let cap = state.config.max_open_claims_per_base;
 
     if let Some(device) = widevine_device {
         let mut tx = state.pool.begin().await.map_err(|e| {
             tracing::error!(error = ?e, "begin reservation transaction failed");
             UsernamesError::PersistenceFailed
         })?;
-        let id = match insert_reservation(&mut *tx, new, queue_group).await {
+        let id = match insert_reservation(&mut *tx, new, queue_group, cap).await {
             Ok(id) => id,
             Err(InsertError::Conflict) => return Err(conflict()),
+            Err(InsertError::BaseBusy) => return Err(busy()),
             Err(InsertError::Db(e)) => {
                 tracing::error!(error = ?e, "reservation outbox insert failed");
                 return Err(UsernamesError::PersistenceFailed);
@@ -590,9 +599,10 @@ async fn reserve(
     }
 
     let Some(token) = mark_token else {
-        return match insert_reservation(&state.pool, new, queue_group).await {
+        return match insert_reservation(&state.pool, new, queue_group, cap).await {
             Ok(id) => Ok(ReserveOutcome::Reserved(id)),
             Err(InsertError::Conflict) => Err(conflict()),
+            Err(InsertError::BaseBusy) => Err(busy()),
             Err(InsertError::Db(e)) => {
                 tracing::error!(error = ?e, "reservation outbox insert failed");
                 Err(UsernamesError::PersistenceFailed)
@@ -642,9 +652,10 @@ async fn reserve(
 
     // Insert first: an insert failure leaves the transaction untouched and
     // never marks the device, so the slot is preserved.
-    let id = match insert_reservation(&mut *tx, new, queue_group).await {
+    let id = match insert_reservation(&mut *tx, new, queue_group, cap).await {
         Ok(id) => id,
         Err(InsertError::Conflict) => return Err(conflict()),
+        Err(InsertError::BaseBusy) => return Err(busy()),
         Err(InsertError::Db(e)) => {
             tracing::error!(error = ?e, "reservation outbox insert failed");
             return Err(UsernamesError::PersistenceFailed);
@@ -669,20 +680,19 @@ async fn reserve(
 }
 
 /// Insert the outbox row on either intake lane: `QUEUED` with its priority
-/// group when the queue lane is on, plain `RESERVED` otherwise. Generic over
-/// the executor so it runs on the pool or inside the DeviceCheck transaction.
-async fn insert_reservation<'e, E>(
-    executor: E,
+/// group when the queue lane is on, plain `RESERVED` otherwise. Refused with
+/// [`InsertError::BaseBusy`] when the base already holds `cap` open claims.
+/// Runs on the pool, or inside the DeviceCheck or Widevine transaction.
+async fn insert_reservation<'a, A>(
+    conn: A,
     new: &NewReservation,
     queue_group: Option<u8>,
+    cap: Option<std::num::NonZeroU16>,
 ) -> Result<i64, InsertError>
 where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    A: sqlx::Acquire<'a, Database = sqlx::Postgres>,
 {
-    match queue_group {
-        Some(group) => outbox::insert_queued(executor, new, i32::from(group)).await,
-        None => outbox::insert(executor, new).await,
-    }
+    outbox::insert_capped(conn, new, queue_group.map(i32::from), cap).await
 }
 
 /// Assemble the outbox row from the validated request (shared by the voucher

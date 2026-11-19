@@ -131,6 +131,9 @@ pub async fn redeem_and_reserve(
     }
     let id = outbox::insert(&mut *tx, new).await.map_err(|e| match e {
         InsertError::Conflict => RedeemError::Conflict,
+        // `insert` never caps: voucher claims are exempt from the per-base
+        // limit, so this arm is unreachable.
+        InsertError::BaseBusy => RedeemError::Conflict,
         InsertError::Db(e) => RedeemError::Db(e),
     })?;
     tx.commit().await?;

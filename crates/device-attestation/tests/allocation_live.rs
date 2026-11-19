@@ -125,3 +125,108 @@ async fn a_failed_row_does_not_block_its_username_being_claimed_again() {
 
     clean(&pool, &base).await;
 }
+
+fn cap(n: u16) -> Option<std::num::NonZeroU16> {
+    std::num::NonZeroU16::new(n)
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres; set DEVICE_ATTESTATION_TEST_DATABASE_URL and run with --ignored"]
+async fn a_base_takes_no_more_open_claims_than_its_cap() {
+    let pool = connect().await;
+    let base = format!("captest{}", std::process::id());
+
+    let mut ids = Vec::new();
+    for digits in ["31", "32", "33"] {
+        ids.push(
+            outbox::insert_capped(&pool, &reservation(&base, digits), None, cap(3))
+                .await
+                .expect("under the cap"),
+        );
+    }
+    assert!(
+        matches!(
+            outbox::insert_capped(&pool, &reservation(&base, "34"), Some(1), cap(3)).await,
+            Err(InsertError::BaseBusy)
+        ),
+        "a fourth open claim is refused, on the queued lane too"
+    );
+    assert_eq!(outbox::open_claims(&pool, &base).await.unwrap(), 3);
+
+    // A claim that lands or fails frees its slot.
+    set_status(&pool, ids[0], Status::Assigned, time::Duration::ZERO).await;
+    outbox::insert_capped(&pool, &reservation(&base, "34"), None, cap(3))
+        .await
+        .expect("an assigned claim no longer counts");
+    set_status(&pool, ids[1], Status::FailedTerminal, time::Duration::ZERO).await;
+    outbox::insert_capped(&pool, &reservation(&base, "35"), Some(1), cap(3))
+        .await
+        .expect("a failed claim no longer counts");
+    assert!(matches!(
+        outbox::insert_capped(&pool, &reservation(&base, "36"), None, cap(3)).await,
+        Err(InsertError::BaseBusy)
+    ));
+
+    // Another base is unaffected, and no cap means no limit.
+    let other = format!("{base}x");
+    outbox::insert_capped(&pool, &reservation(&other, "31"), None, cap(3))
+        .await
+        .expect("caps are per base");
+    outbox::insert_capped(&pool, &reservation(&base, "36"), None, None)
+        .await
+        .expect("an uncapped insert ignores the count");
+
+    clean(&pool, &base).await;
+    clean(&pool, &other).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres; set DEVICE_ATTESTATION_TEST_DATABASE_URL and run with --ignored"]
+async fn concurrent_claims_never_exceed_the_cap() {
+    let pool = connect().await;
+    let base = format!("capracetest{}", std::process::id());
+
+    let attempts = (40..60u8).map(|digits| {
+        let pool = pool.clone();
+        let new = reservation(&base, &digits.to_string());
+        tokio::spawn(async move { outbox::insert_capped(&pool, &new, None, cap(5)).await })
+    });
+    let mut stored = 0;
+    let mut refused = 0;
+    for attempt in attempts {
+        match attempt.await.expect("task") {
+            Ok(_) => stored += 1,
+            Err(InsertError::BaseBusy) => refused += 1,
+            Err(e) => panic!("unexpected insert error: {e}"),
+        }
+    }
+    assert_eq!((stored, refused), (5, 15));
+    assert_eq!(outbox::open_claims(&pool, &base).await.unwrap(), 5);
+
+    clean(&pool, &base).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres; set DEVICE_ATTESTATION_TEST_DATABASE_URL and run with --ignored"]
+async fn a_refused_claim_leaves_the_callers_transaction_usable() {
+    let pool = connect().await;
+    let base = format!("captxtest{}", std::process::id());
+    outbox::insert_capped(&pool, &reservation(&base, "51"), None, cap(1))
+        .await
+        .expect("first claim");
+
+    let mut tx = pool.begin().await.expect("begin");
+    assert!(matches!(
+        outbox::insert_capped(&mut *tx, &reservation(&base, "52"), None, cap(1)).await,
+        Err(InsertError::BaseBusy)
+    ));
+    // The refusal rolled back only its savepoint.
+    let one: i32 = sqlx::query_scalar("SELECT 1")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("the outer transaction is still usable");
+    assert_eq!(one, 1);
+    tx.commit().await.expect("commit");
+
+    clean(&pool, &base).await;
+}
