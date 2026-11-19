@@ -30,10 +30,11 @@ pub enum UsernamesError {
     },
     #[error("no digits available")]
     NoDigitsAvailable { base: String },
-    /// The base already holds `USERNAME_MAX_OPEN_CLAIMS_PER_BASE` claims that
-    /// can still land (409). Temporary: it clears as those claims settle.
-    #[error("too many open claims for base")]
-    BaseBusy { base: String },
+    /// The subject already holds `USERNAME_MAX_OPEN_CLAIMS_PER_SUBJECT` open
+    /// claims (409). Temporary: it clears as they land or their failures age
+    /// out.
+    #[error("too many open claims for subject")]
+    TooManyOpenClaims,
     /// The selected `base.digits` was taken concurrently (409).
     #[error("username already taken")]
     UsernameTaken {
@@ -125,13 +126,11 @@ impl IntoResponse for UsernamesError {
                 Json(json!({ "error": format!("No digits available for username {base}.") })),
             )
                 .into_response(),
-            UsernamesError::BaseBusy { base } => (
+            UsernamesError::TooManyOpenClaims => (
                 StatusCode::CONFLICT,
                 Json(json!({
-                    "error": format!(
-                        "Too many pending claims for username {base}. \
-                         Try again later or choose another name."
-                    )
+                    "error": "Too many pending username claims for this account. \
+                              Try again once one completes."
                 })),
             )
                 .into_response(),

@@ -262,20 +262,27 @@ Operational invariants an agent must respect when touching the code.
   that window twice over at a 12 s block time, so a transaction still in flight for a failed row is dead before its name is offered
   again. If it lands anyway, the chain read above reports the name as taken, and the chain enforces
   uniqueness regardless. Failed rows are kept for their `last_error`, not deleted.
-- **A base holds a bounded number of open claims.** Releasing failed rows makes squatting by
+- **A claimant holds a bounded number of open claims.** Releasing failed rows makes squatting by
   failure temporary, but someone can still keep a base full by cycling claims that are meant to
-  fail. Intake therefore refuses a claim with `409` when its base already holds
-  `USERNAME_MAX_OPEN_CLAIMS_PER_BASE` (default 10) open claims: rows that are not `ASSIGNED` and
-  still hold a discriminator, i.e. `QUEUED`, `RESERVED`, `SUBMITTING`, `RETRY_AFTER`, and
-  `FAILED_TERMINAL` within `FAILED_DISCRIMINATOR_HOLD`. Counting recent failures is what bounds
-  the attack: if a failure freed its slot at once, each slot could be cycled every minute while
-  every failure kept its discriminator for 30, and ten slots would hold the whole base. The count
-  shares its predicate with the taken-set read, so the two cannot drift. The count and the insert run in one transaction under a per-base
-  advisory lock (`outbox::insert_capped`), so concurrent claims cannot both pass at the last slot.
+  fail. Intake therefore refuses a claim with `409` when its JWT subject (`account_id`, the
+  abuse-control key, below) already holds `USERNAME_MAX_OPEN_CLAIMS_PER_SUBJECT` (default 3) open
+  claims, on any base: rows that are not `ASSIGNED` and still hold a discriminator, i.e. `QUEUED`,
+  `RESERVED`, `SUBMITTING`, `RETRY_AFTER`, and `FAILED_TERMINAL` within
+  `FAILED_DISCRIMINATOR_HOLD`. Counting recent failures is what bounds the attack: if a failure
+  freed its slot at once, each slot could be cycled every minute while every failure kept its
+  discriminator for 30. The count shares its predicate with the taken-set read, so the two cannot
+  drift. The cap is per claimant rather than per base on purpose: a per-base cap is itself
+  something an attacker can fill, locking everyone else out of a name with a handful of claims.
+  Per subject, a claimant can only use up its own allowance. The cost is that the bound on one base
+  is only as strong as subjects are expensive: exhausting a base's 100 discriminators takes
+  roughly 100 / cap subjects. With platform attestation enforced each subject is a real device;
+  in M0 mode (`AUTH_ENABLED=false`) subjects are free, and the per-subject rate limit and the
+  writer's signature gates are what remain. The count and the insert run in one transaction under
+  a per-subject advisory lock (`outbox::insert_capped`), so concurrent claims cannot both pass at
+  the last slot, and claims by different subjects never wait on each other (a hard-mode iOS claim
+  holds the lock across its DeviceCheck call, and only that subject's other claims wait on it).
   Voucher claims skip the cap: vouchers are minted by the operator and single-use, so they cannot
-  drive a cycling attack, and capping them would let an attacker block a voucher holder. The cap
-  is also something an attacker can occupy. Keeping it small and failing rejected claims on the
-  first pass (see the writer's deterministic rejections) keeps each slot held only briefly.
+  drive a cycling attack.
 - **The reservation leg is checked on the dotNS contracts too.** The gateway forwards a claim's
   `reserved_base_label` to `DotnsPopController`, which reverts, device name and all, when the
   name exists on `DotnsRegistrar`, holds a live grant on the name whitelist, or its reservation

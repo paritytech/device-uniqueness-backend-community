@@ -10,17 +10,19 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ### Added
 
-- **A username base takes at most 10 open claims at a time
-  (`USERNAME_MAX_OPEN_CLAIMS_PER_BASE`, `0` disables).** An open claim is a
+- **A JWT subject holds at most 3 open username claims at a time
+  (`USERNAME_MAX_OPEN_CLAIMS_PER_SUBJECT`, `0` disables).** An open claim is a
   row that has not landed and still holds a discriminator: `QUEUED`,
   `RESERVED`, `SUBMITTING` or `RETRY_AFTER`, or `FAILED_TERMINAL` within the
-  30 minutes its discriminator is held. A claim on a base that already holds
-  that many gets a `409` (`Too many pending claims for username <base>. Try
-  again later or choose another name.`) until one lands or a failure ages out.
-  Because recent failures count, a claim that fails fast frees no slot early,
-  so cycling claims that are meant to fail cannot hold more than the cap's
-  worth of discriminators. Concurrent claims are serialised per base, so the
-  cap holds under load. Voucher claims are exempt.
+  30 minutes its discriminator is held. The count spans every base. A subject
+  that already holds that many gets a `409` (`Too many pending username claims
+  for this account. Try again once one completes.`) until one lands or a
+  failure ages out. Because recent failures count, a claim that fails fast
+  frees no slot early, so one subject cycling claims that are meant to fail
+  cannot hold more than the cap's worth of discriminators. The cap is the
+  subject's own, so other subjects' claims never use it up. Concurrent claims
+  are serialised per subject, so the cap holds under load. Voucher claims are
+  exempt. Migration `0013` indexes the count.
 - **`consumerRegistrationSignature` is verified, at intake and before
   submission.** It used to be checked for shape only, so a claim with a
   correct `candidateSignature` and random bytes here was accepted, took a

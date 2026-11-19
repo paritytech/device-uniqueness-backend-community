@@ -132,11 +132,11 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
          body = serde_json::Value,
          example = json!({ "error": "DEVICE_EVIDENCE_INVALID", "message": "device evidence invalid" })),
         (status = 409, description = "Preferred digits taken, no digits available, username taken, \
-            too many pending claims for the base (it already holds \
-            `USERNAME_MAX_OPEN_CLAIMS_PER_BASE` claims, default 10, that have not landed and still \
-            hold a discriminator: in flight, or failed within the last 30 minutes; \
-            `{\"error\": \"Too many pending claims for username <base>. Try again later or choose another \
-            name.\"}`; temporary, and voucher claims are exempt), or \
+            too many pending claims for the authenticated account (it already holds \
+            `USERNAME_MAX_OPEN_CLAIMS_PER_SUBJECT` claims, default 3, on any base, that have not \
+            landed and still hold a discriminator: in flight, or failed within the last 30 minutes; \
+            `{\"error\": \"Too many pending username claims for this account. Try again once one \
+            completes.\"}`; temporary, and voucher claims are exempt), or \
             the claim carries `dotns.reservedUsername` for a personhood name that is already owned \
             or whose reservation queue is full — checked against the reserved name itself, which \
             `attest` takes as its own argument and which need not be `username`. The runtime checks \
@@ -563,10 +563,8 @@ async fn reserve(
         base: new.base.clone(),
         digits: new.digits.clone(),
     };
-    let busy = || UsernamesError::BaseBusy {
-        base: new.base.clone(),
-    };
-    let cap = state.config.max_open_claims_per_base;
+    let busy = || UsernamesError::TooManyOpenClaims;
+    let cap = state.config.max_open_claims_per_subject;
 
     if let Some(device) = widevine_device {
         let mut tx = state.pool.begin().await.map_err(|e| {
@@ -576,7 +574,7 @@ async fn reserve(
         let id = match insert_reservation(&mut *tx, new, queue_group, cap).await {
             Ok(id) => id,
             Err(InsertError::Conflict) => return Err(conflict()),
-            Err(InsertError::BaseBusy) => return Err(busy()),
+            Err(InsertError::TooManyOpenClaims) => return Err(busy()),
             Err(InsertError::Db(e)) => {
                 tracing::error!(error = ?e, "reservation outbox insert failed");
                 return Err(UsernamesError::PersistenceFailed);
@@ -605,7 +603,7 @@ async fn reserve(
         return match insert_reservation(&state.pool, new, queue_group, cap).await {
             Ok(id) => Ok(ReserveOutcome::Reserved(id)),
             Err(InsertError::Conflict) => Err(conflict()),
-            Err(InsertError::BaseBusy) => Err(busy()),
+            Err(InsertError::TooManyOpenClaims) => Err(busy()),
             Err(InsertError::Db(e)) => {
                 tracing::error!(error = ?e, "reservation outbox insert failed");
                 Err(UsernamesError::PersistenceFailed)
@@ -658,7 +656,7 @@ async fn reserve(
     let id = match insert_reservation(&mut *tx, new, queue_group, cap).await {
         Ok(id) => id,
         Err(InsertError::Conflict) => return Err(conflict()),
-        Err(InsertError::BaseBusy) => return Err(busy()),
+        Err(InsertError::TooManyOpenClaims) => return Err(busy()),
         Err(InsertError::Db(e)) => {
             tracing::error!(error = ?e, "reservation outbox insert failed");
             return Err(UsernamesError::PersistenceFailed);
@@ -684,7 +682,8 @@ async fn reserve(
 
 /// Insert the outbox row on either intake lane: `QUEUED` with its priority
 /// group when the queue lane is on, plain `RESERVED` otherwise. Refused with
-/// [`InsertError::BaseBusy`] when the base already holds `cap` open claims.
+/// [`InsertError::TooManyOpenClaims`] when the subject already holds `cap`
+/// open claims.
 /// Runs on the pool, or inside the DeviceCheck or Widevine transaction.
 async fn insert_reservation<'a, A>(
     conn: A,

@@ -182,30 +182,31 @@ pub struct NewReservation {
 pub enum InsertError {
     #[error("username already taken")]
     Conflict,
-    /// The base already holds its cap of claims that can still land. Only
+    /// The claimant already holds its cap of [open claims](open_claims). Only
     /// [`insert_capped`] returns this.
-    #[error("too many open claims for this base")]
-    BaseBusy,
+    #[error("too many open claims for this account")]
+    TooManyOpenClaims,
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
 
 /// Advisory-lock class for [`insert_capped`]. The second key is
-/// `hashtext(base)`, so claims on different bases never wait on each other.
-/// Two-key advisory locks never collide with single-key ones such as the
-/// DeviceCheck claim lock.
+/// `hashtext(account_id)`, so claims by different subjects never wait on each
+/// other. Two-key advisory locks never collide with single-key ones such as
+/// the DeviceCheck claim lock.
 const OPEN_CLAIMS_LOCK_CLASS: i32 = 0x0DB0_0C1A;
 
-/// Insert a claim, refusing it with [`InsertError::BaseBusy`] when its base
-/// already holds `max_open` [open claims](open_claims). `None` inserts without
-/// a cap.
+/// Insert a claim, refusing it with [`InsertError::TooManyOpenClaims`] when
+/// its claimant (`account_id`, the JWT subject) already holds `max_open`
+/// [open claims](open_claims), on any base. `None` inserts without a cap.
 ///
-/// This is what stops one party from cycling claims to keep a base full. A
+/// This is what stops one subject from cycling claims to keep a base full. A
 /// failed row keeps its discriminator for [`FAILED_DISCRIMINATOR_HOLD`], so it
 /// counts until then: a claim that fails fast frees no slot early, and the
-/// discriminators held by rows that are not `ASSIGNED` never exceed the cap.
+/// discriminators one subject's unlanded rows hold never exceed the cap. The
+/// cap is the claimant's own, so nobody else's claims can use it up.
 ///
-/// The count and the insert run under a per-base advisory lock in one
+/// The count and the insert run under a per-subject advisory lock in one
 /// transaction, so concurrent claims cannot both pass at `max_open - 1`. On a
 /// caller's transaction it runs as a savepoint, and the lock is held until the
 /// caller commits. `queue_group` is `Some` for the `QUEUED` intake lane.
@@ -222,11 +223,11 @@ where
     if let Some(max_open) = max_open {
         sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2))")
             .bind(OPEN_CLAIMS_LOCK_CLASS)
-            .bind(&r.base)
+            .bind(&r.account_id)
             .execute(&mut *tx)
             .await?;
-        if open_claims(&mut *tx, &r.base).await? >= i64::from(max_open.get()) {
-            return Err(InsertError::BaseBusy);
+        if open_claims(&mut *tx, &r.account_id).await? >= i64::from(max_open.get()) {
+            return Err(InsertError::TooManyOpenClaims);
         }
     }
     let id = match queue_group {
@@ -237,22 +238,22 @@ where
     Ok(id)
 }
 
-/// How many open claims `base` has: rows that hold a discriminator and are not
-/// `ASSIGNED`. That is every row that can still land (`QUEUED`, `RESERVED`,
+/// How many open claims `account_id` (a JWT subject) has, on any base: rows
+/// that hold a discriminator and are not `ASSIGNED`. That is every row that can still land (`QUEUED`, `RESERVED`,
 /// `SUBMITTING`, `RETRY_AFTER`) plus `FAILED_TERMINAL` rows still inside
 /// [`FAILED_DISCRIMINATOR_HOLD`], the same rows [`allocated_discriminators`]
 /// counts as taken.
-pub async fn open_claims<'e, E>(executor: E, base: &str) -> Result<i64, sqlx::Error>
+pub async fn open_claims<'e, E>(executor: E, account_id: &str) -> Result<i64, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     let sql = format!(
         "SELECT count(*) FROM username_reservations \
-         WHERE base = $1 AND status <> '{assigned}' AND {HOLDS_DISCRIMINATOR}",
+         WHERE account_id = $1 AND status <> '{assigned}' AND {HOLDS_DISCRIMINATOR}",
         assigned = Status::Assigned.as_str(),
     );
     sqlx::query_scalar(&sql)
-        .bind(base)
+        .bind(account_id)
         .bind(FAILED_DISCRIMINATOR_HOLD.whole_seconds())
         .fetch_one(executor)
         .await
