@@ -11,13 +11,27 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 ### Added
 
 - **A username base takes at most 10 open claims at a time
-  (`USERNAME_MAX_OPEN_CLAIMS_PER_BASE`, `0` disables).** A claim on a base
-  that already holds that many `QUEUED`, `RESERVED`, `SUBMITTING` or
-  `RETRY_AFTER` rows gets a `409` (`Too many pending claims for username
-  <base>. Try again later or choose another name.`) until one of them lands or
-  fails. This bounds how many discriminators someone can hold at once by
-  cycling claims that are meant to fail. Concurrent claims are serialised per
-  base, so the cap holds under load. Voucher claims are exempt.
+  (`USERNAME_MAX_OPEN_CLAIMS_PER_BASE`, `0` disables).** An open claim is a
+  row that has not landed and still holds a discriminator: `QUEUED`,
+  `RESERVED`, `SUBMITTING` or `RETRY_AFTER`, or `FAILED_TERMINAL` within the
+  30 minutes its discriminator is held. A claim on a base that already holds
+  that many gets a `409` (`Too many pending claims for username <base>. Try
+  again later or choose another name.`) until one lands or a failure ages out.
+  Because recent failures count, a claim that fails fast frees no slot early,
+  so cycling claims that are meant to fail cannot hold more than the cap's
+  worth of discriminators. Concurrent claims are serialised per base, so the
+  cap holds under load. Voucher claims are exempt.
+- **`consumerRegistrationSignature` is verified, at intake and before
+  submission.** It used to be checked for shape only, so a claim with a
+  correct `candidateSignature` and random bytes here was accepted, took a
+  discriminator, and failed on chain after the signer paid its fee. Intake now
+  rebuilds the payload the runtime verifies, `(account, verifier,
+  identifierKey, base, reservedUsername)` for format `1` and `(account,
+  verifier, identifierKey)` for format `2`, with `ATTESTER_ACCOUNT` as the
+  verifier, and answers a signature that does not verify with a `400` on that
+  field. The writer's gate checks it again, so rows stored before this release
+  fail without paying a fee. Clients that sign as the runtime expects see no
+  change.
 - **The writer can settle dotNS pending claims (`DOTNS_SETTLE_ENABLED`, off
   by default).** A gateway-minted name whose owner has no `LabelStore` stays a
   pending claim on `DotnsPopController`, with no label in a store and no
@@ -101,12 +115,16 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
   failed rows. To make the release safe, People registration transactions are
   now **mortal for 64 blocks** where they used to be immortal: a transaction
   not included in that window is dropped and the row is resubmitted under a
-  fresh nonce.
+  fresh nonce. The window counts from the finalized block, or from the best
+  block while finality lags more than 32 blocks behind it, so a finality stall
+  cannot make every transaction dead on arrival and fail the outbox. A pool
+  rejection for an ancient birth block defers the row without spending an
+  attempt.
 - **A rejected claim fails on the first pass instead of paying for eight.**
   The writer used to fail at once only on three `Resources` reservation
   errors. Any other rejection of the claim, such as a bad
-  `consumerRegistrationSignature` or `proofOfOwnership` that only had its
-  shape checked at intake, was resubmitted up to `CHAIN_WRITER_MAX_ATTEMPTS`
+  `proofOfOwnership` that only had its shape checked at intake, was
+  resubmitted up to `CHAIN_WRITER_MAX_ATTEMPTS`
   times, with a fee each time. Now every `PeopleLite::*` / `Resources::*`
   dispatch error fails the row immediately, except four that are about the
   attester or the network: `NoAttestationAllowance`,

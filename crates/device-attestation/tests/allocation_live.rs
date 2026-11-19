@@ -153,15 +153,33 @@ async fn a_base_takes_no_more_open_claims_than_its_cap() {
     );
     assert_eq!(outbox::open_claims(&pool, &base).await.unwrap(), 3);
 
-    // A claim that lands or fails frees its slot.
+    // A claim that lands frees its slot.
     set_status(&pool, ids[0], Status::Assigned, time::Duration::ZERO).await;
     outbox::insert_capped(&pool, &reservation(&base, "34"), None, cap(3))
         .await
         .expect("an assigned claim no longer counts");
+
+    // A claim that fails keeps its slot while it keeps its discriminator, so
+    // failing fast does not let one party cycle more claims through a base.
     set_status(&pool, ids[1], Status::FailedTerminal, time::Duration::ZERO).await;
+    assert!(
+        matches!(
+            outbox::insert_capped(&pool, &reservation(&base, "35"), Some(1), cap(3)).await,
+            Err(InsertError::BaseBusy)
+        ),
+        "a failed claim inside FAILED_DISCRIMINATOR_HOLD still counts"
+    );
+    assert_eq!(outbox::open_claims(&pool, &base).await.unwrap(), 3);
+    set_status(
+        &pool,
+        ids[1],
+        Status::FailedTerminal,
+        FAILED_DISCRIMINATOR_HOLD * 2,
+    )
+    .await;
     outbox::insert_capped(&pool, &reservation(&base, "35"), Some(1), cap(3))
         .await
-        .expect("a failed claim no longer counts");
+        .expect("a failed claim past the hold no longer counts");
     assert!(matches!(
         outbox::insert_capped(&pool, &reservation(&base, "36"), None, cap(3)).await,
         Err(InsertError::BaseBusy)

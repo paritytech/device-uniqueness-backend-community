@@ -798,6 +798,10 @@ const SIGNER_CONTENTION: &[&str] = &[
     // Pool: the identical transaction is already queued. Resubmitting cannot
     // improve on that; waiting can.
     "Transaction Already Imported",
+    // Pool: the block the transaction's mortality counts from is out of the
+    // node's reach (`AncientBirthBlock`). A fact about the chain's head when
+    // the writer signed, not about the row; the next pass signs afresh.
+    "Transaction has an ancient birth block",
     // Transport, not verdict: the subscription or the socket died while the
     // transaction was in flight. It may already be in a pool holding our nonce,
     // so the row learns nothing from this and everything behind it is refused

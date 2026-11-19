@@ -255,15 +255,22 @@ Operational invariants an agent must respect when touching the code.
   after they failed. Usernames are unique only among rows that are not `FAILED_TERMINAL` (a partial
   unique index), so a failed claim can neither exhaust a base nor block its own name for good.
   The hold is what makes the release safe. Every People transaction the writer signs is mortal
-  for `PEOPLE_TX_MORTALITY_BLOCKS` (64), and the hold covers that window twice over at a 12 s
-  block time, so a transaction still in flight for a failed row is dead before its name is offered
+  for `PEOPLE_TX_MORTALITY_BLOCKS` (64), counted from the finalized block, or from the best block
+  while finality lags more than half the window behind it (the node checks mortality against its
+  best block, so a stall would otherwise leave every transaction dead on arrival). Either way a
+  transaction cannot land more than 64 blocks past the head the writer saw, and the hold covers
+  that window twice over at a 12 s block time, so a transaction still in flight for a failed row is dead before its name is offered
   again. If it lands anyway, the chain read above reports the name as taken, and the chain enforces
   uniqueness regardless. Failed rows are kept for their `last_error`, not deleted.
 - **A base holds a bounded number of open claims.** Releasing failed rows makes squatting by
   failure temporary, but someone can still keep a base full by cycling claims that are meant to
   fail. Intake therefore refuses a claim with `409` when its base already holds
-  `USERNAME_MAX_OPEN_CLAIMS_PER_BASE` (default 10) rows that can still land: `QUEUED`, `RESERVED`,
-  `SUBMITTING` or `RETRY_AFTER`. The count and the insert run in one transaction under a per-base
+  `USERNAME_MAX_OPEN_CLAIMS_PER_BASE` (default 10) open claims: rows that are not `ASSIGNED` and
+  still hold a discriminator, i.e. `QUEUED`, `RESERVED`, `SUBMITTING`, `RETRY_AFTER`, and
+  `FAILED_TERMINAL` within `FAILED_DISCRIMINATOR_HOLD`. Counting recent failures is what bounds
+  the attack: if a failure freed its slot at once, each slot could be cycled every minute while
+  every failure kept its discriminator for 30, and ten slots would hold the whole base. The count
+  shares its predicate with the taken-set read, so the two cannot drift. The count and the insert run in one transaction under a per-base
   advisory lock (`outbox::insert_capped`), so concurrent claims cannot both pass at the last slot.
   Voucher claims skip the cap: vouchers are minted by the operator and single-use, so they cannot
   drive a cycling attack, and capping them would let an attacker block a voucher holder. The cap
@@ -360,7 +367,12 @@ Operational invariants an agent must respect when touching the code.
 - **Registration is authorized by `candidateSignature`, not the JWT subject.** `POST
   /api/v1/usernames` verifies the beneficiary's sr25519 signature over `pop:people-lite:register
   using || candidatePubkey || ringVrfKey` (the message the chain reconstructs for `PeopleLite.attest`;
-  Substrate signing context) before enqueuing. The JWT authenticates only the device/session — a
+  Substrate signing context) before enqueuing. It then verifies `consumerRegistrationSignature`,
+  by the same key in the same form, over the consumer registration payload for the declared
+  format, with `ATTESTER_ACCOUNT` as the runtime's `verifier`; the writer's gate repeats both
+  checks per pass. The runtime rejects either only after the signer has paid the fee, so a claim
+  that can never land is refused before it takes a discriminator. `proofOfOwnership` (a ring VRF
+  signature) is still checked for shape only. The JWT authenticates only the device/session — a
   separate per-install auth wallet — so `candidateAccountId` is deliberately **not** required to
   equal the JWT subject. Stored `account_id` (JWT subject) is the abuse-control/rate-limit key;
   `candidate_account_id` is the on-chain beneficiary the writer submits for.

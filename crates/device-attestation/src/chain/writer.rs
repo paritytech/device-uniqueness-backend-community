@@ -46,7 +46,8 @@ const DEFAULT_BATCH_SIZE: u16 = 25;
 const DEFAULT_DOTNS_BATCH_SIZE: u16 = 3;
 
 /// How many blocks a People registration transaction stays valid after the
-/// block it was signed at.
+/// block it is dated from (see `people::birth_block`): the finalized block, or
+/// the best one while finality lags.
 ///
 /// Mortality is what puts a bound on a failed row: once this many blocks have
 /// passed, nothing the writer signed for it can still land, so
@@ -227,7 +228,7 @@ pub async fn run(config: WriterConfig) -> Result<(), WriterError> {
         signer_account,
         proxy_for,
         config,
-        people: Drain::new(batch_max, PeopleLink(chain_for_lane)),
+        people: Drain::new(batch_max, PeopleLink(chain_for_lane, config_attester)),
         dotns: Drain::new(dotns_batch_max, dotns_link),
         passes,
         settler,

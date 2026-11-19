@@ -106,7 +106,9 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
         (status = 400, description = "Validation failed (with per-field `fields`; an unsupported \
             `payloadVersion`, or one the connected People runtime does not take — `1` once \
             `PeopleLite.attest` dropped the username, `2` before — is reported on that field \
-            rather than as an invalid signature), malformed JSON, \
+            rather than as an invalid signature; `candidateSignature` and \
+            `consumerRegistrationSignature` are both verified, the consumer one only once the \
+            candidate one is good), malformed JSON, \
             a `lifetimePoUDVoucher` that is unknown, already used, or expired \
             (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), \
             a device-evidence field of the wrong JSON type (in every Widevine mode, like any \
@@ -131,7 +133,8 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
          example = json!({ "error": "DEVICE_EVIDENCE_INVALID", "message": "device evidence invalid" })),
         (status = 409, description = "Preferred digits taken, no digits available, username taken, \
             too many pending claims for the base (it already holds \
-            `USERNAME_MAX_OPEN_CLAIMS_PER_BASE` claims, default 10, that have not yet landed or failed; \
+            `USERNAME_MAX_OPEN_CLAIMS_PER_BASE` claims, default 10, that have not landed and still \
+            hold a discriminator: in flight, or failed within the last 30 minutes; \
             `{\"error\": \"Too many pending claims for username <base>. Try again later or choose another \
             name.\"}`; temporary, and voucher claims are exempt), or \
             the claim carries `dotns.reservedUsername` for a personhood name that is already owned \

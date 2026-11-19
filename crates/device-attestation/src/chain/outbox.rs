@@ -197,12 +197,13 @@ pub enum InsertError {
 const OPEN_CLAIMS_LOCK_CLASS: i32 = 0x0DB0_0C1A;
 
 /// Insert a claim, refusing it with [`InsertError::BaseBusy`] when its base
-/// already holds `max_open` rows that can still land: `QUEUED`, `RESERVED`,
-/// `SUBMITTING` or `RETRY_AFTER`. `None` inserts without a cap.
+/// already holds `max_open` [open claims](open_claims). `None` inserts without
+/// a cap.
 ///
-/// This is what stops one party from cycling claims to keep a base full. Once
-/// failed rows give their discriminators back, the open rows are what an
-/// attacker has to keep alive, and this bounds how many there can be.
+/// This is what stops one party from cycling claims to keep a base full. A
+/// failed row keeps its discriminator for [`FAILED_DISCRIMINATOR_HOLD`], so it
+/// counts until then: a claim that fails fast frees no slot early, and the
+/// discriminators held by rows that are not `ASSIGNED` never exceed the cap.
 ///
 /// The count and the insert run under a per-base advisory lock in one
 /// transaction, so concurrent claims cannot both pass at `max_open - 1`. On a
@@ -236,20 +237,23 @@ where
     Ok(id)
 }
 
-/// How many rows under `base` can still land: every status but `ASSIGNED`
-/// and `FAILED_TERMINAL`.
+/// How many open claims `base` has: rows that hold a discriminator and are not
+/// `ASSIGNED`. That is every row that can still land (`QUEUED`, `RESERVED`,
+/// `SUBMITTING`, `RETRY_AFTER`) plus `FAILED_TERMINAL` rows still inside
+/// [`FAILED_DISCRIMINATOR_HOLD`], the same rows [`allocated_discriminators`]
+/// counts as taken.
 pub async fn open_claims<'e, E>(executor: E, base: &str) -> Result<i64, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     let sql = format!(
         "SELECT count(*) FROM username_reservations \
-         WHERE base = $1 AND status NOT IN ('{assigned}', '{failed}')",
+         WHERE base = $1 AND status <> '{assigned}' AND {HOLDS_DISCRIMINATOR}",
         assigned = Status::Assigned.as_str(),
-        failed = Status::FailedTerminal.as_str(),
     );
     sqlx::query_scalar(&sql)
         .bind(base)
+        .bind(FAILED_DISCRIMINATOR_HOLD.whole_seconds())
         .fetch_one(executor)
         .await
 }
@@ -339,6 +343,14 @@ where
 /// later would only lengthen the hold.
 pub const FAILED_DISCRIMINATOR_HOLD: time::Duration = time::Duration::minutes(30);
 
+/// The SQL predicate for a row that holds its discriminator: any status but
+/// `FAILED_TERMINAL`, or failed within [`FAILED_DISCRIMINATOR_HOLD`], bound
+/// in seconds as `$2`. [`allocated_discriminators`] and [`open_claims`] share
+/// it, so the cap counts exactly the failed rows that still take a
+/// discriminator.
+const HOLDS_DISCRIMINATOR: &str = "(status <> 'FAILED_TERMINAL' \
+     OR updated_at > now() - make_interval(secs => $2::float8))";
+
 /// The discriminators the outbox holds under `base`: every row that can still
 /// land, plus `FAILED_TERMINAL` rows failed within
 /// [`FAILED_DISCRIMINATOR_HOLD`]. Older failed rows release theirs, so failed
@@ -347,16 +359,14 @@ pub async fn allocated_discriminators(
     pool: &PgPool,
     base: &str,
 ) -> Result<BTreeSet<u8>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT digits FROM username_reservations \
-         WHERE base = $1 \
-           AND (status <> 'FAILED_TERMINAL' \
-                OR updated_at > now() - make_interval(secs => $2::float8))",
-    )
-    .bind(base)
-    .bind(FAILED_DISCRIMINATOR_HOLD.whole_seconds())
-    .fetch_all(pool)
-    .await?;
+    let sql = format!(
+        "SELECT digits FROM username_reservations WHERE base = $1 AND {HOLDS_DISCRIMINATOR}"
+    );
+    let rows = sqlx::query(&sql)
+        .bind(base)
+        .bind(FAILED_DISCRIMINATOR_HOLD.whole_seconds())
+        .fetch_all(pool)
+        .await?;
 
     rows.into_iter()
         .map(|row| {
