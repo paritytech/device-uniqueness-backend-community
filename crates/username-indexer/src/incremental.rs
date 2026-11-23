@@ -3,13 +3,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use chain_types::people;
-use chain_types::people::runtime_types::indiv_pallet_resources::types::ConsumerInfo;
 use sqlx::{PgPool, Postgres, Row as _, Transaction};
 use subxt::utils::AccountId32;
 
-use crate::chain::{BoxError, ChainError, PeopleChain};
-use crate::projection;
+use crate::chain::{AssetHubAt, AssetHubChain, BoxError, ChainError};
+use crate::gateway::{self, AccountNameRecord, Unindexable};
+use crate::projection::{self, AssignedUsername};
 use crate::ss58::Ss58Error;
 
 /// Outcome of one [`index_finalized_range`] pass across finalized blocks.
@@ -21,11 +20,11 @@ pub struct IndexReport {
     pub to_block: u64,
     /// Number of finalized blocks processed in this pass.
     pub blocks_processed: u64,
-    /// Number of accounts upserted from re-read consumer storage.
+    /// Number of accounts upserted from re-read `AccountNames` storage.
     pub accounts_upserted: u64,
-    /// Number of accounts deleted because their consumer entry was absent.
+    /// Number of accounts deleted because their `AccountNames` entry was absent.
     pub accounts_deleted: u64,
-    /// Number of consumer values that failed username decoding and were skipped.
+    /// Number of `AccountNames` values a row cannot hold, deleted or skipped.
     pub decode_failures: u64,
 }
 
@@ -50,7 +49,7 @@ pub enum IndexError {
     #[error(transparent)]
     Chain(#[from] ChainError),
     /// Subxt rejected a storage or constant operation.
-    #[error("reading finalized People Chain storage: {0}")]
+    #[error("reading finalized Asset Hub storage: {0}")]
     Storage(#[source] BoxError),
     /// The chain's SS58 prefix could not encode account identifiers.
     #[error(transparent)]
@@ -71,7 +70,7 @@ pub enum IndexError {
 /// round trip that can fail.
 pub async fn index_finalized_range(
     pool: &PgPool,
-    chain: &PeopleChain,
+    chain: &AssetHubChain,
 ) -> Result<Option<IndexReport>, IndexError> {
     let Some(_lock) = try_projection_lock(pool).await? else {
         return Ok(None);
@@ -91,7 +90,7 @@ pub async fn index_finalized_range(
 /// checkpoint row is missing (bootstrap seeds it at startup).
 pub async fn index_finalized_range_to(
     pool: &PgPool,
-    chain: &PeopleChain,
+    chain: &AssetHubChain,
     head_number: u64,
 ) -> Result<Option<IndexReport>, IndexError> {
     let Some(_lock) = try_projection_lock(pool).await? else {
@@ -122,7 +121,7 @@ pub async fn try_projection_lock(pool: &PgPool) -> Result<Option<ProjectionLock>
 
 pub async fn index_finalized_range_locked(
     pool: &PgPool,
-    chain: &PeopleChain,
+    chain: &AssetHubChain,
     head_number: u64,
 ) -> Result<Option<IndexReport>, IndexError> {
     let Some(checkpoint) = read_checkpoint(pool).await? else {
@@ -144,7 +143,7 @@ async fn read_checkpoint(pool: &PgPool) -> Result<Option<u64>, IndexError> {
 
 async fn index_from_checkpoint(
     pool: &PgPool,
-    chain: &PeopleChain,
+    chain: &AssetHubChain,
     checkpoint: u64,
     head_number: u64,
 ) -> Result<Option<IndexReport>, IndexError> {
@@ -260,7 +259,7 @@ impl SpeculativeCache {
 
 pub async fn index_speculative_window(
     pool: &PgPool,
-    chain: &PeopleChain,
+    chain: &AssetHubChain,
     finalized: u64,
     best: u64,
     cache: &mut SpeculativeCache,
@@ -326,48 +325,25 @@ pub async fn index_speculative_window(
         .at_block(head)
         .await
         .map_err(|source| ChainError::Query(Box::new(source)))?;
-    let block_hash = at.block_hash().0;
     let block_number = at.block_number();
     let block_number_db =
         i64::try_from(block_number).map_err(|_| IndexError::SnapshotNumber(block_number))?;
-    let ss58_prefix = crate::ss58::validate_prefix(
-        at.constants()
-            .entry(people::constants().system().ss58_prefix())
-            .map_err(|source| IndexError::Storage(Box::new(source)))?,
-    )?;
+    let ss58_prefix = crate::ss58::validate_prefix(chain_types::people_ss58_prefix())?;
 
     let mut tx = pool.begin().await?;
     for account in &affected {
-        let consumer = at
-            .storage()
-            .try_fetch(
-                people::storage().resources().consumers(),
-                (AccountId32(*account),),
-            )
-            .await
-            .map_err(|source| IndexError::Storage(Box::new(source)))?;
         let mut decode_failed = false;
-        let decoded = match consumer {
-            Some(value) => {
-                let consumer: ConsumerInfo = value
-                    .decode()
-                    .map_err(|source| IndexError::Storage(Box::new(source)))?;
-                match projection::decode_consumer(
-                    *account,
-                    consumer.identifier_key,
-                    consumer.lite_username.0,
-                    consumer.full_username.map(|username| username.0),
-                    ss58_prefix,
-                    block_hash,
-                    block_number,
-                ) {
-                    Ok(record) => Some(record),
-                    Err(error) => {
-                        decode_failed = true;
-                        tracing::warn!(stage = "speculative", account = ?account, error = ?error, "retracting undecodable consumer");
-                        None
-                    }
-                }
+        let decoded = match row_at(&at, *account, ss58_prefix).await? {
+            Some(Ok(record)) => Some(record),
+            Some(Err(error)) => {
+                decode_failed = true;
+                tracing::warn!(
+                    stage = "speculative",
+                    account = ?account,
+                    error = %error,
+                    "retracting unindexable account names"
+                );
+                None
             }
             None => None,
         };
@@ -394,7 +370,7 @@ pub async fn index_speculative_window(
 /// Index one finalized block, committing its writes and checkpoint atomically.
 async fn index_block(
     pool: &PgPool,
-    chain: &PeopleChain,
+    chain: &AssetHubChain,
     number: u64,
     report: &mut IndexReport,
 ) -> Result<(), IndexError> {
@@ -423,11 +399,7 @@ async fn index_block(
         return Ok(());
     }
 
-    let ss58_prefix = crate::ss58::validate_prefix(
-        at.constants()
-            .entry(people::constants().system().ss58_prefix())
-            .map_err(|source| IndexError::Storage(Box::new(source)))?,
-    )?;
+    let ss58_prefix = crate::ss58::validate_prefix(chain_types::people_ss58_prefix())?;
 
     let mut tx = pool.begin().await?;
     let mut block_upserts = 0_u64;
@@ -435,38 +407,20 @@ async fn index_block(
     let mut block_failures = 0_u64;
 
     for account in &affected {
-        let consumer = at
-            .storage()
-            .try_fetch(
-                people::storage().resources().consumers(),
-                (AccountId32(*account),),
-            )
-            .await
-            .map_err(|source| IndexError::Storage(Box::new(source)))?;
-        match consumer {
-            Some(value) => {
-                let consumer: ConsumerInfo = value
-                    .decode()
-                    .map_err(|source| IndexError::Storage(Box::new(source)))?;
-                match projection::decode_consumer(
-                    *account,
-                    consumer.identifier_key,
-                    consumer.lite_username.0,
-                    consumer.full_username.map(|username| username.0),
-                    ss58_prefix,
-                    block_hash,
-                    block_number,
-                ) {
-                    Ok(record) => {
-                        projection::upsert(&mut tx, &record, block_number_db).await?;
-                        block_upserts += 1;
-                    }
-                    Err(error) => {
-                        projection::delete_account(&mut tx, account).await?;
-                        block_failures += 1;
-                        tracing::warn!(stage = "username", account = ?account, error = ?error, "deleting now-malformed consumer");
-                    }
-                }
+        match row_at(&at, *account, ss58_prefix).await? {
+            Some(Ok(record)) => {
+                projection::upsert(&mut tx, &record, block_number_db).await?;
+                block_upserts += 1;
+            }
+            Some(Err(error)) => {
+                projection::delete_account(&mut tx, account).await?;
+                block_failures += 1;
+                tracing::warn!(
+                    stage = "username",
+                    account = ?account,
+                    error = %error,
+                    "deleting now-unindexable account names"
+                );
             }
             None => {
                 projection::delete_account(&mut tx, account).await?;
@@ -519,26 +473,38 @@ async fn advance_checkpoint(
 }
 
 fn accounts_from_events(
-    events: &subxt::events::Events<chain_types::PeopleConfig>,
+    events: &subxt::events::Events<chain_types::AssetHubConfig>,
 ) -> Result<Vec<[u8; 32]>, IndexError> {
-    let mut affected: Vec<[u8; 32]> = Vec::new();
-    for event in events.find::<people::resources::events::LitePersonRegistered>() {
-        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
-        affected.push(event.account.0);
-    }
-    for event in events.find::<people::resources::events::PersonRegistered>() {
-        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
-        affected.push(event.account.0);
-    }
-    for event in events.find::<people::resources::events::IdentifierKeyUpdated>() {
-        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
-        affected.push(event.account.0);
-    }
-    for event in events.find::<people::people_lite::events::ConsumerRegistered>() {
-        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
-        affected.push(event.account.0);
-    }
-    Ok(affected)
+    // A closure, not `IndexError::Storage` itself: it coerces the boxed
+    // `EventsError` into the boxed trait object the variant holds.
+    gateway::accounts_from_events(events).map_err(|source| IndexError::Storage(source))
+}
+
+/// `account`'s gateway labels at `at` as a projection row: `None` when it holds
+/// none, `Some(Err)` when it holds labels no row can represent.
+async fn row_at(
+    at: &AssetHubAt,
+    account: [u8; 32],
+    ss58_prefix: u16,
+) -> Result<Option<Result<AssignedUsername, Unindexable>>, IndexError> {
+    let Some(value) = at
+        .storage()
+        .try_fetch(gateway::account_names(), (AccountId32(account),))
+        .await
+        .map_err(|source| IndexError::Storage(Box::new(source)))?
+    else {
+        return Ok(None);
+    };
+    let names: AccountNameRecord = value
+        .decode()
+        .map_err(|source| IndexError::Storage(Box::new(source)))?;
+    Ok(Some(gateway::assigned_username(
+        account,
+        names,
+        ss58_prefix,
+        at.block_hash().0,
+        at.block_number(),
+    )))
 }
 
 /// Deduplicate affected accounts deterministically for stable per-block reads.
@@ -569,7 +535,7 @@ mod tests {
             plan_speculative_window(10, 13),
             SpeculativeWindow::Scan { from: 11, to: 13 }
         );
-        // Comfortably past the measured People trail of 2-5 blocks.
+        // Comfortably past a parachain's measured finality trail of 2-5 blocks.
         assert_eq!(
             plan_speculative_window(100, 114),
             SpeculativeWindow::Scan { from: 101, to: 114 }
