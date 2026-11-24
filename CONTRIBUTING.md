@@ -69,8 +69,8 @@ Sign your commits off with `git commit -s`, certifying the
 
 ## Security
 
-Do **not** open a public issue for a suspected vulnerability. Parity's
-disclosure process and bug bounty are at <https://parity.io/bug-bounty>. See the
+Do **not** open a public issue for a suspected vulnerability — follow
+[SECURITY.md](SECURITY.md). See the
 Security section of the [README](README.md#security) for what this code is and
 is not.
 

@@ -251,8 +251,8 @@ development defaults — well-known dev keys, a public test network, permissive
 toggles — and every one of them must be replaced before a deployment anyone else
 can reach.
 
-For Parity's security disclosure process and Bug Bounty program:
-<https://parity.io/bug-bounty>. Please do not report suspected vulnerabilities
+To report a vulnerability, what is in scope, and the bug bounty position, see
+[SECURITY.md](SECURITY.md). Please do not report suspected vulnerabilities
 through public GitHub issues.
 
 ## Licence
