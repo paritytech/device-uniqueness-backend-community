@@ -430,7 +430,7 @@
         },
         "responses": {
           "200": {
-            "description": "The device is not eligible for a free registration: hard-mode DeviceCheck found its free slot already used, enforced Widevine dedup found the device already recorded or the Android claim carried no evidence, or a concurrent claim won the device's slot. Not an error — a 200 outcome, and a terminal one: no claim is stored and there is no paid alternative. The value `PAYMENT_REQUIRED` is historical (the retired paid lane) and kept for client compatibility.",
+            "description": "The device is not eligible for a free registration: enforced DeviceCheck (`DEVICE_CHECK_IOS_ENFORCE`) found its free slot already used, enforced Widevine dedup found the device already recorded or the Android claim carried no evidence, or a concurrent claim won the device's slot. Not an error — a 200 outcome, and a terminal one: no claim is stored and there is no paid alternative. The value `PAYMENT_REQUIRED` is historical (the retired paid lane) and kept for client compatibility.",
             "content": {
               "application/json": {
                 "schema": {},
@@ -473,7 +473,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid bearer token, or hard-mode DeviceCheck required a usable Device-Token-iOS and none was present.",
+            "description": "Missing or invalid bearer token, or enforced DeviceCheck (`DEVICE_CHECK_IOS_ENFORCE`) required a usable Device-Token-iOS and none was present.",
             "content": {
               "application/json": {
                 "schema": {}

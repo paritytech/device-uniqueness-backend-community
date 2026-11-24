@@ -96,7 +96,8 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
          body = RegisterResponse,
          example = json!({ "base_username": "tallesx", "digits": "07", "username": "tallesx.07" })),
         (status = 200, description = "The device is not eligible for a free registration: \
-            hard-mode DeviceCheck found its free slot already used, enforced Widevine dedup found \
+            enforced DeviceCheck (`DEVICE_CHECK_IOS_ENFORCE`) found its free slot already used, \
+            enforced Widevine dedup found \
             the device already recorded or the Android claim carried no evidence, or a concurrent \
             claim won the device's slot. Not an error — a 200 outcome, and a terminal one: no \
             claim is stored and there is no paid alternative. The value `PAYMENT_REQUIRED` is \
@@ -121,7 +122,8 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
              "fields": [{ "field": "candidateSignature", "message": "Invalid signature." }]
          })),
         (status = 401, description = "Missing or invalid bearer token, \
-            or hard-mode DeviceCheck required a usable Device-Token-iOS and none was present.",
+            or enforced DeviceCheck (`DEVICE_CHECK_IOS_ENFORCE`) required a usable \
+            Device-Token-iOS and none was present.",
          body = serde_json::Value),
         (status = 403, description = "Device evidence failed verification under \
             `WIDEVINE_DEDUP_ENFORCE`: chain policy, the cert-bound evidence hash (challenge / \
@@ -275,12 +277,21 @@ pub async fn register(
             Some(client) => {
                 let device_token = device_token_bytes(&headers);
                 let verdict = device_check::evaluate(client, device_token.as_deref()).await;
-                match device_check::decide_gate(verdict, state.config.enforce_auth) {
+                // The gate's own posture (DEVICE_CHECK_IOS_ENFORCE), not
+                // ENFORCE_AUTH: iOS uniqueness is enforced independently of
+                // attestation. This arm only runs when DeviceCheck is
+                // configured, so the `false` fallback is unreachable.
+                let enforced = state
+                    .config
+                    .device_check
+                    .as_ref()
+                    .is_some_and(|dc| dc.enforce);
+                match device_check::decide_gate(verdict, enforced) {
                     // "Seen device" is the ineligible outcome, never an error.
                     Decision::Blocked => return Ok(device_ineligible()),
                     Decision::TokenRequired => return Err(UsernamesError::DeviceTokenRequired),
                     Decision::Unavailable(cause) => {
-                        tracing::warn!(cause, "DeviceCheck unavailable (hard mode)");
+                        tracing::warn!(cause, "DeviceCheck unavailable (enforced)");
                         return Err(UsernamesError::DeviceCheckUnavailable);
                     }
                     Decision::Register => (
@@ -643,7 +654,7 @@ async fn reserve(
         }
         Ok(false) => {}
         Err(err) => {
-            tracing::warn!(error = %err, "DeviceCheck re-query under lock failed (hard mode)");
+            tracing::warn!(error = %err, "DeviceCheck re-query under lock failed (enforced)");
             if let Err(rb) = tx.rollback().await {
                 tracing::error!(error = ?rb, "rollback after DeviceCheck re-query failure failed");
             }

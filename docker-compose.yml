@@ -95,6 +95,10 @@ services:
       # Apple DeviceCheck. Enabled, the team id, key id and key are required.
       # The URL keeps a non-blank default: the config reads a blank one as-is.
       DEVICE_CHECK_IOS_ENABLED: ${DEVICE_CHECK_IOS_ENABLED:-false}
+      # Whether a device Apple has already seen is refused (true) or only
+      # reported (false), independent of ENFORCE_AUTH. Blank inherits
+      # ENFORCE_AUTH, with a boot warning.
+      DEVICE_CHECK_IOS_ENFORCE: ${DEVICE_CHECK_IOS_ENFORCE:-}
       APPLE_TEAM_ID: ${APPLE_TEAM_ID:-}
       DEVICE_CHECK_KEY_ID: ${DEVICE_CHECK_KEY_ID:-}
       DEVICE_CHECK_PRIVATE_KEY: ${DEVICE_CHECK_PRIVATE_KEY:-}

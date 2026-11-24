@@ -771,6 +771,31 @@ signer cannot pay the deposit.
   existing container, so it never changes the image. A version change is a
   project-wide `up -d`.
 
+## iOS DeviceCheck gate
+
+DeviceCheck is the iOS uniqueness gate at username claim: Apple keeps one bit
+per device, and a device Apple reports as already used gets the `200`
+ineligible outcome instead of a free registration. Two variables control it,
+and neither depends on `ENFORCE_AUTH` (which governs platform attestation):
+
+| Variable | Effect |
+| --- | --- |
+| `DEVICE_CHECK_IOS_ENABLED` | Queries Apple on every iOS claim. Needs `APPLE_TEAM_ID`, `DEVICE_CHECK_KEY_ID` and `DEVICE_CHECK_PRIVATE_KEY`. |
+| `DEVICE_CHECK_IOS_ENFORCE` | `true`: a seen device is refused, a missing `Device-Token-iOS` is a `401`, Apple being unreachable fails the claim, and a granted claim marks the device. `false`: the verdict is only reported, nothing is refused or marked. |
+
+Unset (or blank), `DEVICE_CHECK_IOS_ENFORCE` inherits `ENFORCE_AUTH`, which was
+the only behaviour before it existed, and `device-attestation-api` warns at
+boot. Set it explicitly: the Helm chart refuses to render a workload that
+enables DeviceCheck without it. The inheritance is deprecated: a later
+release will refuse to boot when DeviceCheck is enabled and
+`DEVICE_CHECK_IOS_ENFORCE` is unset. A typical rollout:
+
+1. `DEVICE_CHECK_IOS_ENABLED=true`, `DEVICE_CHECK_IOS_ENFORCE=false`: watch the
+   verdicts. The boot log warns that seen devices still register.
+2. `DEVICE_CHECK_IOS_ENFORCE=true`, whatever stage attestation is at. Until
+   `AUTH_ENABLED` and `ENFORCE_AUTH` are both on, the boot log warns that the
+   platform claim routing requests to the gate is not attestation-backed.
+
 ## Config and secret rotation
 
 Everything is in the checkout's `.env` (mode 600); apply changes with

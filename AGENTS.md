@@ -152,7 +152,9 @@ Each service's boundary, persistence, endpoints, and data-flow invariants are in
 All vars + dev defaults are in `.env.example` (compose auto-loads `.env`).
 Non-obvious: `AUTH_ENABLED=false` is the current **M0 mode** — platform attestation is a **no-op**
 (a JWT is still issued and the sr25519 account proof still verified); `ENFORCE_AUTH` toggles soft
-(log-only) vs hard rejection. `LOG_FORMAT` defaults to `text` in the binaries and `json` in
+(log-only) vs hard rejection of attestation. The uniqueness gates have their own posture flags,
+`DEVICE_CHECK_IOS_ENFORCE` (iOS; unset inherits `ENFORCE_AUTH` with a boot warning) and
+`WIDEVINE_DEDUP_ENFORCE` (Android) — don't route a gate decision through `enforce_auth`. `LOG_FORMAT` defaults to `text` in the binaries and `json` in
 compose — containers ship to Loki, `just run` is read by a human.
 
 ## Gotchas / forbidden

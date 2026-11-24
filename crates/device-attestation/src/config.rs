@@ -119,6 +119,11 @@ pub struct WidevineConfig {
 /// Apple DeviceCheck key material and endpoint (legacy env names).
 #[derive(Debug, Clone)]
 pub struct DeviceCheckConfig {
+    /// `DEVICE_CHECK_IOS_ENFORCE`: whether a device Apple reports as already
+    /// used is refused (`true`) or only reported (`false`). Independent of
+    /// `ENFORCE_AUTH`, which governs platform attestation; when unset it
+    /// inherits `ENFORCE_AUTH` so an upgrade keeps the previous posture.
+    pub enforce: bool,
     /// Apple Developer team id (`APPLE_TEAM_ID`) — the JWT issuer.
     pub team_id: String,
     /// DeviceCheck key id (`DEVICE_CHECK_KEY_ID`) — the JWT `kid`.
@@ -205,6 +210,16 @@ impl Config {
         }
 
         let enforce_auth = env_bool("ENFORCE_AUTH", false)?;
+        let (device_check, device_check_enforce_inherited) = parse_device_check(enforce_auth)?;
+        for warning in device_check_warnings(
+            device_check.as_ref(),
+            device_check_enforce_inherited,
+            auth_enabled,
+            enforce_auth,
+        ) {
+            // Warn, not fatal: an advisory or staged rollout is deliberate.
+            tracing::warn!(auth_enabled, enforce_auth, "{}", warning.message());
+        }
         let widevine = parse_widevine()?;
         // Warn, not fatal: an advisory rollout stage is deliberate.
         if widevine.as_ref().is_some_and(|w| w.enforce) && !(auth_enabled && enforce_auth) {
@@ -266,7 +281,7 @@ impl Config {
                 .map(|k| SecretBox::new(Box::new(k))),
             play_integrity_verification_key,
             google_credentials: parse_google_credentials()?,
-            device_check: parse_device_check()?,
+            device_check,
             widevine: parse_widevine()?,
         })
     }
@@ -504,10 +519,21 @@ fn parse_google_credentials(
 /// Parse the DeviceCheck block: `None` while `DEVICE_CHECK_IOS_ENABLED` is
 /// false; enabled, the legacy vars are required and the key must be a usable
 /// EC PEM (fail-fast).
-fn parse_device_check() -> Result<Option<DeviceCheckConfig>, ConfigError> {
+///
+/// `DEVICE_CHECK_IOS_ENFORCE` sets the gate's posture. Unset or empty, it
+/// inherits `enforce_auth` (the only behaviour before the flag existed), and
+/// the second value reports that it did.
+fn parse_device_check(
+    enforce_auth: bool,
+) -> Result<(Option<DeviceCheckConfig>, bool), ConfigError> {
     if !env_bool("DEVICE_CHECK_IOS_ENABLED", false)? {
-        return Ok(None);
+        return Ok((None, false));
     }
+    // TODO: in a follow-up release, once deployments
+    // have had a release to set it, make DEVICE_CHECK_IOS_ENFORCE required
+    // whenever DeviceCheck is enabled (fail boot instead of inheriting
+    // ENFORCE_AUTH), and drop `DeviceCheckWarning::Inherited` with it.
+    let explicit = env_bool_opt("DEVICE_CHECK_IOS_ENFORCE")?;
     let require = |key: &'static str| -> Result<String, ConfigError> {
         std::env::var(key)
             .map(|v| v.trim().to_string())
@@ -516,14 +542,71 @@ fn parse_device_check() -> Result<Option<DeviceCheckConfig>, ConfigError> {
             .ok_or(ConfigError::Missing(key))
     };
     let private_key_pem = validate_device_check_pem(&require("DEVICE_CHECK_PRIVATE_KEY")?)?;
-    Ok(Some(DeviceCheckConfig {
+    let config = DeviceCheckConfig {
+        enforce: explicit.unwrap_or(enforce_auth),
         team_id: require("APPLE_TEAM_ID")?,
         key_id: require("DEVICE_CHECK_KEY_ID")?,
         private_key_pem: SecretString::from(private_key_pem),
         base_url: std::env::var("DEVICE_CHECK_URL")
             .map(|v| v.trim().trim_end_matches('/').to_string())
             .unwrap_or_else(|_| "https://api.devicecheck.apple.com/v1".to_string()),
-    }))
+    };
+    Ok((Some(config), explicit.is_none()))
+}
+
+/// A DeviceCheck posture worth an operator's attention at boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceCheckWarning {
+    /// `DEVICE_CHECK_IOS_ENFORCE` is unset and the posture was inherited.
+    Inherited,
+    /// Enabled but advisory: a device Apple has seen still registers.
+    Advisory,
+    /// Enforced while platform attestation is not hard, so the `plt` claim
+    /// that routes a request to the gate is not attestation-backed.
+    EnforcedWithoutHardAuth,
+}
+
+impl DeviceCheckWarning {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Inherited => {
+                "DEVICE_CHECK_IOS_ENFORCE is unset; the DeviceCheck gate inherits \
+                 ENFORCE_AUTH (deprecated: a later release refuses to boot). Set it explicitly"
+            }
+            Self::Advisory => {
+                "DeviceCheck is enabled but advisory (DEVICE_CHECK_IOS_ENFORCE=false): \
+                 an iOS device Apple reports as already used still registers"
+            }
+            Self::EnforcedWithoutHardAuth => {
+                "DEVICE_CHECK_IOS_ENFORCE is set without hard attestation \
+                 (AUTH_ENABLED + ENFORCE_AUTH); the platform claim that routes \
+                 requests to the gate is not attestation-backed"
+            }
+        }
+    }
+}
+
+/// The boot warnings for a DeviceCheck configuration. Pure, so each posture
+/// can be tested without capturing logs.
+fn device_check_warnings(
+    device_check: Option<&DeviceCheckConfig>,
+    inherited: bool,
+    auth_enabled: bool,
+    enforce_auth: bool,
+) -> Vec<DeviceCheckWarning> {
+    let Some(dc) = device_check else {
+        return Vec::new();
+    };
+    let mut warnings = Vec::new();
+    if inherited {
+        warnings.push(DeviceCheckWarning::Inherited);
+    }
+    if !dc.enforce {
+        warnings.push(DeviceCheckWarning::Advisory);
+    } else if !(auth_enabled && enforce_auth) {
+        warnings.push(DeviceCheckWarning::EnforcedWithoutHardAuth);
+    }
+    warnings
 }
 
 /// Unescape (`\n` from single-line env injection) and validate a DeviceCheck
@@ -602,6 +685,16 @@ pub(crate) fn env_bool(key: &'static str, default: bool) -> Result<bool, ConfigE
     })
 }
 
+/// Like [`env_bool`], but unset and empty (or whitespace) are both `None`:
+/// compose passes an unset variable through as an empty string, and an
+/// optional flag must not read that as invalid.
+fn env_bool_opt(key: &'static str) -> Result<Option<bool>, ConfigError> {
+    match std::env::var(key) {
+        Ok(raw) if !raw.trim().is_empty() => env_bool(key, false).map(Some),
+        _ => Ok(None),
+    }
+}
+
 /// The accepted boolean tokens (case-insensitive). `None` = unrecognized, which
 /// the caller turns into a startup error.
 fn parse_bool(raw: &str) -> Option<bool> {
@@ -639,6 +732,7 @@ mod tests {
             SecretString::from("postgres://user:SUPER_SECRET_PW@localhost/db".to_string());
         config.play_integrity_decryption_key = Some(SecretBox::new(Box::new([9u8; 32])));
         config.device_check = Some(DeviceCheckConfig {
+            enforce: true,
             team_id: "TEAM123".to_string(),
             key_id: "KEY123".to_string(),
             private_key_pem: SecretString::from("BEGIN P8_SECRET_MATERIAL END".to_string()),
@@ -780,6 +874,109 @@ mod tests {
         let junk = base64::engine::general_purpose::STANDARD.encode([1u8; 40]);
         let err = decode_play_integrity_verification_key(&junk).unwrap_err();
         assert!(err.to_string().contains("EC P-256"), "{err}");
+    }
+
+    fn device_check_config(enforce: bool) -> DeviceCheckConfig {
+        DeviceCheckConfig {
+            enforce,
+            team_id: "TEAM123".to_string(),
+            key_id: "KEY123".to_string(),
+            private_key_pem: SecretString::from("unused".to_string()),
+            base_url: "https://api.devicecheck.apple.com/v1".to_string(),
+        }
+    }
+
+    #[test]
+    fn device_check_enforce_is_independent_of_enforce_auth() {
+        const VARS: &[&str] = &[
+            "DEVICE_CHECK_IOS_ENABLED",
+            "DEVICE_CHECK_IOS_ENFORCE",
+            "DEVICE_CHECK_PRIVATE_KEY",
+            "APPLE_TEAM_ID",
+            "DEVICE_CHECK_KEY_ID",
+            "DEVICE_CHECK_URL",
+        ];
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let clear = || VARS.iter().for_each(|k| std::env::remove_var(k));
+        clear();
+
+        // Disabled: no config, nothing inherited, whatever the flag says.
+        std::env::set_var("DEVICE_CHECK_IOS_ENFORCE", "true");
+        let (dc, inherited) = parse_device_check(true).unwrap();
+        assert!(dc.is_none() && !inherited);
+
+        let pem = rcgen::KeyPair::generate()
+            .expect("generate EC key")
+            .serialize_pem();
+        std::env::set_var("DEVICE_CHECK_IOS_ENABLED", "true");
+        std::env::set_var("DEVICE_CHECK_PRIVATE_KEY", &pem);
+        std::env::set_var("APPLE_TEAM_ID", "TEAM123");
+        std::env::set_var("DEVICE_CHECK_KEY_ID", "KEY123");
+        let parse = |enforce_auth: bool| {
+            let (dc, inherited) = parse_device_check(enforce_auth).unwrap();
+            (dc.expect("enabled").enforce, inherited)
+        };
+
+        // Unset, and empty as compose injects it: inherit ENFORCE_AUTH.
+        for unset in [None, Some(""), Some("  ")] {
+            match unset {
+                None => std::env::remove_var("DEVICE_CHECK_IOS_ENFORCE"),
+                Some(v) => std::env::set_var("DEVICE_CHECK_IOS_ENFORCE", v),
+            }
+            assert_eq!(parse(true), (true, true), "{unset:?}");
+            assert_eq!(parse(false), (false, true), "{unset:?}");
+        }
+
+        // Explicit wins in both directions.
+        std::env::set_var("DEVICE_CHECK_IOS_ENFORCE", "true");
+        assert_eq!(parse(false), (true, false));
+        std::env::set_var("DEVICE_CHECK_IOS_ENFORCE", "false");
+        assert_eq!(parse(true), (false, false));
+
+        // Garbage never silently picks a posture for a security gate.
+        std::env::set_var("DEVICE_CHECK_IOS_ENFORCE", "maybe");
+        assert!(matches!(
+            parse_device_check(true),
+            Err(ConfigError::Invalid {
+                key: "DEVICE_CHECK_IOS_ENFORCE",
+                ..
+            })
+        ));
+
+        clear();
+    }
+
+    #[test]
+    fn device_check_warnings_name_each_risky_posture() {
+        use DeviceCheckWarning::*;
+
+        assert!(device_check_warnings(None, false, false, false).is_empty());
+
+        let enforced = device_check_config(true);
+        let advisory = device_check_config(false);
+        // Explicitly enforced under hard attestation: nothing to say.
+        assert!(device_check_warnings(Some(&enforced), false, true, true).is_empty());
+        // The audit's trap: enabled, but a seen device still registers.
+        assert_eq!(
+            device_check_warnings(Some(&advisory), false, true, true),
+            vec![Advisory]
+        );
+        // Enforced while attestation is off or soft.
+        for (auth_enabled, enforce_auth) in [(false, false), (true, false), (false, true)] {
+            assert_eq!(
+                device_check_warnings(Some(&enforced), false, auth_enabled, enforce_auth),
+                vec![EnforcedWithoutHardAuth]
+            );
+        }
+        // Inherited is always flagged, alongside whatever it resolved to.
+        assert_eq!(
+            device_check_warnings(Some(&advisory), true, false, false),
+            vec![Inherited, Advisory]
+        );
+        assert_eq!(
+            device_check_warnings(Some(&enforced), true, true, true),
+            vec![Inherited]
+        );
     }
 
     #[test]

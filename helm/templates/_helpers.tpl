@@ -207,6 +207,18 @@ chart every time, so a `fail` here is the last check that always runs.
   {{- end }}
   {{- end }}
 
+  {{/* DeviceCheck's posture is its own (security_findings#141): the binary
+       would inherit ENFORCE_AUTH when it is unset, which is exactly the
+       coupling that let a seen iOS device register under soft attestation.
+       A deployment that enables the gate must say whether it enforces. */}}
+  {{- $wenv := $w.env | default dict }}
+  {{- if eq (toString (index $wenv "DEVICE_CHECK_IOS_ENABLED" | default "false")) "true" }}
+  {{- $dcEnforce := toString (index $wenv "DEVICE_CHECK_IOS_ENFORCE" | default "") | trim }}
+  {{- if not (has $dcEnforce (list "true" "false")) }}
+  {{- fail (printf "%s.env enables DEVICE_CHECK_IOS_ENABLED but DEVICE_CHECK_IOS_ENFORCE is %q — set it to \"true\" (refuse a device Apple has seen) or \"false\" (report only)" $name $dcEnforce) }}
+  {{- end }}
+  {{- end }}
+
   {{/* Secrets: present (only where the workload actually runs — a disabled one
        needs nothing), declared, and never plaintext. */}}
   {{- range $key := $w.secretKeys | default list }}

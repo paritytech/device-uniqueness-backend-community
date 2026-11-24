@@ -93,6 +93,8 @@ jobs:
           refuse 'secrets.device-attestation-api.JWT_ED25519_SECRET=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE='
           refuse 'secrets.turn-api.TURN_SECRET=ZGV2LW9ubHktdHVybi1zZWNyZXQtY2hhbmdlLW1l'
           refuse 'global.env.JWT_ED25519_PUBLIC_KEY=0x8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c'
+          # DeviceCheck enabled without an explicit posture (security_findings#141).
+          refuse 'workloads.device-attestation-api.env.DEVICE_CHECK_IOS_ENABLED=true'
           echo "chart guards: ok"
 
   database:

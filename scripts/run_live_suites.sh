@@ -67,7 +67,11 @@ databases=(
 )
 
 cleanup() {
-  "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+  # `--profile '*'`: invite-tickets-postgres sits behind the invite-tickets
+  # profile. Naming it on `up` starts it anyway, but a plain `down` only sees
+  # the default-profile services, so it (and its volume) would outlive the run
+  # and hold its fixed port against the next one.
+  "${compose[@]}" --profile '*' down -v --remove-orphans >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 trap 'exit 130' INT

@@ -199,6 +199,9 @@ workloads:
       APPLE_APP_ATTEST_APP_IDS: ""
       APPLE_TEAM_ID: ""
       DEVICE_CHECK_IOS_ENABLED: "false"
+      # Required (true/false) once DEVICE_CHECK_IOS_ENABLED is "true": the
+      # chart refuses to inherit ENFORCE_AUTH silently.
+      DEVICE_CHECK_IOS_ENFORCE: ""
       DEVICE_CHECK_KEY_ID: ""
       # Non-blank default on purpose: the config reads a blank one as-is.
       DEVICE_CHECK_URL: "https://api.devicecheck.apple.com/v1"
@@ -278,6 +281,9 @@ workloads:
       AUTH_RATE_WINDOW_SECS: "60"
       CHALLENGE_TTL_SECS: "300"
       DEVICE_CHECK_IOS_ENABLED: "false"
+      # Required (true/false) once DEVICE_CHECK_IOS_ENABLED is "true": the
+      # chart refuses to inherit ENFORCE_AUTH silently.
+      DEVICE_CHECK_IOS_ENFORCE: ""
       DEVICE_CHECK_KEY_ID: ""
       # Non-blank default on purpose: the config reads a blank one as-is.
       DEVICE_CHECK_URL: "https://api.devicecheck.apple.com/v1"

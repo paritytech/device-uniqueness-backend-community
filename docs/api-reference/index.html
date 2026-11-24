@@ -1721,7 +1721,7 @@ against the base of the lite username in the same claim.</td></tr>
                 <span class="sc-code c200">200</span>
                 <span class="sc-label">OK</span>
               </div>
-              <div class="sc-desc">The device is not eligible for a free registration: hard-mode DeviceCheck found its free slot already used, enforced Widevine dedup found the device already recorded or the Android claim carried no evidence, or a concurrent claim won the device's slot. Not an error — a 200 outcome, and a terminal one: no claim is stored and there is no paid alternative. The value <code>PAYMENT_REQUIRED</code> is historical (the retired paid lane) and kept for client compatibility.</div>
+              <div class="sc-desc">The device is not eligible for a free registration: enforced DeviceCheck (<code>DEVICE_CHECK_IOS_ENFORCE</code>) found its free slot already used, enforced Widevine dedup found the device already recorded or the Android claim carried no evidence, or a concurrent claim won the device's slot. Not an error — a 200 outcome, and a terminal one: no claim is stored and there is no paid alternative. The value <code>PAYMENT_REQUIRED</code> is historical (the retired paid lane) and kept for client compatibility.</div>
             </div>
             <div class="status-card">
               <div class="sc-head">
@@ -1742,7 +1742,7 @@ against the base of the lite username in the same claim.</td></tr>
                 <span class="sc-code c401">401</span>
                 <span class="sc-label">UNAUTHORIZED</span>
               </div>
-              <div class="sc-desc">Missing or invalid bearer token, or hard-mode DeviceCheck required a usable Device-Token-iOS and none was present.</div>
+              <div class="sc-desc">Missing or invalid bearer token, or enforced DeviceCheck (<code>DEVICE_CHECK_IOS_ENFORCE</code>) required a usable Device-Token-iOS and none was present.</div>
             </div>
             <div class="status-card">
               <div class="sc-head">
