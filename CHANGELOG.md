@@ -8,6 +8,13 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+Runtime versions this release targets:
+
+| build      | People runtime      | spec_version |
+| ---------- | ------------------- | ------------ |
+| `testnet`  | `next-people-paseo` | 3006000      |
+| `polkadot` | `people-polkadot`   | 2005003      |
+
 **Upgrading.** No signing secret, verify key or chain endpoint has a default
 any more, in the binaries or in `docker-compose.yml`. Set `JWT_ED25519_SECRET`,
 `JWT_ED25519_PUBLIC_KEY` (or `JWT_JWKS_JSON`), `PEOPLE_RPC_URL`,
@@ -20,6 +27,11 @@ plan that rotation with the app teams. Local checkouts run `just dev-secrets`.
 
 ### Changed
 
+- **Vendored `testnet` metadata refreshed to v0.3.6.** `testnet` now builds
+  against `next-people-paseo` / `next-asset-hub-paseo` `3006000`
+  (individuality v0.3.6). No transaction-extension changes. `3005000` stays in
+  `KNOWN_RUNTIMES`, so a binary pointed at a node that has not upgraded yet
+  still signs.
 - **Published dev secrets are refused at boot.** `device-attestation-api`
   rejects the `0x0101..01` JWT seed, every verify-only service rejects its public
   key (pinned or inside `JWT_JWKS_JSON`), and `turn-api` rejects both TURN
