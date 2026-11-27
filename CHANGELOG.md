@@ -8,6 +8,8 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-27
+
 Runtime versions this release targets:
 
 | build      | People runtime      | spec_version |
@@ -15,7 +17,7 @@ Runtime versions this release targets:
 | `testnet`  | `next-people-paseo` | 3006000      |
 | `polkadot` | `people-polkadot`   | 2005003      |
 
-**Upgrading.** No signing secret, verify key or chain endpoint has a default
+**Upgrading from 0.9.x.** No signing secret, verify key or chain endpoint has a default
 any more, in the binaries or in `docker-compose.yml`. Set `JWT_ED25519_SECRET`,
 `JWT_ED25519_PUBLIC_KEY` (or `JWT_JWKS_JSON`), `PEOPLE_RPC_URL`,
 `ASSET_HUB_RPC_URL`, `CHAIN_WRITER_SIGNER_SURI`, `INVITE_INVITER_SIGNER_SURI`
@@ -892,7 +894,8 @@ same build:
   the literal placeholder `<base64-secret>`, and `turn-api` refuses to boot on
   invalid base64 — so the documented quickstart crash-looped one service.
 
-[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.10.0
 [0.9.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.9.0
 [0.8.2]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.8.2
 [0.8.1]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.8.1
